@@ -50,4 +50,6 @@ def test_skip_locked_two_workers_get_different_jobs():
         j2 = claim_job(s2)
         assert j1 and j2 and j1.id != j2.id
     finally:
-        s1.rollback(); s1.close(); s2.close()
+        s1.rollback()
+        s1.close()
+        s2.close()

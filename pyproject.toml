@@ -14,3 +14,5 @@ line-length = 140
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
 ignore = ["B008"]  # FastAPI Depends() 惯用法
+[tool.ruff.lint.per-file-ignores]
+"tests/conftest.py" = ["E402"]  # 必须先设置 DATABASE_URL 再导入 app
