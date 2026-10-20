@@ -11,7 +11,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app import models as m
-from app.db import SessionLocal
+from app.db import WorkerSession
 
 MAX_ATTEMPTS = 3
 LOCK_SECONDS = 120
@@ -45,7 +45,7 @@ def fail_job(db: Session, job: m.MemoryJob, err: str) -> None:
 def main() -> None:  # pragma: no cover
     logging.basicConfig(level=logging.INFO)
     while True:
-        with SessionLocal(info={"rls_bypass": True}) as db:
+        with WorkerSession() as db:
             job = claim_job(db)
             if not job:
                 time.sleep(2)

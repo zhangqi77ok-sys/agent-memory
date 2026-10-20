@@ -6,5 +6,9 @@ DO \$\$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'memsvc_app') THEN
     CREATE ROLE memsvc_app LOGIN PASSWORD '${APP_DB_PASSWORD:?set APP_DB_PASSWORD}' NOSUPERUSER NOBYPASSRLS;
   END IF;
+  -- Worker 账号：BYPASSRLS 但非超级用户；绕过权限由账号属性决定，应用会话无法自行开启
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'memsvc_worker') THEN
+    CREATE ROLE memsvc_worker LOGIN PASSWORD '${WORKER_DB_PASSWORD:?set WORKER_DB_PASSWORD}' NOSUPERUSER BYPASSRLS;
+  END IF;
 END \$\$;
 SQL

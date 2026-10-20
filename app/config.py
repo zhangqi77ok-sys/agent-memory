@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     app_env: str = "dev"  # dev | test | prod
     database_url: str = "sqlite:///./dev.db"  # 服务运行账号（非 owner/非超级用户）
+    worker_database_url: str | None = None  # Worker 账号 memsvc_worker（BYPASSRLS）；为空时用 database_url（仅 SQLite/开发）
     migrate_database_url: str | None = None  # 迁移账号（owner）；为空时用 database_url
     jwt_secret: str = "dev-only-change-me-32-bytes-minimum!"
     jwt_alg: str = "HS256"

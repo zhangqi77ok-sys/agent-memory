@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import select, text
 
 from app import models as m
-from app.db import SessionLocal, engine
+from app.db import SessionLocal, WorkerSession, engine, worker_engine
 from app.worker import claim_job
 
 pytestmark = pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="needs Postgres")
@@ -26,6 +26,24 @@ def test_service_account_is_not_superuser():
     with engine.connect() as c:
         su, bypass = c.execute(text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")).one()
     assert (su, bypass) == (False, False)
+
+
+def test_worker_account_bypasses_rls_but_is_not_superuser():
+    with worker_engine.connect() as c:
+        su, bypass = c.execute(text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")).one()
+    assert (su, bypass) == (False, True)
+
+
+def test_app_account_cannot_self_grant_bypass(db):
+    """负例：应用账号自己设 app.rls_bypass / 伪造其它会话变量，仍然看不到别人的行。"""
+    db.add(m.MemoryJob(user_id="bob", idempotency_key="kb", session_id="s"))
+    db.commit()
+    with SessionLocal(info={"user_id": "alice"}) as s:
+        s.execute(text("SELECT set_config('app.rls_bypass', 'on', true)"))
+        assert s.scalars(select(m.MemoryJob)).all() == []
+    with SessionLocal() as s:
+        s.execute(text("SELECT set_config('app.rls_bypass', 'on', true)"))
+        assert s.scalars(select(m.MemoryJob)).all() == []
 
 
 def _seed(db):
@@ -73,7 +91,7 @@ def test_skip_locked_two_workers_get_different_jobs(db):
     db.add_all([m.MemoryJob(user_id="u", idempotency_key="k1", session_id="s"),
                 m.MemoryJob(user_id="u", idempotency_key="k2", session_id="s")])
     db.commit()
-    s1, s2 = SessionLocal(info={"rls_bypass": True}), SessionLocal(info={"rls_bypass": True})
+    s1, s2 = WorkerSession(), WorkerSession()
     try:
         j1 = s1.scalar(select(m.MemoryJob).order_by(m.MemoryJob.created_at).limit(1).with_for_update(skip_locked=True))
         j2 = claim_job(s2)
