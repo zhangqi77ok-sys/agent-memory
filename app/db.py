@@ -10,7 +10,11 @@ class Base(DeclarativeBase):
 
 def make_engine(url: str | None = None):
     url = url or settings.database_url
-    kw = {"connect_args": {"check_same_thread": False}} if url.startswith("sqlite") else {"pool_pre_ping": True}
+    if url.startswith("sqlite"):
+        kw = {"connect_args": {"check_same_thread": False}}
+    else:
+        # connect_timeout：连不上就 10 秒报错，不会无限挂住（容器里 alembic 卡死的排查起点）
+        kw = {"pool_pre_ping": True, "connect_args": {"connect_timeout": 10}}
     return create_engine(url, **kw)
 
 
