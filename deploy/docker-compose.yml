@@ -32,7 +32,7 @@ services:
       DATABASE_URL: postgresql+psycopg://memsvc_app:${APP_DB_PASSWORD}@db:5432/memory
       MIGRATE_DATABASE_URL: postgresql+psycopg://memory:${POSTGRES_PASSWORD}@db:5432/memory
       ROLE: api
-    command: sh -c "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    command: sh -c "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --root-path \"$${ROOT_PATH:-}\" --proxy-headers --forwarded-allow-ips=*"
     depends_on: { db: { condition: service_healthy } }
     ports: ["${API_BIND:-127.0.0.1}:${API_PORT:-8000}:8000"]
     logging: *log
