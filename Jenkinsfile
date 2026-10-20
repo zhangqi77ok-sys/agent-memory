@@ -7,8 +7,8 @@
 pipeline {
   agent any
   options { buildDiscarder(logRotator(numToKeepStr: '10')); timeout(time: 30, unit: 'MINUTES'); timestamps() }
-  // webhook 为主（git/notifyCommit），轮询兜底
-  triggers { pollSCM('H/5 * * * *') }
+  // GitHub webhook（带签名密钥）为主，轮询兜底
+  triggers { githubPush(); pollSCM('H/2 * * * *') }
   parameters {
     string(name: 'DEPLOY_BRANCH', defaultValue: 'main', description: '只有这个分支会执行 构建/部署/冒烟')
     string(name: 'SMOKE_PATH', defaultValue: '/readyz', description: '冒烟路径；回滚演练时改成不存在的路径')
@@ -106,10 +106,11 @@ PY2
             sh '''
               T="$DEPLOY_USER@$DEPLOY_HOST"; SSH="ssh -o StrictHostKeyChecking=accept-new"
               $SSH $T "mkdir -p $APP_DIR/initdb"
-              scp -o StrictHostKeyChecking=accept-new -q deploy/docker-compose.yml deploy/backup.sh deploy/restore.sh $T:$APP_DIR/
+              scp -o StrictHostKeyChecking=accept-new -q deploy/docker-compose.yml deploy/backup.sh deploy/restore.sh deploy/ensure-roles.sh $T:$APP_DIR/
               scp -q deploy/initdb/* $T:$APP_DIR/initdb/
               scp -q "$ENVF" $T:$APP_DIR/.env
-              $SSH $T "cd $APP_DIR && chmod 600 .env && chmod +x backup.sh restore.sh &&
+              $SSH $T "cd $APP_DIR && chmod 600 .env && chmod +x backup.sh restore.sh ensure-roles.sh &&
+                docker compose -p agent-memory up -d --wait db && ./ensure-roles.sh &&
                 echo $DEPLOY_IMAGE:$TAG > .last_tag.new &&
                 IMAGE=$DEPLOY_IMAGE TAG=$TAG docker compose -p agent-memory up -d --remove-orphans"
             '''
