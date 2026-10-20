@@ -25,7 +25,7 @@ pipeline {
       steps {
         script {
           env.BR = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: '').replaceFirst(/^origin\//, '')
-          env.DO_DEPLOY = (env.BR == params.DEPLOY_BRANCH) ? 'true' : 'false'
+          env.DO_DEPLOY = (env.BR == (params.DEPLOY_BRANCH ?: 'main')) ? 'true' : 'false'
           env.TAG = "${env.GIT_COMMIT.take(12)}-b${env.BUILD_NUMBER}"
           env.DEPLOY_USER = env.DEPLOY_USER ?: 'deploy'
           // 分支第一次构建时参数还没注册，$SMOKE_PATH 环境变量为空 → 冒烟打到 / 得 404；这里显式兜底
