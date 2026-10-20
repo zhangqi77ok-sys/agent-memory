@@ -12,6 +12,15 @@
 ## 不在 v1
 情景记忆、图谱、后台整合；任务状态与 checkpoint 属于 tiancode Runtime。
 
+## 文档
+| 文档 | 给谁看 | 内容 |
+|---|---|---|
+| [architecture.md](docs/architecture.md) | 所有人 | 唯一的架构出处 |
+| [api.md](docs/api.md) | 调用方 | 接口、示例、错误码、幂等规则 |
+| [eval.md](docs/eval.md) | 开发/评审 | 四类评测与门禁 |
+| deploy.md / runbook.md | 运维 | 由 Docker运维 补充 |
+| [adr/](docs/adr/) | 面试/评审 | 关键取舍 |
+
 ## 设计参考
 借鉴 Mem0 的抽取+多信号检索、Graphiti 的时序失效模型，见 `docs/architecture.md`。
 
