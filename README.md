@@ -17,3 +17,19 @@
 
 ## 数据安全
 代码在 GitHub；数据库每日 `pg_dump` 异地备份（见 `deploy/`），机器丢失可重建。
+
+## 本地运行
+```bash
+python -m venv .venv && . .venv/bin/activate
+pip install -e '.[dev]'
+pytest -q                       # SQLite 单测
+uvicorn app.main:app --reload   # 默认 SQLite
+```
+
+## 部署
+`deploy/docker-compose.yml`（api + pgvector），`Jenkinsfile`（gitleaks → lint/test → 构建推 GHCR → 部署 proxy-4 → /readyz 冒烟，失败回滚上一个 tag），`deploy/backup.sh` / `deploy/restore.sh`。
+
+## 当前状态（骨架）
+- 已实现：鉴权（JWT→用户）、写入入队（幂等）、召回（预过滤有效事实，关键词打分占位）、遗忘（删所有版本 + forgotten_id）、Worker 任务领取与死信、v1 迁移（Postgres 下含 pgvector/HNSW/GIN/RLS）。
+- 未实现：LLM 抽取管线、向量 + BM25 + RRF、摘要、`/v1/me` 其余接口。
+- 未验证：Postgres 上的迁移与 Compose 启动、Jenkins 实跑（待 proxy-3/proxy-4 实测）。

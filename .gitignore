@@ -4,3 +4,8 @@ __pycache__/
 *.pyc
 *.dump
 *.sql.gz
+*.egg-info/
+*.db
+.pytest_cache/
+.ruff_cache/
+report.xml
