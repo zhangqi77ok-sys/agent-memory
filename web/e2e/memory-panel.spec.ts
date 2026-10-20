@@ -146,3 +146,30 @@ test('happy path: consent → list → correct → delete → clear', async ({ p
   await page.getByTestId('confirm-ok').click()
   await expect(page.getByTestId('empty-list')).toBeVisible()
 })
+
+async function enterPanel(page: Page) {
+  await mockApi(page)
+  await page.goto('?token=test.jwt')
+  await page.getByTestId('consent-check').check()
+  await page.getByTestId('consent-submit').click()
+  await expect(page.getByTestId('memory-panel')).toBeVisible()
+}
+
+test('export downloads a JSON file', async ({ page }) => {
+  await enterPanel(page)
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByTestId('export-btn').click(),
+  ])
+  expect(download.suggestedFilename()).toMatch(/^my-memories-.*\.json$/)
+  await expect(page.getByTestId('notice')).toContainText('导出')
+})
+
+test('turning off master toggle shows 不再写入 notice', async ({ page }) => {
+  await enterPanel(page)
+  const toggle = page.getByTestId('master-toggle')
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  await toggle.click()
+  await expect(page.getByTestId('notice')).toContainText('不再写入')
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+})

@@ -54,7 +54,7 @@ pipeline {
     }
 
     stage('Frontend') {
-      // Vue 面板：npm ci / vitest / build。有 web/package.json 才跑，兼容旧分支。
+      // Vue 面板：npm ci / vitest / build / Playwright e2e。有 web/package.json 才跑，兼容旧分支。
       when { expression { fileExists('web/package.json') } }
       steps {
         sh '''
@@ -62,6 +62,10 @@ pipeline {
           npm ci
           npm test
           npm run build
+          # Playwright e2e（mock API）：浏览器缓存在 workspace 内，--with-deps 需要 root/apt，失败时退回只装浏览器
+          export PLAYWRIGHT_BROWSERS_PATH=$PWD/.pw-browsers
+          npx playwright install --with-deps chromium || npx playwright install chromium
+          CI=1 npm run test:e2e
         '''
       }
     }
@@ -154,19 +158,28 @@ PY2
         sshagent(['deploy-ssh']) {
           sh '''
             ssh $DEPLOY_USER@$DEPLOY_HOST "cd $APP_DIR && P=\\$(grep ^API_PORT= .env | cut -d= -f2); P=\\${P:-8000};
-              for i in \\$(seq 1 30); do c=\\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:\\$P$SMOKE_PATH); echo smoke \\$i \\$c; [ \\"\\$c\\" = 200 ] && exit 0; sleep 3; done; exit 1"
+              W=\\$(grep ^WEB_PORT= .env | cut -d= -f2); W=\\${W:-8091};
+              ok=0; for i in \\$(seq 1 30); do c=\\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:\\$P$SMOKE_PATH); echo smoke api \\$i \\$c; [ \\"\\$c\\" = 200 ] && ok=1 && break; sleep 3; done; [ \\$ok = 1 ] || exit 1;
+              for i in \\$(seq 1 20); do c=\\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:\\$W/memory/ui/); echo smoke web \\$i \\$c; [ \\"\\$c\\" = 200 ] && exit 0; sleep 3; done; exit 1"
           '''
         }
       }
       post {
         success { sshagent(['deploy-ssh']) { sh 'ssh $DEPLOY_USER@$DEPLOY_HOST "cd $APP_DIR && mv .last_tag.new .last_tag && echo current=\\$(cat .last_tag)"' } }
         failure {
+          // 回滚：api/worker/web 共用 .last_tag 里的同一个 TAG，显式传 WEB_TAG，绝不回落到 latest
           sshagent(['deploy-ssh']) {
             sh '''
               ssh $DEPLOY_USER@$DEPLOY_HOST "cd $APP_DIR && rm -f .last_tag.new &&
                 if [ ! -s .last_tag ]; then echo 'ROLLBACK: 没有上一个成功版本，无法回滚'; exit 1; fi &&
-                PREV=\\$(cat .last_tag) && echo ROLLBACK to \\$PREV &&
-                IMAGE=\\${PREV%:*} TAG=\\${PREV##*:} docker compose -p agent-memory up -d &&
+                PREV=\\$(cat .last_tag) && PI=\\${PREV%:*} && PT=\\${PREV##*:} && echo ROLLBACK to tag \\$PT &&
+                if docker image inspect $WEB_GHCR_IMAGE:\\$PT >/dev/null 2>&1 || docker pull $WEB_GHCR_IMAGE:\\$PT; then
+                  IMAGE=\\$PI TAG=\\$PT WEB_IMAGE=$WEB_GHCR_IMAGE WEB_TAG=\\$PT docker compose -p agent-memory up -d;
+                else
+                  echo 'ROLLBACK: 上一版本没有 web 镜像（web 上线前的 tag），只回滚 api/worker 并停掉 web';
+                  IMAGE=\\$PI TAG=\\$PT WEB_IMAGE=$WEB_GHCR_IMAGE WEB_TAG=\\$PT docker compose -p agent-memory up -d --no-deps db api worker &&
+                  docker compose -p agent-memory stop web;
+                fi &&
                 P=\\$(grep ^API_PORT= .env | cut -d= -f2); for i in \\$(seq 1 30); do c=\\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:\\${P:-8000}/readyz); [ \\"\\$c\\" = 200 ] && echo ROLLBACK OK readyz=200 && exit 0; sleep 3; done; exit 1"
             '''
           }

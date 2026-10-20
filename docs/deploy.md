@@ -70,7 +70,7 @@ Jenkins 全局环境变量：`DEPLOY_HOST`（Jenkins 容器访问宿主用 docke
 
 ## 前端预留（还没做）
 - 访问路径：`/memory/ui/`，nginx 已预留 `location /memory/ui/ → 127.0.0.1:8091/`（必须写在 `/memory/` 之前）。
-- 前端：仓库 `web/`（Vue3），Jenkins `Frontend` 阶段跑 `npm ci && npm test && npm run build`；镜像 `ghcr.io/zhangqi77ok-sys/agent-memory-web`，compose 服务名 `web`，默认绑定 `127.0.0.1:8080`。外层 Nginx 把 `/memory/ui/` 转到该容器（由运维配置）。和 api 共用同一次部署的 TAG、同一次回滚。
+- 前端：仓库 `web/`（Vue3），Jenkins `Frontend` 阶段跑 `npm ci && npm test && npm run build`；镜像 `ghcr.io/zhangqi77ok-sys/agent-memory-web`，compose 服务名 `web`，默认绑定 `127.0.0.1:8091`。外层 Nginx 把 `/memory/ui/` 转到该容器（由运维配置）。和 api 共用同一次部署的 TAG、同一次回滚。
 - 前端调接口用相对路径 `/memory/v1/...`，同源，不需要 CORS。
 
 ## 规则
