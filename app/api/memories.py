@@ -28,6 +28,10 @@ def _audit(db: Session, u: UserContext, action: str, ids: list[str]) -> None:
 @router.post("/memories", status_code=202, response_model=WriteAccepted)
 def write(req: WriteRequest, response: Response, idempotency_key: str = Header(...),
           u: UserContext = Depends(current_user), db: Session = Depends(get_db)):
+    from app.api.me import memory_enabled  # 避免循环导入
+    if not memory_enabled(db, u):
+        # 未同意或已暂停：不落任何数据（连原始消息都不存），调用方照常继续
+        return WriteAccepted(job_id=None, duplicate=False, skipped=True)
     existing = db.scalar(select(m.MemoryJob).where(
         m.MemoryJob.tenant_id == u.tenant_id, m.MemoryJob.user_id == u.user_id,
         m.MemoryJob.idempotency_key == idempotency_key))
@@ -52,6 +56,9 @@ def write(req: WriteRequest, response: Response, idempotency_key: str = Header(.
 
 @router.post("/memories/recall", response_model=RecallResponse)
 def recall(req: RecallRequest, u: UserContext = Depends(current_user), db: Session = Depends(get_db)):
+    from app.api.me import memory_enabled
+    if not memory_enabled(db, u):
+        return RecallResponse(preferences={}, facts=[])
     prefs = db.scalars(select(m.MemoryPreference).where(
         m.MemoryPreference.tenant_id == u.tenant_id, m.MemoryPreference.user_id == u.user_id,
         m.MemoryPreference.valid_to.is_(None))).all()

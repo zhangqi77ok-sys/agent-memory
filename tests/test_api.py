@@ -1,7 +1,7 @@
 from datetime import UTC
 
 from app import models as m
-from tests.conftest import token
+from tests.conftest import consent, token
 
 
 def _write(client, user, key="k1"):
@@ -19,6 +19,7 @@ def test_requires_token(client):
 
 
 def test_write_is_idempotent(client):
+    consent(client, 'alice')
     a, b = _write(client, "alice"), _write(client, "alice")
     assert a.status_code == b.status_code == 202
     assert a.json()["job_id"] == b.json()["job_id"] and b.json()["duplicate"] is True
@@ -30,6 +31,7 @@ def test_body_cannot_carry_identity(client):
 
 
 def test_no_cross_user_recall(client, db):
+    consent(client, 'alice')
     db.add(m.MemoryFact(user_id="bob", subject="lang", content="bob 喜欢 Go"))
     db.add(m.MemoryFact(user_id="alice", subject="lang", content="alice 喜欢 Python"))
     db.commit()
@@ -38,6 +40,7 @@ def test_no_cross_user_recall(client, db):
 
 
 def test_invalidated_fact_not_recalled(client, db):
+    consent(client, 'alice')
     from datetime import datetime
     db.add(m.MemoryFact(user_id="alice", subject="city", content="住在北京", valid_to=datetime.now(UTC), version=1))
     db.add(m.MemoryFact(user_id="alice", subject="city", content="住在成都", version=2))
@@ -63,6 +66,7 @@ def test_forget_deletes_all_versions_and_hides_others(client, db):
 
 def test_irrelevant_facts_not_recalled(client, db):
     """回归：Docker运维 演练发现查「咖啡」会把猫那条也返回（分数 0.0）。"""
+    consent(client, "alice")
     db.add_all([m.MemoryFact(user_id="alice", subject="drink", content="每天早上喝一杯咖啡"),
                 m.MemoryFact(user_id="alice", subject="pet", content="养了一只橘猫"),
                 m.MemoryFact(user_id="alice", subject="lang", content="I like Python"),

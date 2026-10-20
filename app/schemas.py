@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -18,8 +20,9 @@ class WriteRequest(Strict):
 
 
 class WriteAccepted(BaseModel):
-    job_id: str
+    job_id: str | None
     duplicate: bool
+    skipped: bool = False  # 用户未同意或已暂停记忆：本次没有写入
 
 
 class RecallRequest(Strict):
@@ -39,3 +42,49 @@ class FactOut(BaseModel):
 class RecallResponse(BaseModel):
     preferences: dict[str, str]
     facts: list[FactOut]
+
+
+CONSENT_VERSION = "2026-10-v1"
+
+
+class MemoryItem(BaseModel):
+    id: str
+    kind: str  # fact | preference
+    subject: str  # 事实的主题 / 偏好的 key
+    content: str
+    version: int
+    valid_from: datetime
+    source_session_id: str | None = None
+
+
+class MemoryPage(BaseModel):
+    items: list[MemoryItem]
+    total: int
+    offset: int
+    limit: int
+
+
+class CorrectRequest(Strict):
+    content: str = Field(min_length=1, max_length=2000)
+
+
+class SettingsOut(BaseModel):
+    memory_enabled: bool
+    consent_version: str | None
+    consent_at: datetime | None
+    current_consent_version: str = CONSENT_VERSION
+
+
+class SettingsIn(Strict):
+    memory_enabled: bool
+    # 首次开启必须带上同意的隐私说明版本；版本不对返回 409，前端重新展示授权页
+    consent_version: str | None = None
+
+
+class JobOut(BaseModel):
+    job_id: str
+    session_id: str
+    status: str
+    attempts: int
+    last_error: str | None
+    created_at: datetime

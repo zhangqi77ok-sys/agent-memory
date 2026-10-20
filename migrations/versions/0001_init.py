@@ -10,13 +10,17 @@ from app.db import Base
 revision = "0001_init"
 down_revision = None
 
+# 冻结 0001 建的表：之后新增的模型必须走自己的迁移，不能被这里的 create_all 顺手建掉
+V1_TABLES = ("session_message", "memory_fact", "memory_preference", "session_summary", "memory_job",
+             "forgotten_id", "audit_log")
+
 
 def upgrade():
     bind = op.get_bind()
     is_pg = bind.dialect.name == "postgresql"
     if is_pg:
         op.execute("CREATE EXTENSION IF NOT EXISTS vector")
-    Base.metadata.create_all(bind)
+    Base.metadata.create_all(bind, tables=[Base.metadata.tables[t] for t in V1_TABLES])
     if is_pg:
         op.execute("CREATE INDEX IF NOT EXISTS ix_fact_active ON memory_fact (tenant_id, user_id) WHERE valid_to IS NULL")
         op.execute("CREATE INDEX IF NOT EXISTS ix_fact_hnsw ON memory_fact USING hnsw (embedding vector_cosine_ops)")
@@ -30,4 +34,4 @@ def upgrade():
 
 
 def downgrade():
-    Base.metadata.drop_all(op.get_bind())
+    Base.metadata.drop_all(op.get_bind(), tables=[Base.metadata.tables[t] for t in V1_TABLES])

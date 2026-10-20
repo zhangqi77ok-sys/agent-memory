@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from sqlalchemy import text
 
+from app.api.me import router as me_router
 from app.api.memories import router as memories_router
 from app.config import check_settings, settings
 from app.db import engine
@@ -13,6 +14,7 @@ app = FastAPI(title="agent-memory", version="0.1.0",
               docs_url="/docs" if _docs else None, redoc_url=None,
               openapi_url="/openapi.json" if _docs else None)
 app.include_router(memories_router)
+app.include_router(me_router)
 
 
 @app.get("/healthz")

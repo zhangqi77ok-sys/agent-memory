@@ -46,12 +46,37 @@
 - **幂等**：重复删除返回 `404`，无副作用。
 - 🚧 级联：重生成受影响的会话摘要、删除来源原文。
 
+## 授权同意与总开关 ✅　`GET/PUT /v1/me/settings`
+- **默认关闭**：用户没同意之前，`POST /v1/memories` 返回 `202 {"job_id": null, "skipped": true}`，**什么都不存**（连原始消息都不存）；召回返回空。调用方（tiancode）照常继续，不用特殊处理。
+- 开启：`PUT {"memory_enabled": true, "consent_version": "2026-10-v1"}`。版本必须等于 `GET` 返回的 `current_consent_version`，否则 `409 consent_required`，前端重新展示授权页。隐私说明改版时升版本号，老用户需要重新同意。
+- 关闭：`PUT {"memory_enabled": false}`，立即生效：不写入、不召回，**已有数据保留**（要删请用清空）。再次开启同一版本无需重新同意。
+
+## 查看我的记忆 ✅　`GET /v1/me/memories?kind=fact|preference&offset=0&limit=50`
+- v1 先全量查出再在内存里分页（单用户条数有上限，见架构文档）；数据量上来后改成 SQL 分页。
+- 只列当前有效版本，按时间倒序；每条带 `kind`、`subject`、`version`、`valid_from`、`source_session_id`（来源会话）。
+
+## 纠正一条 ✅　`PATCH /v1/me/memories/{id}`　`{"content": "..."}`
+- 事实或偏好都可以。旧版本 `valid_to=now` 失效，新建 `version+1`；召回只会看到新版本。
+- `404`：不存在、已经失效、或不属于当前用户。
+
+## 全部清空 ✅　`DELETE /v1/me/memories`
+- `204`：删除我的事实（含历史版本和向量）、偏好、摘要、原始消息、写入任务；id 记入 `forgotten_id`，备份恢复后据此重删。设置（是否同意）保留。v1 同步执行。
+- 前端必须二次确认。
+
+## 导出 ✅　`GET /v1/me/memories/export`
+- 返回 JSON：设置、全部事实（含历史版本）、偏好；不含向量。写一条审计。
+
+## 写入任务状态 ✅　`GET /v1/me/jobs?limit=20`
+- 最近的写入任务：`pending / running / done / dead`、重试次数、最后错误。
+
 ## 🚧 待实现（v1 范围内）
 | 接口 | 说明 |
 |---|---|
 | `POST /v1/sessions/{id}/summarize` | 增量滚动摘要 |
-| `GET /v1/me/memories` | 查看我的记忆（分页，含来源） |
-| `PATCH /v1/me/memories/{id}` | 纠正，生成新版本 |
-| `DELETE /v1/me/memories` | 全部清空（异步） |
-| `GET /v1/me/memories/export` | 导出 JSON |
-| `PUT /v1/me/settings` | `{memory_enabled}` 暂停/开启记忆 |
+
+## 迁移规矩
+- 已经部署过的迁移文件**不准再改**，任何调整都新开一个迁移。（#5 收窄 0001 的建表范围是唯一一次例外：已有库不会重跑 0001，影响限于新建库。）
+
+## 已知边界
+- 行级权限防的是「代码漏写用户条件」。`app.user_id` 由服务按 JWT 的 `sub` 设置，应用账号本身仍能改这个变量，所以**谁是当前用户由 JWT 校验 + 服务代码保证**，不是由数据库保证。Worker 用独立 `BYPASSRLS` 账号，应用账号无法绕过。
+- `deploy/initdb` 只在数据库卷为空时执行；已有数据库需要手动建 `memsvc_app` / `memsvc_worker`（见 runbook）。
