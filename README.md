@@ -20,6 +20,8 @@
 | [eval.md](docs/eval.md) | 开发/评审 | 四类评测与门禁 |
 | deploy.md / runbook.md | 运维 | 由 Docker运维 补充 |
 | [adr/](docs/adr/) | 面试/评审 | 关键取舍 |
+| [lessons/me-ui.md](docs/lessons/me-ui.md) | 演示/面试 | 「我的记忆」面板四条合规演示 |
+| [web/](web/) | 前端 | C 端面板（Vue3 + Vite，路径 `/memory/ui/`） |
 
 ## 设计参考
 借鉴 Mem0 的抽取+多信号检索、Graphiti 的时序失效模型，见 `docs/architecture.md`。
@@ -43,5 +45,6 @@ uvicorn app.main:app --reload   # 默认 SQLite
 
 ## 当前状态（骨架）
 - 已实现：鉴权（JWT→用户）、写入入队（幂等）、召回（预过滤有效事实，关键词打分占位）、遗忘（删所有版本 + forgotten_id）、Worker 任务领取与死信、v1 迁移（Postgres 下含 pgvector/HNSW/GIN/RLS）。
-- 未实现：LLM 抽取管线、向量 + BM25 + RRF、摘要、`/v1/me` 其余接口。
+- 已实现（面板）：`/v1/me/*` + `web/`「我的记忆」前端（同意、列表、纠正、删除、清空、导出、总开关、任务状态）。
+- 未实现：LLM 抽取管线、向量 + BM25 + RRF、摘要。
 - 已验证：Postgres 上的迁移与 Compose 启动、Jenkins 实跑、GHCR 推送、自动回滚、备份恢复+遗忘重删。

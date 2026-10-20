@@ -51,5 +51,15 @@ services:
     logging: *log
     restart: unless-stopped
 
+  web:
+    # C 端「我的记忆」面板；静态资源路径 /memory/ui/
+    image: ${WEB_IMAGE:-ghcr.io/zhangqi77ok-sys/agent-memory-web}:${WEB_TAG:-latest}
+    build:
+      context: ../web
+      dockerfile: Dockerfile
+    ports: ["${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8080}:80"]
+    logging: *log
+    restart: unless-stopped
+
 volumes:
   pgdata:

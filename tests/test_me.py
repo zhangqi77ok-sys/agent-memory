@@ -119,3 +119,17 @@ def test_me_endpoints_require_token(client):
     for method, path in [("get", "/v1/me/memories"), ("get", "/v1/me/settings"), ("delete", "/v1/me/memories"),
                          ("get", "/v1/me/memories/export"), ("get", "/v1/me/jobs")]:
         assert getattr(client, method)(path).status_code == 401
+
+def test_delete_preference_removes_all_versions(client, db):
+    from datetime import UTC, datetime
+    old = m.MemoryPreference(user_id="alice", key="lang", value="en", version=1, valid_to=datetime.now(UTC))
+    cur = m.MemoryPreference(user_id="alice", key="lang", value="zh", version=2)
+    other = m.MemoryPreference(user_id="bob", key="lang", value="ja")
+    db.add_all([old, cur, other])
+    db.commit()
+    assert client.delete(f"/v1/me/memories/{cur.id}", headers=token("alice")).status_code == 204
+    db.expire_all()
+    assert db.query(m.MemoryPreference).filter_by(user_id="alice").count() == 0
+    assert db.query(m.MemoryPreference).filter_by(user_id="bob").count() == 1
+    assert db.query(m.ForgottenId).filter_by(kind="preference").count() == 2
+

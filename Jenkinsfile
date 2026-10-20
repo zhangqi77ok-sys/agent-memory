@@ -16,7 +16,9 @@ pipeline {
   }
   environment {
     GHCR_IMAGE = 'ghcr.io/zhangqi77ok-sys/agent-memory'
+    WEB_GHCR_IMAGE = 'ghcr.io/zhangqi77ok-sys/agent-memory-web'
     LOCAL_IMAGE = 'agent-memory'
+    WEB_LOCAL_IMAGE = 'agent-memory-web'
     APP_DIR = '/opt/agent-memory'
     CI_NET = 'jenkins_default'   // Jenkins 容器所在网络，CI 临时 Postgres 也挂这里
   }
@@ -50,6 +52,19 @@ pipeline {
       }
       post { always { junit testResults: 'report-sqlite.xml', allowEmptyResults: false } }
     }
+
+    stage('Frontend') {
+      // Vue 面板：npm ci / vitest / build。有 web/package.json 才跑，兼容旧分支。
+      when { expression { fileExists('web/package.json') } }
+      steps {
+        sh '''
+          cd web
+          npm ci
+          npm test
+          npm run build
+        '''
+      }
+    }
     stage('Test on Postgres') {
       // 行级权限、pgvector 索引、SKIP LOCKED 只有真实 Postgres 才能验证
       steps {
@@ -78,7 +93,14 @@ PY2
     }
     stage('Build image') {
       // 所有分支都构建镜像（验证 Dockerfile），只有 DEPLOY_BRANCH 推送和部署
-      steps { sh 'docker build -t $LOCAL_IMAGE:$TAG -t $GHCR_IMAGE:$TAG .' }
+      steps {
+        sh '''
+          docker build -t $LOCAL_IMAGE:$TAG -t $GHCR_IMAGE:$TAG .
+          if [ -f web/Dockerfile ]; then
+            docker build -t $WEB_LOCAL_IMAGE:$TAG -t $WEB_GHCR_IMAGE:$TAG web
+          fi
+        '''
+      }
     }
     stage('Push GHCR') {
       // 只在部署分支运行；缺少/过期的 ghcr-token 直接让构建失败，绝不静默部署本地镜像
@@ -89,6 +111,10 @@ PY2
             echo "$P" | docker login ghcr.io -u "$U" --password-stdin
             docker push $GHCR_IMAGE:$TAG
             docker tag $GHCR_IMAGE:$TAG $GHCR_IMAGE:latest && docker push $GHCR_IMAGE:latest
+            if docker image inspect $WEB_GHCR_IMAGE:$TAG >/dev/null 2>&1; then
+              docker push $WEB_GHCR_IMAGE:$TAG
+              docker tag $WEB_GHCR_IMAGE:$TAG $WEB_GHCR_IMAGE:latest && docker push $WEB_GHCR_IMAGE:latest
+            fi
           '''
         }
         script { env.DEPLOY_IMAGE = env.GHCR_IMAGE }
@@ -110,12 +136,13 @@ PY2
               # GHCR 包是私有的：部署机用同一个 ghcr-token 登录，镜像不在本机时也能 pull
               if [ "$DEPLOY_IMAGE" = "$GHCR_IMAGE" ] && [ -n "${GHCR_P:-}" ]; then
                 echo "$GHCR_P" | $SSH $T "docker login ghcr.io -u $GHCR_U --password-stdin" && \
-                $SSH $T "docker image inspect $DEPLOY_IMAGE:$TAG >/dev/null 2>&1 || docker pull $DEPLOY_IMAGE:$TAG"
+                $SSH $T "docker image inspect $DEPLOY_IMAGE:$TAG >/dev/null 2>&1 || docker pull $DEPLOY_IMAGE:$TAG" && \
+                $SSH $T "docker image inspect $WEB_GHCR_IMAGE:$TAG >/dev/null 2>&1 || docker pull $WEB_GHCR_IMAGE:$TAG"
               fi
               $SSH $T "cd $APP_DIR && chmod 600 .env && chmod +x backup.sh restore.sh ensure-roles.sh &&
                 docker compose -p agent-memory up -d --wait db && ./ensure-roles.sh &&
                 echo $DEPLOY_IMAGE:$TAG > .last_tag.new &&
-                IMAGE=$DEPLOY_IMAGE TAG=$TAG docker compose -p agent-memory up -d --remove-orphans"
+                WEB_IMAGE=$WEB_GHCR_IMAGE WEB_TAG=$TAG IMAGE=$DEPLOY_IMAGE TAG=$TAG docker compose -p agent-memory up -d --remove-orphans"
             '''
           }
         }
