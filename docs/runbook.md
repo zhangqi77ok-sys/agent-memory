@@ -49,3 +49,15 @@ worker 失败 3 次的任务 `status='dead'`。查：`SELECT id,last_error FROM 
 `deploy/initdb/01-app-role.sh` 只在数据卷第一次初始化时跑。卷已存在（比如从旧版本升级、换了密码）时，
 流水线 Deploy 阶段会在迁移前执行 `./ensure-roles.sh`：幂等创建 `memsvc_app`（NOBYPASSRLS）和 `memsvc_worker`（BYPASSRLS），
 并把密码对齐成 `.env` 里的 `APP_DB_PASSWORD` / `WORKER_DB_PASSWORD`。手动执行同一个脚本即可。
+
+## 8. 部署/回滚期间的短暂不可用
+- **现象**：部署或自动回滚时，`/memory/` 会短暂返回 502。实测 main #4（冒烟失败→自动回滚）期间约 1–2 分钟 502。
+- **原因**：
+  1. `docker compose up -d` 是**原地重建**：先停旧 api 容器再起新容器，新容器还要跑 `alembic upgrade head` 和启动 uvicorn，这段时间 8090 端口没人监听，nginx 返回 502。worker 依赖 api 健康，会随后重建。
+  2. 冒烟最多试 30 次×3 秒（约 90 秒）。如果新版本有问题，这 90 秒里对外一直是坏的；失败后回滚又要再重建一次容器。
+- **当前判断**：作品集/演示阶段、单机部署，可以接受；部署尽量放在没人用的时段。
+- **以后要零停机**：蓝绿部署。
+  - compose 里起两套 api：`api-blue`（127.0.0.1:8090）和 `api-green`（127.0.0.1:8092）。
+  - 部署时只起空闲那一套的新版本，在它自己的端口上冒烟；通过后改 nginx `upstream memory_api { server 127.0.0.1:<新端口>; }`，`nginx -t && nginx -s reload`（reload 不断开现有连接），再停旧的那套。
+  - 冒烟失败就直接停掉新的那套，nginx 没切换过，所以线上不受影响，也不需要「回滚」。
+  - 前提：迁移必须先扩后缩（新旧版本能同时跑在同一个库上）。
