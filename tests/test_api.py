@@ -59,3 +59,16 @@ def test_forget_deletes_all_versions_and_hides_others(client, db):
     assert db.query(m.MemoryFact).filter_by(user_id="alice").count() == 0
     assert {f.id for f in db.query(m.ForgottenId).all()} == {old_id, new_id}
     assert db.query(m.MemoryFact).filter_by(user_id="bob").count() == 1
+
+
+def test_irrelevant_facts_not_recalled(client, db):
+    """回归：Docker运维 演练发现查「咖啡」会把猫那条也返回（分数 0.0）。"""
+    db.add_all([m.MemoryFact(user_id="alice", subject="drink", content="每天早上喝一杯咖啡"),
+                m.MemoryFact(user_id="alice", subject="pet", content="养了一只橘猫"),
+                m.MemoryFact(user_id="alice", subject="lang", content="I like Python")])
+    db.commit()
+    facts = client.post("/v1/memories/recall", headers=token("alice"), json={"query": "咖啡"}).json()["facts"]
+    assert [f["subject"] for f in facts] == ["drink"] and facts[0]["score"] > 0
+    facts = client.post("/v1/memories/recall", headers=token("alice"), json={"query": "python?"}).json()["facts"]
+    assert [f["subject"] for f in facts] == ["lang"]
+    assert client.post("/v1/memories/recall", headers=token("alice"), json={"query": "，。 "}).json()["facts"] == []
