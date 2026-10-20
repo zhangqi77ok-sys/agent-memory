@@ -43,8 +43,9 @@ services:
     env_file: .env
     environment:
       APP_ENV: prod
-      # Worker 跨用户处理任务，用 owner 账号 + app.rls_bypass；v2 拆独立账号
-      DATABASE_URL: postgresql+psycopg://memory:${POSTGRES_PASSWORD}@db:5432/memory
+      # Worker 跨用户处理任务：独立账号 memsvc_worker（BYPASSRLS、非超级用户、非 owner）
+      DATABASE_URL: postgresql+psycopg://memsvc_worker:${WORKER_DB_PASSWORD}@db:5432/memory
+      WORKER_DATABASE_URL: postgresql+psycopg://memsvc_worker:${WORKER_DB_PASSWORD}@db:5432/memory
       ROLE: worker
     depends_on: { api: { condition: service_healthy } }
     logging: *log
