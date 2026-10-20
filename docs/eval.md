@@ -17,7 +17,7 @@ pytest -q -k cross_user   # 只跑串用户
 | 记错了吗 | 召回内容与原话一致，不编造 | 召回内容可追溯到 `source_msg_id` | 🚧 待补 |
 | 过期不召回 | 事实更新后旧值不再出现 | 只返回最新版本 | ✅ `test_invalidated_fact_not_recalled` |
 | 不串用户 | A 召回不到 B；A 删不了 B；数据库层兜底 | 召回结果无 B 内容；删 B 返回 404；漏写条件也查不到 | ✅ `test_no_cross_user_recall`、`test_forget_deletes_all_versions_and_hides_others`、PG：`test_rls_hides_other_users_even_without_where`、`test_rls_blocks_writing_rows_for_other_user`、`test_api_cross_user_recall_and_forget_via_service_account` |
-| 不误召回 | 问不相关的内容，召回为空；召回了不该召回的比没召回更危险 | 查「咖啡」不返回「猫」那条；分数低于阈值（当前 0.2）不返回 | ✅ `test_irrelevant_facts_not_recalled` |
+| 不误召回 | 问不相关的内容，召回为空；召回了不该召回的比没召回更危险 | 查「咖啡」不返回「猫」那条；查「咖啡」不返回「咖喱」（中文按相邻两字切）；分数低于临时阈值 0.2 不返回，接入向量 + BM25 后用评测集重新校准 | ✅ `test_irrelevant_facts_not_recalled` |
 
 ## 其它保护性用例
 - `test_body_cannot_carry_identity`：请求体带 `user_id` → 422

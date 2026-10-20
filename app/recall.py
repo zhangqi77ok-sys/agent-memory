@@ -15,11 +15,16 @@ MIN_SCORE = 0.2  # 低于此分视为不相关，不返回（宁可少给，不�
 
 
 def _tokens(s: str) -> set[str]:
-    """英文按词、中文按字；去掉空白和标点，否则「的」「，」这类字符会让无关句子也有分。"""
+    """英文按词；中文按相邻两字（bigram）切，避免「咖啡」和「咖喱」因为共享一个字而命中。
+
+    单个汉字的连续段（如查询只有一个字）退回按字。空白、标点不参与计分。
+    临时方案：接上向量 + BM25 后整体替换，阈值用评测集重新校准。
+    """
     s = s.lower()
-    words = {w for w in re.findall(r"[a-z0-9]+", s)}
-    cjk = {c for c in s if "\u4e00" <= c <= "\u9fff"}
-    return words | cjk
+    out = set(re.findall(r"[a-z0-9]+", s))
+    for run in re.findall(r"[\u4e00-\u9fff]+", s):
+        out |= {run} if len(run) == 1 else {run[i:i + 2] for i in range(len(run) - 1)}
+    return out
 
 
 def _score(query: str, text: str) -> float:
