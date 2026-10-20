@@ -24,9 +24,9 @@ docker compose -p agent-memory exec -T db psql -U memory -d memory_drill -c \
   "SELECT count(*) FROM memory_fact WHERE id IN (SELECT id FROM forgotten_id);"   # 必须是 0
 docker compose -p agent-memory exec -T db psql -U memory -d memory -c "DROP DATABASE memory_drill"
 ```
-`restore.sh` 恢复后一定先执行 `DELETE FROM memory_fact WHERE id IN (SELECT id FROM forgotten_id ...)`，再放流量。
+`restore.sh` 会先取出**线上库当前的** `forgotten_id`，恢复后合并进恢复库，再执行 `DELETE FROM memory_fact WHERE id IN (SELECT id FROM forgotten_id ...)`，再放流量。
 真出事恢复线上库：先停 api/worker（`docker compose -p agent-memory stop api worker`），`./restore.sh <dump>`，脚本会重删、检查 `alembic current`、调 `/readyz`，再 `up -d`。
-`forgotten_id` 表本身也在备份里；如果恢复的备份比某次遗忘更早，要从最新库/审计日志里把这之后的 forgotten_id 补回来再重删。
+这样即使备份早于某次遗忘，被遗忘的数据也不会复活（2026-10-20 演练：遗忘前备份→遗忘→恢复，`re-deleted facts: 1`，recall 查不到）。线上库整个丢失时，从审计日志 `audit_log`（action=forget）补回 forgotten_id 再重删。
 
 ## 4. 回滚
 见 `docs/deploy.md#回滚`。流水线冒烟失败会自动回滚；手动回滚就是用旧 TAG 再 `compose up -d`。
@@ -44,3 +44,8 @@ docker compose -p agent-memory logs --tail 0        # 日志已限 10m×3，不�
 ## 6. 死信任务
 worker 失败 3 次的任务 `status='dead'`。查：`SELECT id,last_error FROM memory_job WHERE status='dead';`
 修复原因后重放：`UPDATE memory_job SET status='pending', attempts=0 WHERE id='...';`
+
+## 7. 数据库账号（initdb 只在空卷时执行）
+`deploy/initdb/01-app-role.sh` 只在数据卷第一次初始化时跑。卷已存在（比如从旧版本升级、换了密码）时，
+流水线 Deploy 阶段会在迁移前执行 `./ensure-roles.sh`：幂等创建 `memsvc_app`（NOBYPASSRLS）和 `memsvc_worker`（BYPASSRLS），
+并把密码对齐成 `.env` 里的 `APP_DB_PASSWORD` / `WORKER_DB_PASSWORD`。手动执行同一个脚本即可。

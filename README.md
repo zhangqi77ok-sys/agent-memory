@@ -36,9 +36,12 @@ uvicorn app.main:app --reload   # 默认 SQLite
 ```
 
 ## 部署
-`deploy/docker-compose.yml`（api + pgvector），`Jenkinsfile`（gitleaks → lint/test → 构建推 GHCR → 部署 proxy-4 → /readyz 冒烟，失败回滚上一个 tag），`deploy/backup.sh` / `deploy/restore.sh`。
+`deploy/docker-compose.yml`（api + worker + pgvector），`Jenkinsfile`（gitleaks → lint/test → 真 Postgres 测试 → 构建镜像 → 推 GHCR → SSH 部署到部署机 → /readyz 冒烟，失败自动回滚上一个成功 tag），`deploy/backup.sh` / `deploy/restore.sh` / `deploy/ensure-roles.sh`。
+详见 `docs/deploy.md`、`docs/runbook.md`、`docs/adr/0002-jenkins-to-deploy-host.md`。
+
+**部署状态：已验证（2026-10-20，Jenkins 构建 `agent-memory` #2 全绿、#3 冒烟故意失败→自动回滚、备份恢复演练通过；main 持续部署由多分支任务 `agent-memory-mb` 负责）**
 
 ## 当前状态（骨架）
 - 已实现：鉴权（JWT→用户）、写入入队（幂等）、召回（预过滤有效事实，关键词打分占位）、遗忘（删所有版本 + forgotten_id）、Worker 任务领取与死信、v1 迁移（Postgres 下含 pgvector/HNSW/GIN/RLS）。
 - 未实现：LLM 抽取管线、向量 + BM25 + RRF、摘要、`/v1/me` 其余接口。
-- 未验证：Postgres 上的迁移与 Compose 启动、Jenkins 实跑（待 proxy-3/proxy-4 实测）。
+- 已验证：Postgres 上的迁移与 Compose 启动、Jenkins 实跑、GHCR 推送、自动回滚、备份恢复+遗忘重删。
