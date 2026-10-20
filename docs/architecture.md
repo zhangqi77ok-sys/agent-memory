@@ -42,7 +42,9 @@ flowchart LR
 | 遗忘 API | 按 id / 按主题物理删除，含向量 | 删除写审计，不留正文 |
 | 审计 | 每次写入/召回/遗忘记录 | 回放靠 `trace_id + model 版本` |
 
-## 4. 数据模型（v1）
+## 4. 数据模型（v1，三层记忆各一张表 + 支撑表）
+- `session_message(id, tenant_id, user_id, session_id, role, content, msg_id, created_at)`：写入时先落原文，Worker 从这里取
+- `memory_preference(id, tenant_id, user_id, key, value, valid_from, valid_to, version, source_msg_id)`：少量 KV，召回时整体注入系统提示
 - `memory_fact(id, tenant_id, user_id, subject, predicate, value, content, embedding vector, embed_model, tsv tsvector, valid_from, valid_to, source_session_id, source_msg_id, version, created_at)`
   - 索引：`(tenant_id, user_id) WHERE valid_to IS NULL`、HNSW(embedding)、GIN(tsv)
 - `session_summary(id, tenant_id, user_id, session_id, summary, upto_msg_id, model, updated_at)`
@@ -55,6 +57,53 @@ flowchart LR
 **摘要**：`POST /v1/sessions/{id}/summarize`，增量滚动。
 **遗忘**：`DELETE /v1/memories/{id}`、`POST /v1/memories/forget {subject}`。
 
+## 5.1 写入时序
+```mermaid
+sequenceDiagram
+  participant T as tiancode
+  participant A as API
+  participant DB as Postgres
+  participant W as Worker
+  participant L as LLM/Embedding API
+  T->>A: POST /v1/memories (JWT, Idempotency-Key, messages)
+  A->>A: JWT→TenantContext（拒绝 body 中 tenant/user）
+  A->>DB: INSERT session_message + memory_job（幂等键唯一）
+  A-->>T: 202 {job_id}（重复键返回同一 job_id）
+  W->>DB: SELECT ... FOR UPDATE SKIP LOCKED 取 job
+  W->>L: 抽取候选事实/偏好
+  W->>W: 脱敏
+  W->>L: embedding
+  W->>DB: 同租户相似检索去重
+  W->>W: 规则判定 ADD / UPDATE / NOOP
+  W->>DB: UPDATE 旧行 valid_to=now(); INSERT 新版本
+  W->>DB: audit_log(write) + job=done（失败 attempts+1，超限 dead）
+```
+
+## 5.2 召回时序
+```mermaid
+sequenceDiagram
+  participant T as tiancode
+  participant A as API
+  participant DB as Postgres
+  participant L as Embedding API
+  T->>A: POST /v1/memories/recall {query,k,token_budget}
+  A->>L: query embedding
+  A->>DB: 向量 top-N（tenant,user 过滤, valid_to IS NULL）
+  A->>DB: BM25 top-N（同过滤）
+  A->>A: RRF 融合 → 偏好 + 摘要 + 事实按预算裁剪
+  A->>DB: audit_log(recall, fact_ids, 召回原因)
+  A-->>T: {preferences, summary, facts[{fact_id, content, score, reason}]}
+  Note over T: 超时/5xx → 本轮无长期记忆，trace 标 memory_degraded=true
+```
+
+## 5.3 失败策略
+| 场景 | 处理 |
+|---|---|
+| 召回失败/超时(2s) | 降级为无长期记忆继续，告警 |
+| 写入失败 | tiancode 侧发件箱暂存（不参与召回、不写本地记忆），恢复后同幂等键补写；积压超阈值告警 |
+| Worker 处理失败 | 指数退避重试 3 次，进 dead 状态并告警，可人工重放 |
+| LLM 抽取输出非法 | 丢弃该批候选，记审计，不入库 |
+
 ## 6. 非功能
 - **隔离**：每条 SQL 带 `tenant_id`；可选 Postgres RLS 兜底。
 - **降级**：召回失败→本轮无长期记忆 + `memory_degraded=true` 告警；写失败→调用方发件箱（不参与召回），恢复后按幂等键补写，积压告警。
@@ -63,7 +112,13 @@ flowchart LR
 - **资源**：无 GPU，LLM/embedding 走 API；4C8G 单机即可。
 
 ## 7. 部署
-- `proxy-4`：api + worker + postgres（Compose）；`proxy-3`：Jenkins。
+- 运行单元：`memsvc` 一个镜像，启动参数区分 `api` / `worker`；`postgres`（pgvector 镜像）。共两类容器。
+- `proxy-4`：memsvc(api+worker) + postgres；`proxy-3`：Jenkins；`proxy-5` 不动。
+- 网络：只暴露 memsvc HTTP 端口；Postgres 仅内网；服务间 service token + 透传用户 JWT。
+- 日志：JSON + trace_id，容器日志 `max-size=10m,max-file=3`。
+- 目标：召回 P95 < 300ms（不含外部 embedding 抖动另行统计）。
+- 备份：每日 `pg_dump -Fc` → GCP 练习机，保留 7 天；恢复演练：新库 `pg_restore` → `alembic current` 校验 → 跑评测集通过即为可用。
+- 重建：`git clone` → 填 `.env` → `docker compose up -d` → 恢复最新备份。
 - Jenkins：gitleaks → lint → pytest（含四类评测/契约测试）→ 构建镜像（Git SHA tag）→ 推镜像 → `alembic upgrade` → `compose up -d` → `/readyz` 冒烟，失败回滚上一 tag。
 - 每日 `pg_dump` 到 GCP 练习机，每周恢复演练。磁盘：Jenkins 保留 10 次构建，定时 `docker image prune`。
 
