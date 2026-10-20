@@ -7,6 +7,8 @@
 pipeline {
   agent any
   options { buildDiscarder(logRotator(numToKeepStr: '10')); timeout(time: 30, unit: 'MINUTES'); timestamps() }
+  // webhook 为主（git/notifyCommit），轮询兜底
+  triggers { pollSCM('H/5 * * * *') }
   parameters {
     string(name: 'DEPLOY_BRANCH', defaultValue: 'main', description: '只有这个分支会执行 构建/部署/冒烟')
     string(name: 'SMOKE_PATH', defaultValue: '/readyz', description: '冒烟路径；回滚演练时改成不存在的路径')
@@ -72,7 +74,7 @@ PY2
       post { always { junit testResults: 'report-pg.xml', allowEmptyResults: false } }
     }
     stage('Build image') {
-      when { expression { env.DO_DEPLOY == 'true' } }
+      // 所有分支都构建镜像（验证 Dockerfile），只有 DEPLOY_BRANCH 推送和部署
       steps { sh 'docker build -t $LOCAL_IMAGE:$TAG -t $GHCR_IMAGE:$TAG .' }
     }
     stage('Push GHCR') {

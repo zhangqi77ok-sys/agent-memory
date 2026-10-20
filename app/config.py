@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1536
     recall_timeout_s: float = 2.0
+    docs_enabled: bool | None = None  # Swagger UI；None=非 prod 开启、prod 关闭；演示部署可设 DOCS_ENABLED=true
 
 
 settings = Settings()
