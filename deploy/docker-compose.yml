@@ -1,4 +1,5 @@
-# proxy-4：memsvc(api) + postgres。Postgres 不对外暴露端口。
+# memsvc(api + worker) + postgres。Postgres 不对外暴露端口。
+# 变量放在 deploy/.env（与本文件同目录）：compose 的 ${VAR} 替换和 env_file 读的是同一个文件。
 x-log: &log
   driver: json-file
   options: { max-size: "10m", max-file: "3" }
@@ -10,7 +11,11 @@ services:
       POSTGRES_USER: memory
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
       POSTGRES_DB: memory
-    volumes: [pgdata:/var/lib/postgresql/data]
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set in .env}
+      WORKER_DB_PASSWORD: ${WORKER_DB_PASSWORD:?set in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U memory"]
       interval: 5s
@@ -20,13 +25,29 @@ services:
 
   api:
     image: ${IMAGE:-ghcr.io/zhangqi77ok-sys/agent-memory}:${TAG:-latest}
-    env_file: ../.env
+    env_file: .env
     environment:
-      DATABASE_URL: postgresql+psycopg://memory:${POSTGRES_PASSWORD}@db:5432/memory
+      APP_ENV: prod
+      # 运行账号受 RLS 约束；迁移用 owner 账号
+      DATABASE_URL: postgresql+psycopg://memsvc_app:${APP_DB_PASSWORD}@db:5432/memory
+      MIGRATE_DATABASE_URL: postgresql+psycopg://memory:${POSTGRES_PASSWORD}@db:5432/memory
       ROLE: api
-    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    command: sh -c "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"
     depends_on: { db: { condition: service_healthy } }
-    ports: ["8000:8000"]
+    ports: ["${API_BIND:-127.0.0.1}:${API_PORT:-8000}:8000"]
+    logging: *log
+    restart: unless-stopped
+
+  worker:
+    image: ${IMAGE:-ghcr.io/zhangqi77ok-sys/agent-memory}:${TAG:-latest}
+    env_file: .env
+    environment:
+      APP_ENV: prod
+      # Worker 跨用户处理任务：独立账号 memsvc_worker（BYPASSRLS、非超级用户、非 owner）
+      DATABASE_URL: postgresql+psycopg://memsvc_worker:${WORKER_DB_PASSWORD}@db:5432/memory
+      WORKER_DATABASE_URL: postgresql+psycopg://memsvc_worker:${WORKER_DB_PASSWORD}@db:5432/memory
+      ROLE: worker
+    depends_on: { api: { condition: service_healthy } }
     logging: *log
     restart: unless-stopped
 
