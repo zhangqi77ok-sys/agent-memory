@@ -7,7 +7,7 @@
 浏览器 ──:80──> nginx-gw（宿主机网络）
                  ├─ /           → 原有服务（不动）
                  ├─ /jenkins/   → Jenkins 容器 127.0.0.1:8088
-                 ├─ /memory/ui/ → 预留：前端静态站点 127.0.0.1:8091（尚未部署，现在返回 502）
+                 ├─ /memory/ui/ → 前端 web 容器 127.0.0.1:8091（原样转发，不去前缀）
                  └─ /memory/    → agent-memory api 127.0.0.1:8090（去掉 /memory 前缀）
 Jenkins 容器 ──docker.sock──> 宿主 Docker（构建镜像、CI 临时 Postgres）
 Jenkins 容器 ──SSH deploy@网关──> 宿主 /opt/agent-memory（docker compose -p agent-memory）
@@ -68,10 +68,18 @@ Jenkins 全局环境变量：`DEPLOY_HOST`（Jenkins 容器访问宿主用 docke
   ```
 - 迁移只做「先扩后缩」（只加列/表），所以回滚镜像不需要回滚数据库。
 
-## 前端预留（还没做）
-- 访问路径：`/memory/ui/`，nginx 已预留 `location /memory/ui/ → 127.0.0.1:8091/`（必须写在 `/memory/` 之前）。
+## 前端
+- 访问路径：`/memory/ui/`，nginx-gw 里 `location /memory/ui/ { proxy_pass http://127.0.0.1:8091; }`（**末尾不带斜杠**，必须写在 `/memory/` 之前）。模板见 `deploy/nginx/gateway-memory.conf.example`，以线上配置为准。
 - 前端：仓库 `web/`（Vue3），Jenkins `Frontend` 阶段跑 `npm ci && npm test && npm run build`；镜像 `ghcr.io/zhangqi77ok-sys/agent-memory-web`，compose 服务名 `web`，默认绑定 `127.0.0.1:8091`。外层 Nginx 把 `/memory/ui/` 转到该容器（由运维配置）。和 api 共用同一次部署的 TAG、同一次回滚。
+- 冒烟（`deploy/smoke-ui.sh`，部署机上执行）：经网关请求 `SMOKE_UI_URL`（Jenkins 参数，默认 `http://127.0.0.1/memory/ui/`），要求 200、HTML 含「我的记忆」、页面里的一个 `assets/*.js` 也返回 200；不直连 8091。任一失败即自动回滚。网关不在本机 80 端口时改这个参数。api 仍直连 `127.0.0.1:$API_PORT/readyz`。
 - 前端调接口用相对路径 `/memory/v1/...`，同源，不需要 CORS。
+
+## 部署去重（同一提交不重复部署）
+- `Dedup check` 阶段在 Deploy 之前执行（只在部署分支）：SSH 到部署机读 `.last_tag`，取 tag 里的提交前缀（格式 `<commit 前 12 位>-b<构建号>`，如 `9de91ec9cc27-b15`，比较 `-b` 之前的部分）。
+- 前缀等于本次 `GIT_COMMIT` 前 12 位，**并且** `127.0.0.1:$API_PORT/readyz` 返回 200、`web` 容器在运行 → 跳过 Deploy 和 Smoke，日志打印 `already deployed <tag>`，构建保持 SUCCESS（典型场景：webhook 和轮询对同一提交各触发一次）。
+- 其他情况（没有 `.last_tag`、提交不同、不健康、SSH 失败）照常部署。
+- 要强制重新部署同一提交：勾选参数 `FORCE_DEPLOY=true`。Init 里用 `params.FORCE_DEPLOY ?: false` 兜底（分支第一次构建参数未注册时不会误当成 true），再写成 `env.FORCE_DEPLOY`，`Dedup check` 的 `when` 只看 env。
+- 注意：GHCR 推送在去重之前，仍会推一个本次构建号的 tag（不会被部署）。
 
 ## 规则
 - **GHCR Token 会过期**：`ghcr-token` 过期后，main 的每次构建都会在 Push GHCR 阶段失败（不会部署）。在 GitHub 重新生成只带 `write:packages` 的 PAT，更新 Jenkins 凭据 `ghcr-token`，再重跑。建议在日历里记下过期日期。

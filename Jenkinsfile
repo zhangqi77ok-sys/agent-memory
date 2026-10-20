@@ -6,12 +6,14 @@
 // Jenkins 全局环境变量：DEPLOY_HOST（部署机地址，不进仓库）、DEPLOY_USER（默认 deploy）
 pipeline {
   agent any
-  options { buildDiscarder(logRotator(numToKeepStr: '10')); timeout(time: 30, unit: 'MINUTES'); timestamps() }
+  options { buildDiscarder(logRotator(numToKeepStr: '10')); timeout(time: 30, unit: 'MINUTES'); timestamps(); disableConcurrentBuilds() }
   // GitHub webhook（带签名密钥）为主，轮询兜底
   triggers { githubPush(); pollSCM('H/2 * * * *') }
   parameters {
     string(name: 'DEPLOY_BRANCH', defaultValue: 'main', description: '只有这个分支会执行 构建/部署/冒烟')
     string(name: 'GHCR_CRED_ID', defaultValue: 'ghcr-token', description: 'GHCR 凭据 ID（演练失败路径时可改成不存在的 ID）')
+    booleanParam(name: 'FORCE_DEPLOY', defaultValue: false, description: '跳过「同一提交已部署」去重，强制部署+冒烟')
+    string(name: 'SMOKE_UI_URL', defaultValue: 'http://127.0.0.1/memory/ui/', description: '前端冒烟地址（经网关，在部署机上访问）')
     string(name: 'SMOKE_PATH', defaultValue: '/readyz', description: '冒烟路径；回滚演练时改成不存在的路径')
   }
   environment {
@@ -30,10 +32,13 @@ pipeline {
           env.DO_DEPLOY = (env.BR == (params.DEPLOY_BRANCH ?: 'main')) ? 'true' : 'false'
           env.TAG = "${env.GIT_COMMIT.take(12)}-b${env.BUILD_NUMBER}"
           env.DEPLOY_USER = env.DEPLOY_USER ?: 'deploy'
-          // 分支第一次构建时参数还没注册，$SMOKE_PATH 环境变量为空 → 冒烟打到 / 得 404；这里显式兜底
+          // 首次构建参数还没注册时为空，一律兜底（和 DEPLOY_BRANCH / SMOKE_PATH 同一套路）
+          env.SMOKE_UI_URL = params.SMOKE_UI_URL ?: 'http://127.0.0.1/memory/ui/'
           env.SMOKE_PATH = params.SMOKE_PATH ?: '/readyz'
+          // booleanParam 第一次也可能是 null/空串；?: false 后再写成 true/false 字符串，后面 when 只看 env
+          env.FORCE_DEPLOY = (params.FORCE_DEPLOY ?: false) ? 'true' : 'false'
           if (env.DO_DEPLOY == 'true' && !env.DEPLOY_HOST) { error 'DEPLOY_HOST 未配置（Jenkins 系统设置→全局属性→环境变量）' }
-          echo "branch=${env.BR} deploy=${env.DO_DEPLOY} tag=${env.TAG}"
+          echo "branch=${env.BR} deploy=${env.DO_DEPLOY} force=${env.FORCE_DEPLOY} tag=${env.TAG}"
         }
       }
     }
@@ -59,7 +64,7 @@ pipeline {
       steps {
         sh '''
           docker run --rm --init --ipc=host \
-            --volumes-from jenkins \
+            --volumes-from "$(hostname)" \
             -u "$(id -u):$(id -g)" \
             -e HOME=/tmp -e CI=1 -e npm_config_cache=/tmp/.npm \
             -w "$WORKSPACE/web" \
@@ -123,9 +128,36 @@ PY2
         script { env.DEPLOY_IMAGE = env.GHCR_IMAGE }
       }
     }
+    stage('Dedup check') {
+      // 同一提交已经部署且健康（如 webhook + 轮询重复触发）时跳过 部署/冒烟，构建保持 SUCCESS
+      when { expression { env.DO_DEPLOY == 'true' && env.FORCE_DEPLOY != 'true' } }
+      steps {
+        sshagent(['deploy-ssh']) {
+          script {
+            env.COMMIT12 = env.GIT_COMMIT.take(12)
+            def out = sh(returnStdout: true, script: """
+              ssh -o StrictHostKeyChecking=accept-new \$DEPLOY_USER@\$DEPLOY_HOST 'cd ${env.APP_DIR} 2>/dev/null || { echo NO_DIR; exit 0; }
+                [ -s .last_tag ] || { echo NO_TAG; exit 0; }
+                L=\$(cat .last_tag); LT=\${L##*:}
+                [ "\${LT%-b*}" = "${env.COMMIT12}" ] || { echo DIFF \$LT; exit 0; }
+                P=\$(grep ^API_PORT= .env | cut -d= -f2)
+                c=\$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:\${P:-8000}/readyz)
+                [ "\$c" = 200 ] || { echo UNHEALTHY readyz=\$c; exit 0; }
+                [ -n "\$(docker compose -p agent-memory ps -q --status running web)" ] || { echo UNHEALTHY web; exit 0; }
+                echo SAME \$LT' || echo SSH_FAIL
+            """).trim()
+            echo "dedup: ${out}"
+            if (out.startsWith('SAME ')) {
+              env.SKIP_DEPLOY = 'true'
+              echo "already deployed ${out.substring(5)}"
+            }
+          }
+        }
+      }
+    }
     stage('Deploy') {
       // 部署机就是 Jenkins 所在主机：通过 SSH 登录 deploy 用户执行 compose，路径都是宿主机路径
-      when { expression { env.DO_DEPLOY == 'true' } }
+      when { expression { env.DO_DEPLOY == 'true' && env.SKIP_DEPLOY != 'true' } }
       steps {
         withCredentials([file(credentialsId: 'deploy-env', variable: 'ENVF'),
                          usernamePassword(credentialsId: params.GHCR_CRED_ID, usernameVariable: 'GHCR_U', passwordVariable: 'GHCR_P')]) {
@@ -133,7 +165,7 @@ PY2
             sh '''
               T="$DEPLOY_USER@$DEPLOY_HOST"; SSH="ssh -o StrictHostKeyChecking=accept-new"
               $SSH $T "mkdir -p $APP_DIR/initdb"
-              scp -o StrictHostKeyChecking=accept-new -q deploy/docker-compose.yml deploy/backup.sh deploy/restore.sh deploy/ensure-roles.sh $T:$APP_DIR/
+              scp -o StrictHostKeyChecking=accept-new -q deploy/docker-compose.yml deploy/backup.sh deploy/restore.sh deploy/ensure-roles.sh deploy/smoke-ui.sh $T:$APP_DIR/
               scp -q deploy/initdb/* $T:$APP_DIR/initdb/
               scp -q "$ENVF" $T:$APP_DIR/.env
               # GHCR 包是私有的：部署机用同一个 ghcr-token 登录，镜像不在本机时也能 pull
@@ -142,7 +174,7 @@ PY2
                 $SSH $T "docker image inspect $DEPLOY_IMAGE:$TAG >/dev/null 2>&1 || docker pull $DEPLOY_IMAGE:$TAG" && \
                 $SSH $T "docker image inspect $WEB_GHCR_IMAGE:$TAG >/dev/null 2>&1 || docker pull $WEB_GHCR_IMAGE:$TAG"
               fi
-              $SSH $T "cd $APP_DIR && chmod 600 .env && chmod +x backup.sh restore.sh ensure-roles.sh &&
+              $SSH $T "cd $APP_DIR && chmod 600 .env && chmod +x backup.sh restore.sh ensure-roles.sh smoke-ui.sh &&
                 docker compose -p agent-memory up -d --wait db && ./ensure-roles.sh &&
                 echo $DEPLOY_IMAGE:$TAG > .last_tag.new &&
                 WEB_IMAGE=$WEB_GHCR_IMAGE WEB_TAG=$TAG IMAGE=$DEPLOY_IMAGE TAG=$TAG docker compose -p agent-memory up -d --remove-orphans"
@@ -152,14 +184,13 @@ PY2
       }
     }
     stage('Smoke') {
-      when { expression { env.DO_DEPLOY == 'true' } }
+      when { expression { env.DO_DEPLOY == 'true' && env.SKIP_DEPLOY != 'true' } }
       steps {
         sshagent(['deploy-ssh']) {
           sh '''
             ssh $DEPLOY_USER@$DEPLOY_HOST "cd $APP_DIR && P=\\$(grep ^API_PORT= .env | cut -d= -f2); P=\\${P:-8000};
-              W=\\$(grep ^WEB_PORT= .env | cut -d= -f2); W=\\${W:-8091};
               ok=0; for i in \\$(seq 1 30); do c=\\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:\\$P$SMOKE_PATH); echo smoke api \\$i \\$c; [ \\"\\$c\\" = 200 ] && ok=1 && break; sleep 3; done; [ \\$ok = 1 ] || exit 1;
-              for i in \\$(seq 1 20); do c=\\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:\\$W/memory/ui/); echo smoke web \\$i \\$c; [ \\"\\$c\\" = 200 ] && exit 0; sleep 3; done; exit 1"
+              SMOKE_UI_URL='$SMOKE_UI_URL' ./smoke-ui.sh"
           '''
         }
       }

@@ -62,3 +62,4 @@ worker 失败 3 次的任务 `status='dead'`。查：`SELECT id,last_error FROM 
   - 冒烟失败就直接停掉新的那套，nginx 没切换过，所以线上不受影响，也不需要「回滚」。
   - 前提：迁移必须先扩后缩（新旧版本能同时跑在同一个库上）。
 - 回滚目标是 web 上线前的 tag（没有对应 web 镜像）时，只回滚 api/worker，web 会被停掉，`/memory/ui/` 返回 502，直到下一次成功部署。
+- 网关配置（模板 `deploy/nginx/gateway-memory.conf.example`）在 nginx-gw 里是单文件 bind mount：改完必须 `docker restart nginx-gw`，不要 `nginx -s reload`，否则容器里仍是旧文件。重启期间整个网关（含 `/jenkins/`）会短暂不可用。
