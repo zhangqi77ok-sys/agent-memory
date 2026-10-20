@@ -68,19 +68,32 @@ def recall(req: RecallRequest, u: UserContext = Depends(current_user), db: Sessi
     return RecallResponse(preferences={p.key: p.value for p in prefs}, facts=facts)
 
 
-@router.delete("/me/memories/{fact_id}", status_code=204)
-def forget(fact_id: str, u: UserContext = Depends(current_user), db: Session = Depends(get_db)):
-    fact = db.get(m.MemoryFact, fact_id)
-    # 不属于当前用户一律 404，不暴露存在性
-    if not fact or fact.user_id != u.user_id or fact.tenant_id != u.tenant_id:
-        raise HTTPException(404)
-    versions = db.scalars(select(m.MemoryFact).where(
-        m.MemoryFact.tenant_id == u.tenant_id, m.MemoryFact.user_id == u.user_id,
-        m.MemoryFact.subject == fact.subject)).all()
-    ids = [v.id for v in versions]
-    db.execute(delete(m.MemoryFact).where(m.MemoryFact.id.in_(ids)))
-    for i in ids:
-        db.merge(m.ForgottenId(id=i, kind="fact"))
-    # TODO(v1): 受影响的 session_summary 重新生成、来源 session_message 删除（Worker 任务）
-    _audit(db, u, "forget", ids)
-    db.commit()
+@router.delete("/me/memories/{item_id}", status_code=204)
+def forget(item_id: str, u: UserContext = Depends(current_user), db: Session = Depends(get_db)):
+    """删除一条事实（同 subject 全部版本）或一条偏好。不属于当前用户一律 404。"""
+    fact = db.get(m.MemoryFact, item_id)
+    if fact and fact.user_id == u.user_id and fact.tenant_id == u.tenant_id:
+        versions = db.scalars(select(m.MemoryFact).where(
+            m.MemoryFact.tenant_id == u.tenant_id, m.MemoryFact.user_id == u.user_id,
+            m.MemoryFact.subject == fact.subject)).all()
+        ids = [v.id for v in versions]
+        db.execute(delete(m.MemoryFact).where(m.MemoryFact.id.in_(ids)))
+        for i in ids:
+            db.merge(m.ForgottenId(id=i, kind="fact"))
+        # TODO(v1): 受影响的 session_summary 重新生成、来源 session_message 删除（Worker 任务）
+        _audit(db, u, "forget", ids)
+        db.commit()
+        return
+    pref = db.get(m.MemoryPreference, item_id)
+    if pref and pref.user_id == u.user_id and pref.tenant_id == u.tenant_id:
+        versions = db.scalars(select(m.MemoryPreference).where(
+            m.MemoryPreference.tenant_id == u.tenant_id, m.MemoryPreference.user_id == u.user_id,
+            m.MemoryPreference.key == pref.key)).all()
+        ids = [v.id for v in versions]
+        db.execute(delete(m.MemoryPreference).where(m.MemoryPreference.id.in_(ids)))
+        for i in ids:
+            db.merge(m.ForgottenId(id=i, kind="preference"))
+        _audit(db, u, "forget", ids)
+        db.commit()
+        return
+    raise HTTPException(404)

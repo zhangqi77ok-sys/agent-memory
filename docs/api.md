@@ -3,6 +3,7 @@
 - Base URL：`http(s)://<host>:8000`，所有业务接口带 `/v1` 前缀。
 - 认证：`Authorization: Bearer <JWT>`。`sub` = 用户 ID，`app` = 接入应用（默认 `tiancode`）。**身份只来自 JWT**，请求体里出现 `user_id`/`tenant_id` 等未定义字段一律 `422`。
 - 交互式文档：服务启动后访问 `/docs`（Swagger UI）或 `/openapi.json`。
+- C 端面板：`/memory/ui/`（Vue 静态站，只调本文 `/v1/me/*`；登录用 `?token=<JWT>`）。
 - 状态：✅ 已实现　🚧 已设计未实现
 
 ## 错误码
@@ -41,7 +42,7 @@
 `k` 1–50，`token_budget` 100–8000。当前打分为关键词占位，🚧 向量 + BM25 + RRF。
 
 ## 遗忘一条 ✅　`DELETE /v1/me/memories/{fact_id}`
-- `204`：删除该事实**同一 subject 的所有历史版本**（含向量），id 记入 `forgotten_id`。
+- `204`：若是事实，删除**同一 subject 的所有历史版本**（含向量）；若是偏好，删除同一 key 的所有版本。id 记入 `forgotten_id`。
 - `404`：不存在或不属于当前用户。
 - **幂等**：重复删除返回 `404`，无副作用。
 - 🚧 级联：重生成受影响的会话摘要、删除来源原文。
