@@ -32,12 +32,13 @@ pipeline {
           env.DO_DEPLOY = (env.BR == (params.DEPLOY_BRANCH ?: 'main')) ? 'true' : 'false'
           env.TAG = "${env.GIT_COMMIT.take(12)}-b${env.BUILD_NUMBER}"
           env.DEPLOY_USER = env.DEPLOY_USER ?: 'deploy'
-          // 首次构建参数未注册时为空，兜底默认值
+          // 首次构建参数还没注册时为空，一律兜底（和 DEPLOY_BRANCH / SMOKE_PATH 同一套路）
           env.SMOKE_UI_URL = params.SMOKE_UI_URL ?: 'http://127.0.0.1/memory/ui/'
-          // 分支第一次构建时参数还没注册，$SMOKE_PATH 环境变量为空 → 冒烟打到 / 得 404；这里显式兜底
           env.SMOKE_PATH = params.SMOKE_PATH ?: '/readyz'
+          // booleanParam 第一次也可能是 null/空串；?: false 后再写成 true/false 字符串，后面 when 只看 env
+          env.FORCE_DEPLOY = (params.FORCE_DEPLOY ?: false) ? 'true' : 'false'
           if (env.DO_DEPLOY == 'true' && !env.DEPLOY_HOST) { error 'DEPLOY_HOST 未配置（Jenkins 系统设置→全局属性→环境变量）' }
-          echo "branch=${env.BR} deploy=${env.DO_DEPLOY} tag=${env.TAG}"
+          echo "branch=${env.BR} deploy=${env.DO_DEPLOY} force=${env.FORCE_DEPLOY} tag=${env.TAG}"
         }
       }
     }
@@ -129,7 +130,7 @@ PY2
     }
     stage('Dedup check') {
       // 同一提交已经部署且健康（如 webhook + 轮询重复触发）时跳过 部署/冒烟，构建保持 SUCCESS
-      when { expression { env.DO_DEPLOY == 'true' && !(params.FORCE_DEPLOY ?: false) } }
+      when { expression { env.DO_DEPLOY == 'true' && env.FORCE_DEPLOY != 'true' } }
       steps {
         sshagent(['deploy-ssh']) {
           script {

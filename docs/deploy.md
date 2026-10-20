@@ -78,7 +78,7 @@ Jenkins 全局环境变量：`DEPLOY_HOST`（Jenkins 容器访问宿主用 docke
 - `Dedup check` 阶段在 Deploy 之前执行（只在部署分支）：SSH 到部署机读 `.last_tag`，取 tag 里的提交前缀（格式 `<commit 前 12 位>-b<构建号>`，如 `9de91ec9cc27-b15`，比较 `-b` 之前的部分）。
 - 前缀等于本次 `GIT_COMMIT` 前 12 位，**并且** `127.0.0.1:$API_PORT/readyz` 返回 200、`web` 容器在运行 → 跳过 Deploy 和 Smoke，日志打印 `already deployed <tag>`，构建保持 SUCCESS（典型场景：webhook 和轮询对同一提交各触发一次）。
 - 其他情况（没有 `.last_tag`、提交不同、不健康、SSH 失败）照常部署。
-- 要强制重新部署同一提交：勾选参数 `FORCE_DEPLOY=true`。
+- 要强制重新部署同一提交：勾选参数 `FORCE_DEPLOY=true`。Init 里用 `params.FORCE_DEPLOY ?: false` 兜底（分支第一次构建参数未注册时不会误当成 true），再写成 `env.FORCE_DEPLOY`，`Dedup check` 的 `when` 只看 env。
 - 注意：GHCR 推送在去重之前，仍会推一个本次构建号的 tag（不会被部署）。
 
 ## 规则
