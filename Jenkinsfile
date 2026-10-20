@@ -101,7 +101,8 @@ PY2
       // 部署机就是 Jenkins 所在主机：通过 SSH 登录 deploy 用户执行 compose，路径都是宿主机路径
       when { expression { env.DO_DEPLOY == 'true' } }
       steps {
-        withCredentials([file(credentialsId: 'deploy-env', variable: 'ENVF')]) {
+        withCredentials([file(credentialsId: 'deploy-env', variable: 'ENVF'),
+                         usernamePassword(credentialsId: 'ghcr-token', usernameVariable: 'GHCR_U', passwordVariable: 'GHCR_P')]) {
           sshagent(['deploy-ssh']) {
             sh '''
               T="$DEPLOY_USER@$DEPLOY_HOST"; SSH="ssh -o StrictHostKeyChecking=accept-new"
@@ -109,6 +110,11 @@ PY2
               scp -o StrictHostKeyChecking=accept-new -q deploy/docker-compose.yml deploy/backup.sh deploy/restore.sh deploy/ensure-roles.sh $T:$APP_DIR/
               scp -q deploy/initdb/* $T:$APP_DIR/initdb/
               scp -q "$ENVF" $T:$APP_DIR/.env
+              # GHCR 包是私有的：部署机用同一个 ghcr-token 登录，镜像不在本机时也能 pull
+              if [ "$DEPLOY_IMAGE" = "$GHCR_IMAGE" ] && [ -n "${GHCR_P:-}" ]; then
+                echo "$GHCR_P" | $SSH $T "docker login ghcr.io -u $GHCR_U --password-stdin" && \
+                $SSH $T "docker image inspect $DEPLOY_IMAGE:$TAG >/dev/null 2>&1 || docker pull $DEPLOY_IMAGE:$TAG"
+              fi
               $SSH $T "cd $APP_DIR && chmod 600 .env && chmod +x backup.sh restore.sh ensure-roles.sh &&
                 docker compose -p agent-memory up -d --wait db && ./ensure-roles.sh &&
                 echo $DEPLOY_IMAGE:$TAG > .last_tag.new &&

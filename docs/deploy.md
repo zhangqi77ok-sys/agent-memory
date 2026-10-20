@@ -32,7 +32,7 @@ compose 里的 `./initdb` 等相对路径必须是**宿主机路径**，Jenkins 
 | Test on Postgres | 在 `jenkins_default` 网络里临时起 `pgvector/pgvector:pg16`，跑全部测试；门禁：tests>0 且 skipped=0 | RLS/索引/SKIP LOCKED 有问题 |
 | Build image | `docker build`，所有分支都跑 | Dockerfile 问题 |
 | Push GHCR | 用凭据 `ghcr-token` 推 `ghcr.io/zhangqi77ok-sys/agent-memory:<TAG>` 和 `:latest`；凭据不存在时打印 `SKIPPED: no ghcr-token`，部署本机镜像 | Token 过期/权限不够 |
-| Deploy | scp compose、initdb、backup/restore、`.env`（来自凭据 `deploy-env`）到 `/opt/agent-memory`，写 `.last_tag.new`，`docker compose -p agent-memory up -d` | 看 `docker compose -p agent-memory logs api` |
+| Deploy | （GHCR 包是私有的）部署机用 `ghcr-token` 执行 `docker login ghcr.io`，本机没有该镜像就 pull；scp compose、initdb、backup/restore、`.env`（来自凭据 `deploy-env`）到 `/opt/agent-memory`，写 `.last_tag.new`，`docker compose -p agent-memory up -d` | 看 `docker compose -p agent-memory logs api` |
 | Smoke | 部署机上 `curl 127.0.0.1:$API_PORT$SMOKE_PATH`，最多 30 次×3 秒要 200 | 成功：`.last_tag.new → .last_tag`；失败：自动回滚 |
 
 ## 凭据（只写 ID）
