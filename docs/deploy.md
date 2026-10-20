@@ -74,6 +74,13 @@ Jenkins 全局环境变量：`DEPLOY_HOST`（Jenkins 容器访问宿主用 docke
 - 冒烟（`deploy/smoke-ui.sh`，部署机上执行）：经网关请求 `SMOKE_UI_URL`（Jenkins 参数，默认 `http://127.0.0.1/memory/ui/`），要求 200、HTML 含「我的记忆」、页面里的一个 `assets/*.js` 也返回 200；不直连 8091。任一失败即自动回滚。网关不在本机 80 端口时改这个参数。api 仍直连 `127.0.0.1:$API_PORT/readyz`。
 - 前端调接口用相对路径 `/memory/v1/...`，同源，不需要 CORS。
 
+## 部署去重（同一提交不重复部署）
+- `Dedup check` 阶段在 Deploy 之前执行（只在部署分支）：SSH 到部署机读 `.last_tag`，取 tag 里的提交前缀（格式 `<commit 前 12 位>-b<构建号>`，如 `9de91ec9cc27-b15`，比较 `-b` 之前的部分）。
+- 前缀等于本次 `GIT_COMMIT` 前 12 位，**并且** `127.0.0.1:$API_PORT/readyz` 返回 200、`web` 容器在运行 → 跳过 Deploy 和 Smoke，日志打印 `already deployed <tag>`，构建保持 SUCCESS（典型场景：webhook 和轮询对同一提交各触发一次）。
+- 其他情况（没有 `.last_tag`、提交不同、不健康、SSH 失败）照常部署。
+- 要强制重新部署同一提交：勾选参数 `FORCE_DEPLOY=true`。
+- 注意：GHCR 推送在去重之前，仍会推一个本次构建号的 tag（不会被部署）。
+
 ## 规则
 - **GHCR Token 会过期**：`ghcr-token` 过期后，main 的每次构建都会在 Push GHCR 阶段失败（不会部署）。在 GitHub 重新生成只带 `write:packages` 的 PAT，更新 Jenkins 凭据 `ghcr-token`，再重跑。建议在日历里记下过期日期。
 - **已部署的迁移绝不修改**：`migrations/versions/` 里已经在任何环境跑过的文件只读，要改表结构就新增一个迁移（先扩后缩），否则各环境的 `alembic_version` 和真实表结构会不一致，回滚也会失效。

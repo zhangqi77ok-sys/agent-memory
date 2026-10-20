@@ -12,6 +12,7 @@ pipeline {
   parameters {
     string(name: 'DEPLOY_BRANCH', defaultValue: 'main', description: '只有这个分支会执行 构建/部署/冒烟')
     string(name: 'GHCR_CRED_ID', defaultValue: 'ghcr-token', description: 'GHCR 凭据 ID（演练失败路径时可改成不存在的 ID）')
+    booleanParam(name: 'FORCE_DEPLOY', defaultValue: false, description: '跳过「同一提交已部署」去重，强制部署+冒烟')
     string(name: 'SMOKE_UI_URL', defaultValue: 'http://127.0.0.1/memory/ui/', description: '前端冒烟地址（经网关，在部署机上访问）')
     string(name: 'SMOKE_PATH', defaultValue: '/readyz', description: '冒烟路径；回滚演练时改成不存在的路径')
   }
@@ -126,9 +127,36 @@ PY2
         script { env.DEPLOY_IMAGE = env.GHCR_IMAGE }
       }
     }
+    stage('Dedup check') {
+      // 同一提交已经部署且健康（如 webhook + 轮询重复触发）时跳过 部署/冒烟，构建保持 SUCCESS
+      when { expression { env.DO_DEPLOY == 'true' && !(params.FORCE_DEPLOY ?: false) } }
+      steps {
+        sshagent(['deploy-ssh']) {
+          script {
+            env.COMMIT12 = env.GIT_COMMIT.take(12)
+            def out = sh(returnStdout: true, script: """
+              ssh -o StrictHostKeyChecking=accept-new \$DEPLOY_USER@\$DEPLOY_HOST 'cd ${env.APP_DIR} 2>/dev/null || { echo NO_DIR; exit 0; }
+                [ -s .last_tag ] || { echo NO_TAG; exit 0; }
+                L=\$(cat .last_tag); LT=\${L##*:}
+                [ "\${LT%-b*}" = "${env.COMMIT12}" ] || { echo DIFF \$LT; exit 0; }
+                P=\$(grep ^API_PORT= .env | cut -d= -f2)
+                c=\$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:\${P:-8000}/readyz)
+                [ "\$c" = 200 ] || { echo UNHEALTHY readyz=\$c; exit 0; }
+                [ -n "\$(docker compose -p agent-memory ps -q --status running web)" ] || { echo UNHEALTHY web; exit 0; }
+                echo SAME \$LT' || echo SSH_FAIL
+            """).trim()
+            echo "dedup: ${out}"
+            if (out.startsWith('SAME ')) {
+              env.SKIP_DEPLOY = 'true'
+              echo "already deployed ${out.substring(5)}"
+            }
+          }
+        }
+      }
+    }
     stage('Deploy') {
       // 部署机就是 Jenkins 所在主机：通过 SSH 登录 deploy 用户执行 compose，路径都是宿主机路径
-      when { expression { env.DO_DEPLOY == 'true' } }
+      when { expression { env.DO_DEPLOY == 'true' && env.SKIP_DEPLOY != 'true' } }
       steps {
         withCredentials([file(credentialsId: 'deploy-env', variable: 'ENVF'),
                          usernamePassword(credentialsId: params.GHCR_CRED_ID, usernameVariable: 'GHCR_U', passwordVariable: 'GHCR_P')]) {
@@ -155,7 +183,7 @@ PY2
       }
     }
     stage('Smoke') {
-      when { expression { env.DO_DEPLOY == 'true' } }
+      when { expression { env.DO_DEPLOY == 'true' && env.SKIP_DEPLOY != 'true' } }
       steps {
         sshagent(['deploy-ssh']) {
           sh '''
