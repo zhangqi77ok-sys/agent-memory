@@ -7,7 +7,7 @@
 浏览器 ──:80──> nginx-gw（宿主机网络）
                  ├─ /           → 原有服务（不动）
                  ├─ /jenkins/   → Jenkins 容器 127.0.0.1:8088
-                 ├─ /memory/ui/ → 预留：前端静态站点 127.0.0.1:8091（尚未部署，现在返回 502）
+                 ├─ /memory/ui/ → 前端 web 容器 127.0.0.1:8091（原样转发，不去前缀）
                  └─ /memory/    → agent-memory api 127.0.0.1:8090（去掉 /memory 前缀）
 Jenkins 容器 ──docker.sock──> 宿主 Docker（构建镜像、CI 临时 Postgres）
 Jenkins 容器 ──SSH deploy@网关──> 宿主 /opt/agent-memory（docker compose -p agent-memory）
@@ -68,9 +68,10 @@ Jenkins 全局环境变量：`DEPLOY_HOST`（Jenkins 容器访问宿主用 docke
   ```
 - 迁移只做「先扩后缩」（只加列/表），所以回滚镜像不需要回滚数据库。
 
-## 前端预留（还没做）
-- 访问路径：`/memory/ui/`，nginx 已预留 `location /memory/ui/ → 127.0.0.1:8091/`（必须写在 `/memory/` 之前）。
+## 前端
+- 访问路径：`/memory/ui/`，nginx-gw 里 `location /memory/ui/ { proxy_pass http://127.0.0.1:8091; }`（**末尾不带斜杠**，必须写在 `/memory/` 之前）。模板见 `deploy/nginx/gateway-memory.conf.example`，以线上配置为准。
 - 前端：仓库 `web/`（Vue3），Jenkins `Frontend` 阶段跑 `npm ci && npm test && npm run build`；镜像 `ghcr.io/zhangqi77ok-sys/agent-memory-web`，compose 服务名 `web`，默认绑定 `127.0.0.1:8091`。外层 Nginx 把 `/memory/ui/` 转到该容器（由运维配置）。和 api 共用同一次部署的 TAG、同一次回滚。
+- 冒烟（`deploy/smoke-ui.sh`，部署机上执行）：经网关请求 `SMOKE_UI_URL`（Jenkins 参数，默认 `http://127.0.0.1/memory/ui/`），要求 200、HTML 含「我的记忆」、页面里的一个 `assets/*.js` 也返回 200；不直连 8091。任一失败即自动回滚。网关不在本机 80 端口时改这个参数。api 仍直连 `127.0.0.1:$API_PORT/readyz`。
 - 前端调接口用相对路径 `/memory/v1/...`，同源，不需要 CORS。
 
 ## 规则
