@@ -54,18 +54,17 @@ pipeline {
     }
 
     stage('Frontend') {
-      // Vue 面板：npm ci / vitest / build / Playwright e2e。有 web/package.json 才跑，兼容旧分支。
+      // Vue 面板：在 Playwright 官方镜像里跑 npm ci / vitest / build / e2e（Jenkins 容器没有 node、非 root）
       when { expression { fileExists('web/package.json') } }
       steps {
         sh '''
-          cd web
-          npm ci
-          npm test
-          npm run build
-          # Playwright e2e（mock API）：浏览器缓存在 workspace 内，--with-deps 需要 root/apt，失败时退回只装浏览器
-          export PLAYWRIGHT_BROWSERS_PATH=$PWD/.pw-browsers
-          npx playwright install --with-deps chromium || npx playwright install chromium
-          CI=1 npm run test:e2e
+          docker run --rm --init --ipc=host \
+            --volumes-from jenkins \
+            -u "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e CI=1 -e npm_config_cache=/tmp/.npm \
+            -w "$WORKSPACE/web" \
+            mcr.microsoft.com/playwright:v1.64.1-noble \
+            bash -c "npm ci && npm test && npm run build && npm run test:e2e"
         '''
       }
     }

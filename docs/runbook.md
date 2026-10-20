@@ -61,3 +61,4 @@ worker 失败 3 次的任务 `status='dead'`。查：`SELECT id,last_error FROM 
   - 部署时只起空闲那一套的新版本，在它自己的端口上冒烟；通过后改 nginx `upstream memory_api { server 127.0.0.1:<新端口>; }`，`nginx -t && nginx -s reload`（reload 不断开现有连接），再停旧的那套。
   - 冒烟失败就直接停掉新的那套，nginx 没切换过，所以线上不受影响，也不需要「回滚」。
   - 前提：迁移必须先扩后缩（新旧版本能同时跑在同一个库上）。
+- 回滚目标是 web 上线前的 tag（没有对应 web 镜像）时，只回滚 api/worker，web 会被停掉，`/memory/ui/` 返回 502，直到下一次成功部署。
