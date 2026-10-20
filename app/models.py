@@ -2,7 +2,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
@@ -114,3 +114,14 @@ class AuditLog(Base):
     fact_ids: Mapped[list] = mapped_column(JSON, default=list)
     decision: Mapped[str] = mapped_column(String(16), default="allow")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class UserSetting(UserScoped, Base):
+    """每个用户一行：是否同意并开启记忆。没有这一行 = 未同意 = 不写入、不召回（个保法：先同意后处理）。"""
+    __tablename__ = "user_setting"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
+    memory_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    consent_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+    __table_args__ = (UniqueConstraint("tenant_id", "user_id", name="uq_user_setting"),)

@@ -69,7 +69,8 @@ def test_rls_blocks_writing_rows_for_other_user():
 
 
 def test_api_cross_user_recall_and_forget_via_service_account(client, db):
-    from tests.conftest import token
+    from tests.conftest import consent, token
+    consent(client, 'alice', 'bob')
 
     _seed(db)
     bob_id = db.scalar(select(m.MemoryFact.id).where(m.MemoryFact.user_id == "bob"))
@@ -79,7 +80,8 @@ def test_api_cross_user_recall_and_forget_via_service_account(client, db):
 
 
 def test_api_write_goes_through_rls(client, db):
-    from tests.conftest import token
+    from tests.conftest import consent, token
+    consent(client, 'alice')
 
     r = client.post("/v1/memories", headers={**token("alice"), "Idempotency-Key": "k"},
                     json={"session_id": "s", "messages": [{"msg_id": "1", "role": "user", "content": "hi"}]})
@@ -100,3 +102,13 @@ def test_skip_locked_two_workers_get_different_jobs(db):
         s1.rollback()
         s1.close()
         s2.close()
+
+
+def test_user_setting_is_rls_protected(db):
+    c = db.connection()
+    r = c.execute(text("SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname='user_setting'")).one()
+    assert r == (True, True)
+    db.add(m.UserSetting(user_id="bob", memory_enabled=True))
+    db.commit()
+    with SessionLocal(info={"user_id": "alice"}) as s:
+        assert s.scalars(select(m.UserSetting)).all() == []

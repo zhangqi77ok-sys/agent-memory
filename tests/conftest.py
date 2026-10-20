@@ -71,3 +71,12 @@ def db():
 def token(user: str, app_id: str = "tiancode") -> dict:
     t = jwt.encode({"sub": user, "app": app_id}, settings.jwt_secret, algorithm=settings.jwt_alg)
     return {"Authorization": f"Bearer {t}"}
+
+
+def consent(client, *users: str) -> None:
+    """模拟用户在授权页点了同意并开启记忆（未同意时写入/召回都不生效）。"""
+    from app.schemas import CONSENT_VERSION
+    for u in users:
+        r = client.put("/v1/me/settings", headers=token(u),
+                       json={"memory_enabled": True, "consent_version": CONSENT_VERSION})
+        assert r.status_code == 200, r.text
