@@ -66,6 +66,7 @@ def test_forget_deletes_all_versions_and_hides_others(client, db):
 
 def test_irrelevant_facts_not_recalled(client, db):
     """回归：Docker运维 演练发现查「咖啡」会把猫那条也返回（分数 0.0）。"""
+    consent(client, "alice")
     db.add_all([m.MemoryFact(user_id="alice", subject="drink", content="每天早上喝一杯咖啡"),
                 m.MemoryFact(user_id="alice", subject="pet", content="养了一只橘猫"),
                 m.MemoryFact(user_id="alice", subject="lang", content="I like Python"),
