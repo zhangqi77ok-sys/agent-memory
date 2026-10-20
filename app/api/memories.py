@@ -5,11 +5,20 @@ from sqlalchemy.orm import Session
 
 from app import models as m
 from app.auth import UserContext, current_user
-from app.db import get_db
+from app.db import SessionLocal
 from app.recall import recall_facts
 from app.schemas import RecallRequest, RecallResponse, WriteAccepted, WriteRequest
 
 router = APIRouter(prefix="/v1")
+
+
+def get_db(u: UserContext = Depends(current_user)):
+    """按当前用户打开会话：Postgres 上由行级权限兜底，即使代码漏写 user_id 条件也查不到别人的行。"""
+    db = SessionLocal(info={"user_id": u.user_id})
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def _audit(db: Session, u: UserContext, action: str, ids: list[str]) -> None:

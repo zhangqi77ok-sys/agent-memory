@@ -10,7 +10,10 @@ services:
       POSTGRES_USER: memory
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
       POSTGRES_DB: memory
-    volumes: [pgdata:/var/lib/postgresql/data]
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U memory"]
       interval: 5s
@@ -22,7 +25,10 @@ services:
     image: ${IMAGE:-ghcr.io/zhangqi77ok-sys/agent-memory}:${TAG:-latest}
     env_file: ../.env
     environment:
-      DATABASE_URL: postgresql+psycopg://memory:${POSTGRES_PASSWORD}@db:5432/memory
+      APP_ENV: prod
+      # 运行账号受 RLS 约束；迁移用 owner 账号
+      DATABASE_URL: postgresql+psycopg://memsvc_app:${APP_DB_PASSWORD}@db:5432/memory
+      MIGRATE_DATABASE_URL: postgresql+psycopg://memory:${POSTGRES_PASSWORD}@db:5432/memory
       ROLE: api
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     depends_on: { db: { condition: service_healthy } }

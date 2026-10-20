@@ -45,7 +45,7 @@ def fail_job(db: Session, job: m.MemoryJob, err: str) -> None:
 def main() -> None:  # pragma: no cover
     logging.basicConfig(level=logging.INFO)
     while True:
-        with SessionLocal() as db:
+        with SessionLocal(info={"rls_bypass": True}) as db:
             job = claim_job(db)
             if not job:
                 time.sleep(2)

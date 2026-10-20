@@ -8,7 +8,7 @@ target_metadata = Base.metadata
 
 
 def run_migrations_online():
-    engine = make_engine(settings.database_url)
+    engine = make_engine(settings.migrate_database_url or settings.database_url)
     with engine.connect() as conn:
         context.configure(connection=conn, target_metadata=target_metadata)
         with context.begin_transaction():
