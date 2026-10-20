@@ -2,7 +2,7 @@
 // 凭据（Jenkins Credentials，仓库里只出现 ID）：
 //   deploy-ssh  SSH 私钥，登录部署机 deploy 用户
 //   deploy-env  Secret file，部署机 /opt/agent-memory/.env 的内容
-//   ghcr-token  用户名+PAT（write:packages），可选；不存在时跳过推送，部署本机构建的镜像
+//   ghcr-token  用户名+PAT（write:packages），部署分支必需；缺失或过期时构建失败
 // Jenkins 全局环境变量：DEPLOY_HOST（部署机地址，不进仓库）、DEPLOY_USER（默认 deploy）
 pipeline {
   agent any
@@ -11,6 +11,7 @@ pipeline {
   triggers { githubPush(); pollSCM('H/2 * * * *') }
   parameters {
     string(name: 'DEPLOY_BRANCH', defaultValue: 'main', description: '只有这个分支会执行 构建/部署/冒烟')
+    string(name: 'GHCR_CRED_ID', defaultValue: 'ghcr-token', description: 'GHCR 凭据 ID（演练失败路径时可改成不存在的 ID）')
     string(name: 'SMOKE_PATH', defaultValue: '/readyz', description: '冒烟路径；回滚演练时改成不存在的路径')
   }
   environment {
@@ -78,23 +79,17 @@ PY2
       steps { sh 'docker build -t $LOCAL_IMAGE:$TAG -t $GHCR_IMAGE:$TAG .' }
     }
     stage('Push GHCR') {
+      // 只在部署分支运行；缺少/过期的 ghcr-token 直接让构建失败，绝不静默部署本地镜像
       when { expression { env.DO_DEPLOY == 'true' } }
       steps {
-        script {
-          try {
-            withCredentials([usernamePassword(credentialsId: 'ghcr-token', usernameVariable: 'U', passwordVariable: 'P')]) {
-              sh '''
-                echo "$P" | docker login ghcr.io -u "$U" --password-stdin
-                docker push $GHCR_IMAGE:$TAG
-                docker tag $GHCR_IMAGE:$TAG $GHCR_IMAGE:latest && docker push $GHCR_IMAGE:latest
-              '''
-            }
-            env.DEPLOY_IMAGE = env.GHCR_IMAGE
-          } catch (org.jenkinsci.plugins.credentialsbinding.impl.CredentialNotFoundException e) {
-            echo 'SKIPPED: no ghcr-token —— 不推送 GHCR，部署本机构建的镜像'
-            env.DEPLOY_IMAGE = env.LOCAL_IMAGE
-          }
+        withCredentials([usernamePassword(credentialsId: params.GHCR_CRED_ID, usernameVariable: 'U', passwordVariable: 'P')]) {
+          sh '''
+            echo "$P" | docker login ghcr.io -u "$U" --password-stdin
+            docker push $GHCR_IMAGE:$TAG
+            docker tag $GHCR_IMAGE:$TAG $GHCR_IMAGE:latest && docker push $GHCR_IMAGE:latest
+          '''
         }
+        script { env.DEPLOY_IMAGE = env.GHCR_IMAGE }
       }
     }
     stage('Deploy') {
@@ -102,7 +97,7 @@ PY2
       when { expression { env.DO_DEPLOY == 'true' } }
       steps {
         withCredentials([file(credentialsId: 'deploy-env', variable: 'ENVF'),
-                         usernamePassword(credentialsId: 'ghcr-token', usernameVariable: 'GHCR_U', passwordVariable: 'GHCR_P')]) {
+                         usernamePassword(credentialsId: params.GHCR_CRED_ID, usernameVariable: 'GHCR_U', passwordVariable: 'GHCR_P')]) {
           sshagent(['deploy-ssh']) {
             sh '''
               T="$DEPLOY_USER@$DEPLOY_HOST"; SSH="ssh -o StrictHostKeyChecking=accept-new"

@@ -31,7 +31,7 @@ compose 里的 `./initdb` 等相对路径必须是**宿主机路径**，Jenkins 
 | Lint & Test | ruff + pytest（SQLite），JUnit 报告不允许为空 | 代码问题 |
 | Test on Postgres | 在 `jenkins_default` 网络里临时起 `pgvector/pgvector:pg16`，跑全部测试；门禁：tests>0 且 skipped=0 | RLS/索引/SKIP LOCKED 有问题 |
 | Build image | `docker build`，所有分支都跑 | Dockerfile 问题 |
-| Push GHCR | 用凭据 `ghcr-token` 推 `ghcr.io/zhangqi77ok-sys/agent-memory:<TAG>` 和 `:latest`；凭据不存在时打印 `SKIPPED: no ghcr-token`，部署本机镜像 | Token 过期/权限不够 |
+| Push GHCR | 用凭据 `ghcr-token` 推 `ghcr.io/zhangqi77ok-sys/agent-memory:<TAG>` 和 `:latest`；只在部署分支运行；凭据缺失或 Token 过期**直接失败**，不会部署本地镜像（非部署分支不跑这一步） | Token 过期/权限不够：main 构建会变红，到 GitHub 重新生成 PAT 并更新凭据 `ghcr-token` |
 | Deploy | （GHCR 包是私有的）部署机用 `ghcr-token` 执行 `docker login ghcr.io`，本机没有该镜像就 pull；scp compose、initdb、backup/restore、`.env`（来自凭据 `deploy-env`）到 `/opt/agent-memory`，写 `.last_tag.new`，`docker compose -p agent-memory up -d` | 看 `docker compose -p agent-memory logs api` |
 | Smoke | 部署机上 `curl 127.0.0.1:$API_PORT$SMOKE_PATH`，最多 30 次×3 秒要 200 | 成功：`.last_tag.new → .last_tag`；失败：自动回滚 |
 
@@ -72,3 +72,7 @@ Jenkins 全局环境变量：`DEPLOY_HOST`（Jenkins 容器访问宿主用 docke
 - 访问路径：`/memory/ui/`，nginx 已预留 `location /memory/ui/ → 127.0.0.1:8091/`（必须写在 `/memory/` 之前）。
 - 目录：仓库里放 `web/`（前端源码），流水线以后加一个 `Build UI` 阶段产出静态文件，打成 `nginx:alpine` 镜像，作为 compose 里的 `ui` 服务映射 `127.0.0.1:8091`，和 api 用同一个 TAG、同一次回滚。
 - 前端调接口用相对路径 `/memory/v1/...`，同源，不需要 CORS。
+
+## 规则
+- **GHCR Token 会过期**：`ghcr-token` 过期后，main 的每次构建都会在 Push GHCR 阶段失败（不会部署）。在 GitHub 重新生成只带 `write:packages` 的 PAT，更新 Jenkins 凭据 `ghcr-token`，再重跑。建议在日历里记下过期日期。
+- **已部署的迁移绝不修改**：`migrations/versions/` 里已经在任何环境跑过的文件只读，要改表结构就新增一个迁移（先扩后缩），否则各环境的 `alembic_version` 和真实表结构会不一致，回滚也会失效。
