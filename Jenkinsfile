@@ -9,6 +9,7 @@ pipeline {
     TAG = "${env.GIT_COMMIT?.take(12) ?: 'dev'}"
     DEPLOY_HOST = 'proxy-4'
   }
+  post { always { junit allowEmptyResults: true, testResults: 'report-*.xml' } }
   stages {
     stage('Secrets scan') {
       steps { sh 'docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.18.4 detect -s /repo --no-banner' }
@@ -19,10 +20,24 @@ pipeline {
           python3 -m venv .venv && . .venv/bin/activate
           pip install -q -e '.[dev]'
           ruff check app tests migrations
-          pytest -q --junitxml=report.xml
+          pytest -q --junitxml=report-sqlite.xml
         '''
       }
-      post { always { junit 'report.xml' } }
+    }
+    stage('Test on Postgres') {
+      // 行级权限、pgvector 索引、SKIP LOCKED 只有真实 Postgres 才能验证
+      steps {
+        sh '''
+          PGC=amem-ci-$BUILD_NUMBER
+          docker run -d --rm --name $PGC -e POSTGRES_USER=memory -e POSTGRES_PASSWORD=memory -e POSTGRES_DB=memory_test \
+            -p 127.0.0.1::5432 pgvector/pgvector:pg16
+          trap "docker rm -f $PGC >/dev/null 2>&1 || true" EXIT
+          for i in $(seq 1 30); do docker exec $PGC pg_isready -U memory && break; sleep 2; done
+          PORT=$(docker port $PGC 5432/tcp | head -1 | cut -d: -f2)
+          . .venv/bin/activate
+          TEST_DATABASE_URL=postgresql+psycopg://memory:memory@127.0.0.1:$PORT/memory_test pytest -q --junitxml=report-pg.xml
+        '''
+      }
     }
     stage('Build & Push') {
       when { branch 'main' }

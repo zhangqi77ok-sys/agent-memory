@@ -1,6 +1,8 @@
 import os
 
-os.environ["DATABASE_URL"] = "sqlite:///./test.db"
+# 设置 TEST_DATABASE_URL 时在真实 Postgres(+pgvector) 上跑，并走 Alembic 迁移
+PG_URL = os.environ.get("TEST_DATABASE_URL")
+os.environ["DATABASE_URL"] = PG_URL or "sqlite:///./test.db"
 
 import jwt
 import pytest
@@ -13,8 +15,17 @@ from app.main import app
 
 @pytest.fixture(autouse=True)
 def fresh_db():
-    Base.metadata.drop_all(engine)
-    Base.metadata.create_all(engine)
+    if PG_URL:
+        from alembic import command
+        from alembic.config import Config
+        from sqlalchemy import text
+
+        with engine.begin() as c:
+            c.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
+        command.upgrade(Config("alembic.ini"), "head")
+    else:
+        Base.metadata.drop_all(engine)
+        Base.metadata.create_all(engine)
     yield
 
 
