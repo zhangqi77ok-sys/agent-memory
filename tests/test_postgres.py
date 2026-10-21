@@ -16,7 +16,7 @@ def test_migration_artifacts(db):
     c = db.connection()
     assert c.execute(text("SELECT 1 FROM pg_extension WHERE extname='vector'")).scalar() == 1
     idx = {r[0] for r in c.execute(text("SELECT indexname FROM pg_indexes WHERE tablename='memory_fact'"))}
-    assert {"ix_fact_active", "ix_fact_hnsw", "ix_fact_fts"} <= idx
+    assert {"ix_fact_active", "ix_fact_active_app", "ix_fact_hnsw", "ix_fact_fts"} <= idx
     rows = c.execute(text("SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = ANY(:t)"),
                      {"t": list(TABLES)}).all()
     assert len(rows) == 5 and all(r[1] and r[2] for r in rows)
@@ -112,3 +112,31 @@ def test_user_setting_is_rls_protected(db):
     db.commit()
     with SessionLocal(info={"user_id": "alice"}) as s:
         assert s.scalars(select(m.UserSetting)).all() == []
+
+def test_0005_backfills_app_id_from_tenant_id():
+    from alembic import command
+    from alembic.config import Config
+    from tests.conftest import admin_engine
+
+    cfg = Config("alembic.ini")
+    command.downgrade(cfg, "0004_session_message_job_id")
+    with admin_engine.begin() as c:
+        c.execute(text(
+            "INSERT INTO memory_fact (id, tenant_id, user_id, subject, content, valid_from, version) "
+            "VALUES ('f1', 'legacy', 'alice', 's', 'c', now(), 1)"
+        ))
+        c.execute(text(
+            "INSERT INTO user_setting (id, tenant_id, user_id, memory_enabled, updated_at) "
+            "VALUES ('u1', 'tiancode', 'alice', true, now())"
+        ))
+    command.upgrade(cfg, "head")
+    with admin_engine.begin() as c:
+        assert c.execute(text("SELECT app_id FROM memory_fact WHERE id='f1'")).scalar() == "legacy"
+        assert c.execute(text("SELECT app_id FROM user_setting WHERE id='u1'")).scalar() == "tiancode"
+        nullable = c.execute(text(
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_name='memory_job' AND column_name='app_id'"
+        )).scalar()
+        assert nullable == "NO"
+        idx = {r[0] for r in c.execute(text("SELECT indexname FROM pg_indexes WHERE tablename='memory_fact'"))}
+        assert {"ix_fact_active", "ix_fact_active_app", "ix_fact_app_user_subject"} <= idx
