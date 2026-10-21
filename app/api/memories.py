@@ -40,9 +40,10 @@ def write(req: WriteRequest, response: Response, idempotency_key: str = Header(.
     job = m.MemoryJob(tenant_id=u.tenant_id, user_id=u.user_id, idempotency_key=idempotency_key,
                       session_id=req.session_id)
     db.add(job)
+    db.flush()  # 客户端默认的 id 在 flush 时才生成，原文要挂上这个 job_id
     for msg in req.messages:
         db.add(m.SessionMessage(tenant_id=u.tenant_id, user_id=u.user_id, session_id=req.session_id,
-                                msg_id=msg.msg_id, role=msg.role, content=msg.content))
+                                job_id=job.id, msg_id=msg.msg_id, role=msg.role, content=msg.content))
     try:
         db.commit()
     except IntegrityError:  # 并发同键

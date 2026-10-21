@@ -43,7 +43,8 @@ docker compose -p agent-memory logs --tail 0        # 日志已限 10m×3，不�
 
 ## 6. 死信任务
 worker 失败 3 次的任务 `status='dead'`。查：`SELECT id,last_error FROM memory_job WHERE status='dead';`
-修复原因后重放：`UPDATE memory_job SET status='pending', attempts=0 WHERE id='...';`
+常见原因：`LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` 缺失或网关不可达（Worker 启动时缺配置会直接退出；运行中连不上则重试后进 dead）。
+修复原因后重放：`UPDATE memory_job SET status='pending', attempts=0, last_error=NULL WHERE id='...';`
 
 ## 7. 数据库账号（initdb 只在空卷时执行）
 `deploy/initdb/01-app-role.sh` 只在数据卷第一次初始化时跑。卷已存在（比如从旧版本升级、换了密码）时，

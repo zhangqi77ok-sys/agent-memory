@@ -47,6 +47,8 @@ services:
       DATABASE_URL: postgresql+psycopg://memsvc_worker:${WORKER_DB_PASSWORD}@db:5432/memory
       WORKER_DATABASE_URL: postgresql+psycopg://memsvc_worker:${WORKER_DB_PASSWORD}@db:5432/memory
       ROLE: worker
+    # 抽取服务若跑在宿主机上（OpenAI 兼容网关），容器用这个名字访问，不写死 IP
+    extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on: { api: { condition: service_healthy } }
     logging: *log
     restart: unless-stopped
