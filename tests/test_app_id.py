@@ -1,6 +1,11 @@
 from app import models as m
 
 
+def test_models_have_no_tenant_id():
+    for t in m.Base.metadata.tables.values():
+        assert "tenant_id" not in t.c, t.name
+
+
 def test_new_rows_dual_write_app_id_and_tenant_id(db):
     f = m.MemoryFact(user_id="alice", subject="s", content="c")
     a = m.AuditLog(user_id="alice", action="recall", fact_ids=[])
