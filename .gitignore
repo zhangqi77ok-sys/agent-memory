@@ -6,9 +6,12 @@ __pycache__/
 *.sql.gz
 *.egg-info/
 *.db
+*.db-journal
 .pytest_cache/
 .ruff_cache/
 report-*.xml
+uv.lock
+.superpowers/
 
 # frontend
 web/node_modules/

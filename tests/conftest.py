@@ -14,6 +14,7 @@ if PG_ADMIN_URL:
 else:
     os.environ["DATABASE_URL"] = "sqlite:///./test.db"
 os.environ.setdefault("APP_ENV", "test")
+os.environ.setdefault("SERVICE_KEYS", "test-service-key,test-service-key-2")
 
 import pytest
 from fastapi.testclient import TestClient
@@ -55,7 +56,7 @@ def fresh_db():
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    return TestClient(app, headers={"X-Service-Key": "test-service-key"})
 
 
 @pytest.fixture

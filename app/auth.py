@@ -1,10 +1,25 @@
-"""身份由业务侧传入：记忆服务不解析 JWT、不做登录。app_id 来自配置，调用方不能切换。"""
+import hmac
 from dataclasses import dataclass
 
 from fastapi import Query
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.config import Settings, settings
+
+
+def is_valid_service_key(provided_key: str | None, s: Settings | None = None) -> bool:
+    """校验服务密钥请求头 X-Service-Key。支持多个值轮换，常量时间比较。"""
+    if not provided_key:
+        return False
+    conf = s or settings
+    keys = conf.service_key_list
+    if not keys:
+        return False
+    valid = False
+    for k in keys:
+        if hmac.compare_digest(provided_key, k):
+            valid = True
+    return valid
 
 
 @dataclass(frozen=True)
