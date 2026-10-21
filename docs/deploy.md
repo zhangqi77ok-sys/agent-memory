@@ -56,6 +56,7 @@ Jenkins 全局环境变量：`DEPLOY_HOST`（Jenkins 容器访问宿主用 docke
 | `API_BIND` / `API_PORT` | api 映射到宿主的地址和端口，默认 `127.0.0.1:8090`，不对公网直接开放 |
 | `ROOT_PATH` | 反向代理前缀 `/memory`，传给 `uvicorn --root-path`，Swagger 才能加载正确的 `openapi.json` |
 | `DOCS_ENABLED` | Swagger UI 开关。默认 prod 关闭；演示部署设 `true` 打开 `/memory/docs`。正式上线前改回 `false` |
+| `SERVICE_KEYS` | 业务调用方服务密钥，支持逗号分隔多个值以便轮换。业务接口必须在请求头带 `X-Service-Key` |
 | `LLM_BASE_URL` | Worker 抽取用的 OpenAI 兼容地址，要以 `/v1` 结尾。示例 `http://host.docker.internal:8080/v1`（容器访问宿主机上的网关）。不要写真实 IP |
 | `LLM_API_KEY` | 该网关的密钥。只放在 `deploy-env` / 部署机 `.env`，不进仓库。缺了 Worker 会直接退出，不会改用假抽取器 |
 | `LLM_MODEL` | 聊天补全的模型名，例如部署侧实际加载的模型 id |

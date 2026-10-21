@@ -5,6 +5,8 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     app_env: str = "dev"  # dev | test | prod
+    env: str | None = None  # 支持 ENV=prod 环境变量
+    service_keys: str = ""  # 逗号分隔的合法服务密钥，支持轮换
     database_url: str = "sqlite:///./dev.db"  # 服务运行账号（非 owner/非超级用户）
     worker_database_url: str | None = None  # Worker 账号 memsvc_worker（BYPASSRLS）；为空时用 database_url（仅 SQLite/开发）
     migrate_database_url: str | None = None  # 迁移账号（owner）；为空时用 database_url
@@ -17,6 +19,20 @@ class Settings(BaseSettings):
     llm_model: str = ""
     recall_timeout_s: float = 2.0
     docs_enabled: bool | None = None  # Swagger UI；None=非 prod 开启、prod 关闭；演示部署可设 DOCS_ENABLED=true
+
+    @property
+    def effective_env(self) -> str:
+        return (self.env or self.app_env).strip().lower()
+
+    @property
+    def is_prod(self) -> bool:
+        return self.effective_env == "prod"
+
+    @property
+    def service_key_list(self) -> list[str]:
+        if not self.service_keys:
+            return []
+        return [k.strip() for k in self.service_keys.split(",") if k.strip()]
 
 
 settings = Settings()
