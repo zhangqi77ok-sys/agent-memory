@@ -40,3 +40,15 @@ def test_other_app_rows_are_invisible(client, db):
     db.add(m.MemoryFact(app_id="other", user_id="alice", subject="s", content="别的应用的记忆"))
     db.commit()
     assert client.get("/v1/me/memories", params=uid("alice")).json()["total"] == 0
+
+
+def test_worker_scopes_by_app_id(db, monkeypatch):
+    from app import worker
+    db.add(m.UserSetting(user_id="alice", memory_enabled=True, consent_version=__import__("app.schemas", fromlist=["x"]).CONSENT_VERSION))
+    job = m.MemoryJob(user_id="alice", idempotency_key="k", session_id="s")
+    db.add(job)
+    db.flush()
+    db.add(m.SessionMessage(user_id="alice", session_id="s", job_id=job.id, msg_id="1", role="user", content="我住在杭州"))
+    db.add(m.SessionMessage(app_id="other", user_id="alice", session_id="s", job_id=job.id, msg_id="2", role="user", content="别的应用"))
+    db.commit()
+    assert [x.content for x in worker._messages(db, job)] == ["我住在杭州"]
