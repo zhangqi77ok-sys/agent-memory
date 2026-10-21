@@ -41,6 +41,7 @@ class SessionMessage(UserScoped, Base):
     __tablename__ = "session_message"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
     session_id: Mapped[str] = mapped_column(String(64), index=True)
+    job_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     msg_id: Mapped[str] = mapped_column(String(64))
     role: Mapped[str] = mapped_column(String(16))
     content: Mapped[str] = mapped_column(Text)

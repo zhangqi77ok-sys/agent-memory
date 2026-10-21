@@ -55,6 +55,11 @@ Jenkins 全局环境变量：`DEPLOY_HOST`（Jenkins 容器访问宿主用 docke
 | `API_BIND` / `API_PORT` | api 映射到宿主的地址和端口，默认 `127.0.0.1:8090`，不对公网直接开放 |
 | `ROOT_PATH` | 反向代理前缀 `/memory`，传给 `uvicorn --root-path`，Swagger 才能加载正确的 `openapi.json` |
 | `DOCS_ENABLED` | Swagger UI 开关。默认 prod 关闭；演示部署设 `true` 打开 `/memory/docs`。正式上线前改回 `false` |
+| `LLM_BASE_URL` | Worker 抽取用的 OpenAI 兼容地址，要以 `/v1` 结尾。示例 `http://host.docker.internal:8080/v1`（容器访问宿主机上的网关）。不要写真实 IP |
+| `LLM_API_KEY` | 该网关的密钥。只放在 `deploy-env` / 部署机 `.env`，不进仓库。缺了 Worker 会直接退出，不会改用假抽取器 |
+| `LLM_MODEL` | 聊天补全的模型名，例如部署侧实际加载的模型 id |
+
+Worker 容器有 `extra_hosts: ["host.docker.internal:host-gateway"]`，所以上面的示例地址在 compose 里能解析到宿主机。这三项由 api/worker 的 `env_file: .env` 注入，流水线不用另加 Jenkins 全局变量；改的是凭据 `deploy-env`（下次部署会覆盖部署机上的 `.env`）。缺任何一项时 Worker 启动失败，已入队的任务不会被假数据写进记忆。
 
 改 `.env`：同时改部署机文件和 Jenkins 凭据 `deploy-env`（下次部署会用凭据覆盖部署机文件）。**注意**：数据库三个密码只在第一次初始化数据卷时生效，之后改要在库里 `ALTER ROLE ... PASSWORD`。
 

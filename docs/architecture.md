@@ -5,6 +5,7 @@
 |---|---|
 | 2026-10-20 | 初版：边界、组件、时序、数据模型、失败策略、部署 |
 | 2026-10-20 | 定为 C 端项目：用户隔离、记忆面板与个保法章节留在 v1；遗忘删所有版本；备份内遗忘；防投毒；数据出境说明 |
+| 2026-10-21 | Worker 抽取管线：脱敏在调用模型之前；ADD/UPDATE/NOOP 由代码判定；矛盾值写 `valid_to`。嵌入仍留空，召回继续用关键词 |
 
 ## 1. 目标与边界
 - **C 端产品**：给 tiancode 的终端用户提供个人长期记忆（长期事实/偏好 + 会话摘要）。
@@ -31,7 +32,7 @@ flowchart LR
   AUTH --> RAPI[召回 API]
   AUTH --> FAPI[遗忘 API]
   WAPI --> JOB[(memory_job 队列表)]
-  JOB --> WK[Worker: 抽取→脱敏→去重→冲突判定→嵌入]
+  JOB --> WK[Worker: 脱敏→抽取→再脱敏→去重→代码判定]
   WK --> LLM[[外部 LLM / Embedding API]]
   WK --> PG[(Postgres 16 + pgvector)]
   RAPI --> PG
@@ -45,13 +46,13 @@ flowchart LR
 | 接入层 | 路由、版本 `/v1`、限流、请求 ID / traceparent | 不接受 body 里的 tenant_id/user_id |
 | 鉴权 | 校验 JWT（服务间 token + 透传用户 token），生成 `TenantContext` | 租户只来自 token |
 | 写入 API | 校验、幂等登记、入队，立即返回 `202 + job_id` | 同一 `Idempotency-Key` 只处理一次 |
-| Worker | LLM 抽取候选事实 → 脱敏 → 相似检索去重 → 规则判定 ADD/UPDATE/NOOP → 嵌入 → 入库 | 模型只给建议，判定规则在代码里 |
+| Worker | 原文脱敏 → LLM 抽取候选 → 候选再脱敏 → 同 subject/key 去重 → 代码判定 ADD/UPDATE/NOOP → 入库 | 模型只给建议，判定规则在代码里。嵌入列仍为空，向量召回未接 |
 | 召回 API | 检索前预过滤（租户/用户 + `valid_to IS NULL`）→ 向量 top-N + BM25 top-N → RRF 融合 → token 预算裁剪 | 结果带 `fact_id` 便于审计 |
 | 遗忘 API | 按 id / 按 subject 物理删除**所有历史版本**（含向量）；受影响的 `session_summary` 重新生成或删除；`session_message` 中来源原文一并删除 | 审计只记 fact_id 与动作，任何地方不留被遗忘的正文 |
 | 审计 | 每次写入/召回/遗忘记录 | 回放靠 `trace_id + model 版本` |
 
 ## 4. 数据模型（v1，三层记忆各一张表 + 支撑表）
-- `session_message(id, tenant_id, user_id, session_id, role, content, msg_id, created_at)`：写入时先落原文，Worker 从这里取
+- `session_message(id, tenant_id, user_id, session_id, job_id, role, content, msg_id, created_at)`：写入时先落原文并挂上 `job_id`，Worker 只抽这一次任务的消息
 - 偏好层用单独的 KV 表（不复用 memory_fact.type）：
 - `memory_preference(id, tenant_id, user_id, key, value, valid_from, valid_to, version, source_msg_id)`：少量 KV，召回时整体注入系统提示
 - `memory_fact(id, tenant_id, user_id, subject, predicate, value, content, embedding vector, embed_model, tsv tsvector, valid_from, valid_to, source_session_id, source_msg_id, version, created_at)`
@@ -87,13 +88,13 @@ sequenceDiagram
   A->>DB: INSERT session_message + memory_job（幂等键唯一）
   A-->>T: 202 {job_id}（重复键返回同一 job_id）
   W->>DB: SELECT ... FOR UPDATE SKIP LOCKED 取 job
-  W->>L: 抽取候选事实/偏好
-  W->>W: 脱敏
-  W->>L: embedding
-  W->>DB: 同租户相似检索去重
-  W->>W: 规则判定 ADD / UPDATE / NOOP
+  W->>W: 再查同意/总开关；关闭则直接 done，不调用模型
+  W->>W: 脱敏本任务的原文（手机号/邮箱/身份证/银行卡）
+  W->>L: 抽取候选事实/偏好（只看到脱敏后的文本）
+  W->>W: 候选再脱敏；丢掉指令型内容
+  W->>W: 代码判定 ADD / UPDATE / NOOP（同 subject 或 key，值相同去重，值矛盾 UPDATE）
   W->>DB: UPDATE 旧行 valid_to=now(); INSERT 新版本
-  W->>DB: audit_log(write) + job=done（失败 attempts+1，超限 dead）
+  W->>DB: audit_log(write) + job=done（传输失败 attempts+1，超限 dead；输出非法则丢弃并 done）
 ```
 
 ## 5.2 召回时序
@@ -123,7 +124,7 @@ sequenceDiagram
 
 ## 5.4 C 端隐私与合规（参照《个人信息保护法》）
 - 首次启用记忆需用户明示同意，默认可关闭；隐私说明写清存什么、存多久、谁能看。
-- 写入闸门：不记敏感个人信息（身份证、银行卡、健康、精确住址等），抽取后再做规则脱敏。
+- 写入闸门：不记敏感个人信息（身份证、银行卡、健康、精确住址等）。手机号、邮箱、身份证、银行卡在送给模型之前替换成占位符，候选入库前再替换一次。
 - 保留期：会话原文默认 90 天，事实与偏好在用户删除或注销前保留；备份保留 7 天。
 - 内部人员访问用户记忆需审计。
 

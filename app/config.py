@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     jwt_alg: str = "HS256"
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1536
+    # OpenAI 兼容抽取接口。三项都空着时 Worker 启动失败，不会改用假抽取器。
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_model: str = ""
     recall_timeout_s: float = 2.0
     docs_enabled: bool | None = None  # Swagger UI；None=非 prod 开启、prod 关闭；演示部署可设 DOCS_ENABLED=true
 

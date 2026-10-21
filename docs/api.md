@@ -28,7 +28,15 @@
 // 202
 {"job_id": "9f2c...", "duplicate": false}
 ```
-约束：`messages` 1–50 条，单条 ≤ 8000 字，`role` 只能是 `user`/`assistant`。接口只落原文和任务，抽取由 Worker 异步完成。
+约束：`messages` 1–50 条，单条 ≤ 8000 字，`role` 只能是 `user`/`assistant`。接口只落原文和任务（原文带 `job_id`）。Worker 异步处理这一次提交的消息：
+
+1. 处理时再查同意和总开关。已关闭则任务 `done`，不调用模型、不写事实。
+2. 手机号、邮箱、身份证号、银行卡号先换成占位符，再请求 LLM。
+3. 模型返回的候选会再脱敏一次。ADD / UPDATE / NOOP 由代码决定：同一个 `subject`（偏好则是 `key`）没有旧值就新增，值相同就跳过，值矛盾则旧行 `valid_to=now()` 并插入 `version+1`。
+4. 列表和召回只返回 `valid_to IS NULL`。导出仍包含历史版本（旧值带 `valid_to`）。
+5. 连不上模型会重试，最多 3 次后 `status=dead`，`last_error` 留下原因。模型输出不是合法 JSON 时丢弃该批、任务完成、不入库。
+
+同一条任务重复处理不会插入第二份相同事实。抽取用的环境变量见 `docs/deploy.md`。
 
 ## 召回 ✅　`POST /v1/memories/recall`
 - 只返回当前用户、当前有效（`valid_to IS NULL`）的事实与偏好。**幂等**（只读，但会写一条审计）。
