@@ -54,13 +54,13 @@ def _call_extractor(extractor, text: str):
 def _memory_on(db: Session, job: m.MemoryJob) -> bool:
     from app.api.me import memory_enabled
 
-    return memory_enabled(db, UserContext(tenant_id=job.tenant_id, user_id=job.user_id))
+    return memory_enabled(db, UserContext(app_id=job.app_id, user_id=job.user_id))
 
 
 def _messages(db: Session, job: m.MemoryJob) -> list[m.SessionMessage]:
     return list(db.scalars(select(m.SessionMessage).where(
         m.SessionMessage.job_id == job.id,
-        m.SessionMessage.tenant_id == job.tenant_id,
+        m.SessionMessage.app_id == job.app_id,
         m.SessionMessage.user_id == job.user_id,
     ).order_by(m.SessionMessage.created_at)))
 
@@ -80,7 +80,7 @@ def _finish(db: Session, job: m.MemoryJob, decision: str, fact_ids: list[str]) -
     job.locked_until = None
     job.last_error = None
     db.add(m.AuditLog(
-        tenant_id=job.tenant_id, user_id=job.user_id, action="write",
+        app_id=job.app_id, user_id=job.user_id, action="write",
         fact_ids=fact_ids, decision=decision,
     ))
     db.commit()
@@ -99,7 +99,7 @@ def _active_value(rows: list, content: str, attr: str) -> str | None:
 def _apply_fact(db: Session, job: m.MemoryJob, subject: str, content: str, proposal: str,
                 source_msg_id: str | None) -> tuple[str, str | None]:
     rows = list(db.scalars(select(m.MemoryFact).where(
-        m.MemoryFact.tenant_id == job.tenant_id,
+        m.MemoryFact.app_id == job.app_id,
         m.MemoryFact.user_id == job.user_id,
         m.MemoryFact.valid_to.is_(None),
     )))
@@ -112,7 +112,7 @@ def _apply_fact(db: Session, job: m.MemoryJob, subject: str, content: str, propo
         row.valid_to = now
     version = max((row.version for row in active), default=0) + 1
     created = m.MemoryFact(
-        tenant_id=job.tenant_id, user_id=job.user_id, subject=subject, content=content,
+        app_id=job.app_id, user_id=job.user_id, subject=subject, content=content,
         version=version, valid_from=now, source_session_id=job.session_id, source_msg_id=source_msg_id,
     )
     db.add(created)
@@ -122,7 +122,7 @@ def _apply_fact(db: Session, job: m.MemoryJob, subject: str, content: str, propo
 
 def _apply_preference(db: Session, job: m.MemoryJob, key: str, value: str, proposal: str) -> tuple[str, str | None]:
     rows = list(db.scalars(select(m.MemoryPreference).where(
-        m.MemoryPreference.tenant_id == job.tenant_id,
+        m.MemoryPreference.app_id == job.app_id,
         m.MemoryPreference.user_id == job.user_id,
         m.MemoryPreference.valid_to.is_(None),
     )))
@@ -135,7 +135,7 @@ def _apply_preference(db: Session, job: m.MemoryJob, key: str, value: str, propo
         row.valid_to = now
     version = max((row.version for row in active), default=0) + 1
     created = m.MemoryPreference(
-        tenant_id=job.tenant_id, user_id=job.user_id, key=key, value=value,
+        app_id=job.app_id, user_id=job.user_id, key=key, value=value,
         version=version, valid_from=now,
     )
     db.add(created)

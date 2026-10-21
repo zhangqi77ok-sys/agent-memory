@@ -20,9 +20,9 @@ pytest -q -k cross_user   # 只跑串用户
 | 不误召回 | 问不相关的内容，召回为空；召回了不该召回的比没召回更危险 | 查「咖啡」不返回「猫」那条；查「咖啡」不返回「咖喱」（中文按相邻两字切）；分数低于临时阈值 0.2 不返回，接入向量 + BM25 后用评测集重新校准 | ✅ `test_irrelevant_facts_not_recalled` |
 
 ## 其它保护性用例
-- `test_body_cannot_carry_identity`：请求体带 `user_id` → 422
+- `test_body_cannot_pick_app`：请求体带 `app_id` → 422
 - `test_write_is_idempotent`：同键写两次 → 同一 job
-- `test_requires_token`：无 token → 401
+- `test_missing_user_id_is_422`：缺 `user_id` 或空串 → 422
 - `test_claim_and_dead_letter`、`test_extractor_errors_retry_then_dead`：Worker 失败 3 次进死信，`last_error` 留下原因
 - `test_pii_is_redacted_before_extractor_and_before_insert`：手机号/邮箱/身份证/银行卡在调用抽取器和入库前都被换成占位符
 - `test_consent_off_at_processing_skips_write`：处理时总开关已关，不调用模型，任务完成且不入库
@@ -30,7 +30,7 @@ pytest -q -k cross_user   # 只跑串用户
 - `test_decide_ignores_model_proposal`：模型建议 ADD/UPDATE/NOOP 不影响代码判定
 - PG：`test_skip_locked_two_workers_get_different_jobs`：两个 Worker 并发领到不同任务
 - PG：`test_migration_artifacts`、`test_service_account_is_not_superuser`
-- `test_refuses_default_jwt_secret_outside_dev`：非开发环境用默认密钥拒绝启动
+- `test_rejects_bad_app_id`：`APP_ID` 为空或含非法字符时拒绝启动
 
 ## 🚧 契约测试
 `LocalMemoryProvider`（tiancode 本地）与 `RemoteMemoryProvider`（本服务）跑同一套用例，结果一致才算通过。

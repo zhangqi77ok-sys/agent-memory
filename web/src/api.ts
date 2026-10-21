@@ -1,5 +1,5 @@
 import type { Job, MemoryItem, MemoryKind, MemoryPage, Settings } from './types'
-import { resolveToken } from './auth'
+import { getUserId } from './user'
 
 export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) || '/memory'
 
@@ -14,16 +14,21 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const token = resolveToken()
-  if (!token) {
-    throw new ApiError(401, null, '未登录：请通过 ?token= 传入 JWT，或先完成登录。')
+  const userId = getUserId()
+  if (!userId) throw new ApiError(422, null, '请先填写 user_id')
+  const method = (init.method || 'GET').toUpperCase()
+  let url = `${API_BASE}${path}`
+  let payload = init.body
+  if (method === 'GET' || method === 'DELETE') {
+    url += `${path.includes('?') ? '&' : '?'}user_id=${encodeURIComponent(userId)}`
+  } else {
+    payload = JSON.stringify({ ...(payload ? JSON.parse(String(payload)) : {}), user_id: userId })
   }
   const headers = new Headers(init.headers)
-  headers.set('Authorization', `Bearer ${token}`)
-  if (init.body && !headers.has('Content-Type')) {
+  if (payload && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
-  const res = await fetch(`${API_BASE}${path}`, { ...init, headers })
+  const res = await fetch(url, { ...init, method, body: payload, headers })
   if (res.status === 204) return undefined as T
   const text = await res.text()
   let body: unknown = null
@@ -84,11 +89,9 @@ export function clearAllMemories(): Promise<void> {
 }
 
 export async function exportMemories(): Promise<Blob> {
-  const token = resolveToken()
-  if (!token) throw new ApiError(401, null, '未登录')
-  const res = await fetch(`${API_BASE}/v1/me/memories/export`, {
-    headers: { Authorization: `Bearer ${token}` },
-  })
+  const userId = getUserId()
+  if (!userId) throw new ApiError(422, null, '请先填写 user_id')
+  const res = await fetch(`${API_BASE}/v1/me/memories/export?user_id=${encodeURIComponent(userId)}`)
   if (!res.ok) {
     throw new ApiError(res.status, null, `导出失败 ${res.status}`)
   }

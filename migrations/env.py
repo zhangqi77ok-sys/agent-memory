@@ -13,8 +13,9 @@ def run_migrations_online():
     # 打印目标（隐藏密码），卡住时能看出连的是哪里；connect_timeout=10 保证连不上就报错而不是挂死
     print(f"[alembic] connecting to {engine.url.render_as_string(hide_password=True)}", flush=True)
     with engine.connect() as conn:
-        conn.exec_driver_sql("SET lock_timeout = '30s'")
-        conn.commit()  # SQLAlchemy 2 会自动开事务；不提交的话下面的迁移事务不会落库
+        if conn.dialect.name == "postgresql":
+            conn.exec_driver_sql("SET lock_timeout = '30s'")
+            conn.commit()  # SQLAlchemy 2 会自动开事务；不提交的话下面的迁移事务不会落库
         context.configure(connection=conn, target_metadata=target_metadata)
         with context.begin_transaction():
             context.run_migrations()

@@ -9,7 +9,7 @@
 
 ## 1. 目标与边界
 - **C 端产品**：给 tiancode 的终端用户提供个人长期记忆（长期事实/偏好 + 会话摘要）。
-- 隔离主键是 `user_id`；`tenant_id` 表示接入的应用（v1 只有 `tiancode`），用于以后多个 App 共用同一服务。
+- 隔离主键是 `user_id`；`app_id` 表示接入的应用（v1 固定 `APP_ID=tiancode`），调用方不能切换应用。
 - 用户对自己的记忆有完全控制权：查看、修改、删除、全部清空、导出、暂停记忆。
 - **不管**：任务状态、checkpoint、工作记忆（属于调用方 Runtime）。
 - v1 不做：情景记忆、图谱、后台整合、程序性记忆。
@@ -26,8 +26,8 @@ flowchart LR
     MP --> R
     R -. 写失败 .-> OB
   end
-  R -->|/v1 + JWT + Idempotency-Key| GW[FastAPI 接入层]
-  GW --> AUTH[鉴权: JWT→TenantContext]
+  R -->|/v1 + user_id + Idempotency-Key| GW[FastAPI 接入层]
+  GW --> AUTH[身份: user_id + APP_ID → UserContext]
   AUTH --> WAPI[写入 API]
   AUTH --> RAPI[召回 API]
   AUTH --> FAPI[遗忘 API]
@@ -43,23 +43,23 @@ flowchart LR
 ## 3. 组件职责
 | 组件 | 职责 | 关键约束 |
 |---|---|---|
-| 接入层 | 路由、版本 `/v1`、限流、请求 ID / traceparent | 不接受 body 里的 tenant_id/user_id |
-| 鉴权 | 校验 JWT（服务间 token + 透传用户 token），生成 `TenantContext` | 租户只来自 token |
+| 接入层 | 路由、版本 `/v1`、限流、请求 ID / traceparent | 不接受 body 里的 `app_id`；`user_id` 由业务传入 |
+| 身份 | 读取请求里的 `user_id`，配上配置 `APP_ID`，生成 `UserContext` | 应用只来自 `APP_ID` |
 | 写入 API | 校验、幂等登记、入队，立即返回 `202 + job_id` | 同一 `Idempotency-Key` 只处理一次 |
 | Worker | 原文脱敏 → LLM 抽取候选 → 候选再脱敏 → 同 subject/key 去重 → 代码判定 ADD/UPDATE/NOOP → 入库 | 模型只给建议，判定规则在代码里。嵌入列仍为空，向量召回未接 |
-| 召回 API | 检索前预过滤（租户/用户 + `valid_to IS NULL`）→ 向量 top-N + BM25 top-N → RRF 融合 → token 预算裁剪 | 结果带 `fact_id` 便于审计 |
+| 召回 API | 检索前预过滤（应用/用户 + `valid_to IS NULL`）→ 向量 top-N + BM25 top-N → RRF 融合 → token 预算裁剪 | 结果带 `fact_id` 便于审计 |
 | 遗忘 API | 按 id / 按 subject 物理删除**所有历史版本**（含向量）；受影响的 `session_summary` 重新生成或删除；`session_message` 中来源原文一并删除 | 审计只记 fact_id 与动作，任何地方不留被遗忘的正文 |
 | 审计 | 每次写入/召回/遗忘记录 | 回放靠 `trace_id + model 版本` |
 
 ## 4. 数据模型（v1，三层记忆各一张表 + 支撑表）
-- `session_message(id, tenant_id, user_id, session_id, job_id, role, content, msg_id, created_at)`：写入时先落原文并挂上 `job_id`，Worker 只抽这一次任务的消息
+- `session_message(id, app_id, user_id, session_id, job_id, role, content, msg_id, created_at)`：写入时先落原文并挂上 `job_id`，Worker 只抽这一次任务的消息
 - 偏好层用单独的 KV 表（不复用 memory_fact.type）：
-- `memory_preference(id, tenant_id, user_id, key, value, valid_from, valid_to, version, source_msg_id)`：少量 KV，召回时整体注入系统提示
-- `memory_fact(id, tenant_id, user_id, subject, predicate, value, content, embedding vector, embed_model, tsv tsvector, valid_from, valid_to, source_session_id, source_msg_id, version, created_at)`
-  - 索引：`(tenant_id, user_id) WHERE valid_to IS NULL`、HNSW(embedding)、GIN(tsv)
-- `session_summary(id, tenant_id, user_id, session_id, summary, upto_msg_id, model, updated_at)`
-- `memory_job(id, tenant_id, idempotency_key UNIQUE(tenant_id, key), payload, status, attempts, last_error, created_at)`
-- `audit_log(id, trace_id, tenant_id, user_id, action, fact_ids, filtered_count, decision, model, embed_model, prompt_version, latency_ms, created_at)`
+- `memory_preference(id, app_id, user_id, key, value, valid_from, valid_to, version, source_msg_id)`：少量 KV，召回时整体注入系统提示
+- `memory_fact(id, app_id, user_id, subject, predicate, value, content, embedding vector, embed_model, tsv tsvector, valid_from, valid_to, source_session_id, source_msg_id, version, created_at)`
+  - 索引：`(app_id, user_id) WHERE valid_to IS NULL`、HNSW(embedding)、GIN(tsv)
+- `session_summary(id, app_id, user_id, session_id, summary, upto_msg_id, model, updated_at)`
+- `memory_job(id, app_id, idempotency_key UNIQUE(app_id, user_id, key), payload, status, attempts, last_error, created_at)`
+- `audit_log(id, trace_id, app_id, user_id, action, fact_ids, filtered_count, decision, model, embed_model, prompt_version, latency_ms, created_at)`
 
 ## 5. 关键流程
 **写入**：`POST /v1/memories {session_id, messages[]}` → 202 → Worker 处理。事实冲突时旧行写 `valid_to=now()`，插入新行 `version+1`（借鉴 Graphiti 时序失效）。
@@ -83,8 +83,8 @@ sequenceDiagram
   participant DB as Postgres
   participant W as Worker
   participant L as LLM/Embedding API
-  T->>A: POST /v1/memories (JWT, Idempotency-Key, messages)
-  A->>A: JWT→TenantContext（拒绝 body 中 tenant/user）
+  T->>A: POST /v1/memories (user_id, Idempotency-Key, messages)
+  A->>A: user_id + APP_ID → UserContext（拒绝 body 中的 app_id）
   A->>DB: INSERT session_message + memory_job（幂等键唯一）
   A-->>T: 202 {job_id}（重复键返回同一 job_id）
   W->>DB: SELECT ... FOR UPDATE SKIP LOCKED 取 job
@@ -106,7 +106,7 @@ sequenceDiagram
   participant L as Embedding API
   T->>A: POST /v1/memories/recall {query,k,token_budget}
   A->>L: query embedding
-  A->>DB: 向量 top-N（WHERE tenant,user AND valid_to IS NULL 预过滤，走部分索引）
+  A->>DB: 向量 top-N（WHERE app_id,user_id AND valid_to IS NULL 预过滤，走部分索引）
   A->>DB: BM25 top-N（同样预过滤）
   A->>A: RRF 融合 → 偏好 + 摘要 + 事实按预算裁剪
   A->>DB: audit_log(recall, fact_ids, 召回原因)
@@ -136,7 +136,7 @@ sequenceDiagram
 `SELECT ... FOR UPDATE SKIP LOCKED` 领取；`locked_until` 处理超时可被重新领取；最多 3 次重试，超过进 `dead` 并告警。
 
 ## 6. 非功能
-- **隔离**：每条 SQL 带 `tenant_id + user_id`，Postgres RLS 兜底；C 端最怕的是用户 A 看到用户 B 的记忆，评测集里“串用户”为硬门禁。
+- **隔离**：每条 SQL 带 `app_id + user_id`，Postgres RLS 兜底；C 端最怕的是用户 A 看到用户 B 的记忆，评测集里“串用户”为硬门禁。
 - **规模与成本**：C 端用户多，按用户限流（写入/召回 QPS、每日抽取次数）；抽取按会话结束或每 N 轮批量触发，控制 LLM 成本；记录每用户 token 用量。
 - **降级**：召回失败→本轮无长期记忆 + `memory_degraded=true` 告警；写失败→调用方发件箱（不参与召回），恢复后按幂等键补写，积压告警。
 - **可观测**：JSON 日志、请求 ID、`/healthz` `/readyz`、写入队列积压指标。
@@ -149,7 +149,7 @@ sequenceDiagram
 - Jenkins→proxy-4 连通方式待 Docker运维 实测：SSH 不通则在 proxy-4 跑 Jenkins agent，或 proxy-4 定时拉新 tag 自部署。
 - 运行单元：`memsvc` 一个镜像，启动参数区分 `api` / `worker`；`postgres`（pgvector 镜像）。共两类容器。
 - `proxy-4`：memsvc(api+worker) + postgres；`proxy-3`：Jenkins；`proxy-5` 不动。
-- 网络：只暴露 memsvc HTTP 端口；Postgres 仅内网；服务间 service token + 透传用户 JWT。
+- 网络：只暴露 memsvc HTTP 端口；Postgres 仅内网。
 - 日志：JSON + trace_id，容器日志 `max-size=10m,max-file=3`。
 - 目标：召回 P95 < 300ms（不含外部 embedding 抖动另行统计）。
 - 备份：每日 `pg_dump -Fc` → GCP 练习机，保留 7 天；恢复演练：新库 `pg_restore` → `alembic current` 校验 → 跑评测集通过即为可用。
@@ -158,7 +158,7 @@ sequenceDiagram
 - 每日 `pg_dump` 到 GCP 练习机，每周恢复演练。磁盘：Jenkins 保留 10 次构建，定时 `docker image prune`。
 
 ## 8. 评测门禁
-记住了吗 / 记错了吗 / 失效后不召回旧值 / 不串租户；Local 与 Remote 两实现跑同一套契约测试。
+记住了吗 / 记错了吗 / 失效后不召回旧值 / 不串用户；Local 与 Remote 两实现跑同一套契约测试。
 
 ## 9. 演进
 v2：情景记忆、后台整合、MCP server 接入；量大再把队列换 Redis、事实关系换图存储。

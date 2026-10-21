@@ -1,3 +1,5 @@
+import re
+
 from pydantic_settings import BaseSettings
 
 
@@ -6,8 +8,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./dev.db"  # 服务运行账号（非 owner/非超级用户）
     worker_database_url: str | None = None  # Worker 账号 memsvc_worker（BYPASSRLS）；为空时用 database_url（仅 SQLite/开发）
     migrate_database_url: str | None = None  # 迁移账号（owner）；为空时用 database_url
-    jwt_secret: str = "dev-only-change-me-32-bytes-minimum!"
-    jwt_alg: str = "HS256"
+    app_id: str = "tiancode"  # 固定应用标识，不由调用方切换
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1536
     # OpenAI 兼容抽取接口。三项都空着时 Worker 启动失败，不会改用假抽取器。
@@ -22,5 +23,5 @@ settings = Settings()
 
 
 def check_settings(s: Settings = settings) -> None:
-    if s.app_env not in ("dev", "test") and s.jwt_secret.startswith("dev-only-"):
-        raise RuntimeError("JWT_SECRET 仍是公开仓库里的默认值，非开发环境拒绝启动")
+    if not re.fullmatch(r"[a-z0-9_-]{1,64}", s.app_id or ""):
+        raise RuntimeError("APP_ID 只能是 1-64 位小写字母、数字、- 或 _")

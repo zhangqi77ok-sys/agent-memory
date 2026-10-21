@@ -49,6 +49,12 @@ async function mockApi(page: Page) {
     const url = new URL(req.url())
     const path = url.pathname
     const method = req.method()
+    if (method === 'GET' || method === 'DELETE') {
+      expect(url.searchParams.get('user_id')).toBe('alice')
+    } else if (req.postData()) {
+      expect((req.postDataJSON() as { user_id?: string }).user_id).toBe('alice')
+    }
+    expect(req.headers()['authorization']).toBeUndefined()
 
     if (path.endsWith('/v1/me/settings') && method === 'GET') {
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(settings) })
@@ -121,7 +127,7 @@ async function mockApi(page: Page) {
 
 test('happy path: consent → list → correct → delete → clear', async ({ page }) => {
   await mockApi(page)
-  await page.goto('?token=test.jwt')
+  await page.goto('?user_id=alice')
 
   await expect(page.getByTestId('consent-page')).toBeVisible()
   await page.getByTestId('consent-check').check()
@@ -149,7 +155,7 @@ test('happy path: consent → list → correct → delete → clear', async ({ p
 
 async function enterPanel(page: Page) {
   await mockApi(page)
-  await page.goto('?token=test.jwt')
+  await page.goto('?user_id=alice')
   await page.getByTestId('consent-check').check()
   await page.getByTestId('consent-submit').click()
   await expect(page.getByTestId('memory-panel')).toBeVisible()
@@ -163,6 +169,18 @@ test('export downloads a JSON file', async ({ page }) => {
   ])
   expect(download.suggestedFilename()).toMatch(/^my-memories-.*\.json$/)
   await expect(page.getByTestId('notice')).toContainText('导出')
+})
+
+test('typing user_id and clicking 使用 opens the panel', async ({ page }) => {
+  await mockApi(page)
+  await page.goto('/')
+  await expect(page.getByTestId('error')).toContainText('请填写 user_id')
+  await page.getByTestId('user-id').fill('alice')
+  await page.getByTestId('use-user').click()
+  await expect(page.getByTestId('consent-page')).toBeVisible()
+  await page.getByTestId('logout').click()
+  await expect(page.getByTestId('consent-page')).toHaveCount(0)
+  await expect(page.getByTestId('error')).toContainText('请填写 user_id')
 })
 
 test('turning off master toggle shows 不再写入 notice', async ({ page }) => {

@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest'
-import { needsConsent } from '../api'
+import { describe, expect, it, vi } from 'vitest'
+import { getSettings, needsConsent, updateSettings } from '../api'
 import type { Settings } from '../types'
+import { setUserId } from '../user'
 
 describe('needsConsent', () => {
   it('true when never consented', () => {
@@ -32,4 +33,15 @@ describe('needsConsent', () => {
     }
     expect(needsConsent(s)).toBe(false)
   })
+})
+
+it('sends user_id as query on GET and in body on PUT, never Authorization', async () => {
+  setUserId('alice')
+  const calls: [string, RequestInit][] = []
+  vi.stubGlobal('fetch', vi.fn(async (u: string, i: RequestInit) => { calls.push([u, i]); return new Response('{}') }))
+  await getSettings()
+  await updateSettings({ memory_enabled: false })
+  expect(calls[0][0]).toContain('/v1/me/settings?user_id=alice')
+  expect(new Headers(calls[0][1].headers).has('Authorization')).toBe(false)
+  expect(JSON.parse(String(calls[1][1].body))).toMatchObject({ user_id: 'alice', memory_enabled: false })
 })

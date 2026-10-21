@@ -15,13 +15,11 @@ else:
     os.environ["DATABASE_URL"] = "sqlite:///./test.db"
 os.environ.setdefault("APP_ENV", "test")
 
-import jwt
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
-from app.config import settings
 from app.db import Base, engine, make_engine
 from app.main import app
 
@@ -68,15 +66,15 @@ def db():
     s.close()
 
 
-def token(user: str, app_id: str = "tiancode") -> dict:
-    t = jwt.encode({"sub": user, "app": app_id}, settings.jwt_secret, algorithm=settings.jwt_alg)
-    return {"Authorization": f"Bearer {t}"}
+def uid(user: str) -> dict:
+    """查询参数形式的身份（GET/DELETE 用）。业务侧自己验完会话后直接传 user_id。"""
+    return {"user_id": user}
 
 
 def consent(client, *users: str) -> None:
     """模拟用户在授权页点了同意并开启记忆（未同意时写入/召回都不生效）。"""
     from app.schemas import CONSENT_VERSION
     for u in users:
-        r = client.put("/v1/me/settings", headers=token(u),
-                       json={"memory_enabled": True, "consent_version": CONSENT_VERSION})
+        r = client.put("/v1/me/settings",
+                       json={"user_id": u, "memory_enabled": True, "consent_version": CONSENT_VERSION})
         assert r.status_code == 200, r.text

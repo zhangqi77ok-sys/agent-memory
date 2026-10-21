@@ -34,7 +34,7 @@ def _score(query: str, text: str) -> float:
 
 def recall_facts(db: Session, u: UserContext, query: str, k: int, token_budget: int) -> list[FactOut]:
     rows = db.scalars(select(m.MemoryFact).where(
-        m.MemoryFact.tenant_id == u.tenant_id,
+        m.MemoryFact.app_id == u.app_id,
         m.MemoryFact.user_id == u.user_id,
         m.MemoryFact.valid_to.is_(None),
     )).all()
