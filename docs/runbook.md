@@ -10,26 +10,86 @@ docker compose -p agent-memory logs --tail 100 api worker
 curl -s 127.0.0.1:8090/readyz
 ```
 
-## 2. 备份
-- `./backup.sh`：`pg_dump -Fc` 到 `/srv/backups/agent-memory/memory-<时间>.dump`（目录 700、文件 600），保留 7 天。
-- 第二份（建议，否则 Jenkins 和备份同机是单点）：`BACKUP_REMOTE=user@另一台:/path ./backup.sh`。
-- cron：`0 3 * * * /opt/agent-memory/backup.sh >> /srv/backups/agent-memory/backup.log 2>&1`
-- 为什么只保留 7 天：用户「遗忘」后，旧备份里还有这条数据；7 天后备份轮换掉才算彻底删除（隐私政策里要写清楚）。
+## 2. 备份（O2）
+- **核实线上定时备份（必需）**：
+  必须在部署机上以 `deploy` 用户配置 crontab：
+  ```bash
+  crontab -e -u deploy
+  # 添加如下定时任务（每天凌晨 3 点自动备份）：
+  0 3 * * * /opt/agent-memory/backup.sh >> /srv/backups/agent-memory/backup.log 2>&1
+  ```
+- **检查备份结果**：
+  - 检查备份目录：`ls -lh /srv/backups/agent-memory`
+  - 必须确认每日均有最新生成的 `memory-<时间>.dump` 文件，且大小大于 0（非空）。
+  - 查看执行日志：`tail -n 50 /srv/backups/agent-memory/backup.log`
+- **异地第二份备份（防部署机单点故障）**：
+  若部署机硬件或磁盘损坏，本地备份将同机丢失。
+  - 在 `deploy` 用户的环境配置 `BACKUP_REMOTE=backup_user@远程主机:/srv/backups/agent-memory`。
+  - 配置 deploy 用户到该远程主机的 SSH 免密登录：`ssh-copy-id backup_user@远程主机`。
+  - `backup.sh` 每次备份成功后会自动 scp 将最新 dump 发送至远端，并自动清理远端超过 7 天的文件。
+- **保留周期与隐私保护**：
+  本地与异地严格保留 7 天（`KEEP_DAYS=7`）。用户行使「遗忘」后，旧物理备份中尚存该记录；7 天后备份轮换删除才算物理彻底销毁（需与隐私政策对齐）。
 
-## 3. 恢复 + 遗忘重删演练（每月一次，只用假数据）
+## 3. 恢复 + 遗忘重删演练（每月一次，O2）
+为了保证备份有效且符合遗忘合规，每月必须在演练库执行一次恢复演练（只用假数据，绝不影响生产库）：
 ```bash
-./backup.sh                                   # 得到 dump 文件
-./restore.sh /srv/backups/agent-memory/memory-XXX.dump memory_drill   # 恢复到临时库，不碰线上库
+cd /opt/agent-memory
+./backup.sh                                                    # 生成最新 dump 文件
+LATEST=$(ls -t /srv/backups/agent-memory/memory-*.dump | head -n1)
+./restore.sh "$LATEST" memory_drill                            # 恢复到临时演练库 memory_drill
+# 验证：演练库中的 memory_fact 绝不能包含已遗忘的数据（查询结果必须为 0）
 docker compose -p agent-memory exec -T db psql -U memory -d memory_drill -c \
-  "SELECT count(*) FROM memory_fact WHERE id IN (SELECT id FROM forgotten_id);"   # 必须是 0
-docker compose -p agent-memory exec -T db psql -U memory -d memory -c "DROP DATABASE memory_drill"
+  "SELECT count(*) FROM memory_fact WHERE id IN (SELECT id FROM forgotten_id);"
+# 演练完毕，清理临时库
+docker compose -p agent-memory exec -T db psql -U memory -d memory -c "DROP DATABASE memory_drill;"
 ```
-`restore.sh` 会先取出**线上库当前的** `forgotten_id`，恢复后合并进恢复库，再执行 `DELETE FROM memory_fact WHERE id IN (SELECT id FROM forgotten_id ...)`，再放流量。
-真出事恢复线上库：先停 api/worker（`docker compose -p agent-memory stop api worker`），`./restore.sh <dump>`，脚本会重删、检查 `alembic current`、调 `/readyz`，再 `up -d`。
-这样即使备份早于某次遗忘，被遗忘的数据也不会复活（2026-10-20 演练：遗忘前备份→遗忘→恢复，`re-deleted facts: 1`，recall 查不到）。线上库整个丢失时，从审计日志 `audit_log`（action=forget）补回 forgotten_id 再重删。
+- **真实线上库灾难恢复 SOP**：
+  1. 停止业务流量与应用容器：`docker compose -p agent-memory stop api worker`
+  2. 选定目标 dump 执行恢复：`./restore.sh /srv/backups/agent-memory/memory-XXX.dump`
+     - `restore.sh` 脚本会先取出当前线上库的 `forgotten_id`，恢复后合并到恢复库，并自动执行重删，防止被遗忘的数据意外复活。
+     - 脚本随后校验 `alembic current` 以及 `/readyz`。
+  3. 恢复应用容器：`docker compose -p agent-memory up -d`
+  4. 验证对外服务：`curl -s 127.0.0.1:8090/readyz` 返回 `{"status":"ready"}`。
 
-## 4. 回滚
-见 `docs/deploy.md#回滚`。流水线冒烟失败会自动回滚；手动回滚就是用旧 TAG 再 `compose up -d`。
+## 4. 回滚（O3）
+### 4.1 自动回滚
+部署期间 Smoke 阶段（API `/readyz` 或前端 UI）失败时，流水线 post failure 自动读取 `.last_tag`（上一次冒烟成功的镜像 TAG），重新拉起上一个稳定版本。无需人工介入。
+
+### 4.2 手动回滚方法
+- **方式一：Jenkins 参数化触发（推荐）**
+  1. 打开 Jenkins 任务页面，选择「Build with Parameters」。
+  2. 在 `ROLLBACK_TAG` 中填入目标镜像 TAG（例如 `8ad4cca20259-b24`）。
+  3. 勾选 `CONFIRM_ROLLBACK` 进行二次确认（未勾选则构建报错中止，防误触）。
+  4. 点击开始构建。流水线将自动跳过代码检查与构建，直接拉取该 TAG 部署并执行冒烟验证。
+- **方式二：部署机手动回滚**
+  ```bash
+  cd /opt/agent-memory
+  cat .last_tag  # 查看上一版本 TAG
+  IMAGE=ghcr.io/zhangqi77ok-sys/agent-memory TAG=<目标TAG> \
+  WEB_IMAGE=ghcr.io/zhangqi77ok-sys/agent-memory-web WEB_TAG=<目标TAG> \
+  docker compose -p agent-memory up -d
+  curl -s 127.0.0.1:8090/readyz
+  ```
+
+### 4.3 核心避坑：回滚至 0006 之前的历史版本（数据库结构降级）
+> [!WARNING]
+> 迁移 0006 移除了历史标识列（旧列），而 0006 之前的应用代码启动和查询强依赖该历史列。如果直接切回到 0006 之前的镜像，API 和 Worker 会因为缺少该列而启动失败或报错 500！
+
+**操作 SOP（如需回滚到 0006 之前版本）**：
+1. 先停止当前应用容器：
+   ```bash
+   docker compose -p agent-memory stop api worker
+   ```
+2. **先执行数据库结构降级**：
+   ```bash
+   docker compose -p agent-memory run --rm --no-deps api alembic downgrade 0005_app_id
+   ```
+   （`0006_drop_...` 的 downgrade 会自动加回历史标识列并从 `app_id` 回填数据）。
+3. 降级成功后，再启动 0006 之前的目标镜像：
+   ```bash
+   IMAGE=ghcr.io/zhangqi77ok-sys/agent-memory TAG=<目标旧TAG> docker compose -p agent-memory up -d
+   ```
+4. 验证服务：`curl -s 127.0.0.1:8090/readyz` 确认返回 200。
 
 ## 5. 磁盘满
 ```bash
@@ -64,3 +124,15 @@ worker 失败 3 次的任务 `status='dead'`。查：`SELECT id,last_error FROM 
   - 前提：迁移必须先扩后缩（新旧版本能同时跑在同一个库上）。
 - 回滚目标是 web 上线前的 tag（没有对应 web 镜像）时，只回滚 api/worker，web 会被停掉，`/memory/ui/` 返回 502，直到下一次成功部署。
 - 网关配置（模板 `deploy/nginx/gateway-memory.conf.example`）在 nginx-gw 里是单文件 bind mount：改完必须 `docker restart nginx-gw`，不要 `nginx -s reload`，否则容器里仍是旧文件。重启期间整个网关（含 `/jenkins/`）会短暂不可用。
+
+## 9. 监控告警处理（O4）
+应用暴露 Prometheus 格式指标端点：`GET /memory/metrics`（公网网关可直接采集，无需服务密钥）。
+
+### 9.1 核心监控告警规则与应急排查
+| 告警项 | 阈值规则 | 级别 | 含义与排查步骤 |
+|---|---|---|---|
+| **服务不可用** | `memory_readyz_status == 0` (持续 1m) | P0 紧急 | 数据库连不上或迁移不一致。<br>排查：`docker compose -p agent-memory logs --tail 100 api`；检查 `docker compose -p agent-memory ps db`。 |
+| **任务死信告警** | `memory_job_count{status="dead"} > 0` (持续 5m) | P1 警告 | Worker 抽取重试 3 次后失败。<br>排查：`SELECT id, user_id, last_error FROM memory_job WHERE status='dead';`。检查 `LLM_BASE_URL` 与 `LLM_API_KEY` 是否有效。修复后重放任务。 |
+| **任务调度延迟** | `memory_job_oldest_pending_age_seconds > 300` (持续 5m) | P1 警告 | 最旧待处理任务排队超过 5 分钟，说明 Worker 挂掉或任务积压。<br>排查：`docker compose -p agent-memory ps worker`，若退出查看日志；若积压考虑扩容 worker。 |
+| **API 5xx 比例过高** | `rate(http_requests_5xx_total[5m]) / rate(http_requests_total[5m]) > 0.05` (持续 2m) | P1 警告 | 服务端内部错误率超过 5%。<br>排查：`docker compose -p agent-memory logs --tail 200 api` 查找异常堆栈与数据库慢查询。 |
+

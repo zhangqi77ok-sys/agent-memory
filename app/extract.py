@@ -142,8 +142,8 @@ class LlmExtractor:
             raise ExtractionError(f"LLM HTTP {e.code}") from e
         except urllib.error.URLError as e:
             raise ExtractionError(f"LLM 连接失败: {e.reason}") from e
-        except TimeoutError as e:
-            raise ExtractionError("LLM 超时") from e
+        except (TimeoutError, ConnectionError, OSError) as e:
+            raise ExtractionError(f"LLM 连接异常: {e}") from e
         except json.JSONDecodeError as e:
             raise ExtractionError("LLM 响应不是 JSON") from e
         try:

@@ -70,13 +70,15 @@ Worker 容器有 `extra_hosts: ["host.docker.internal:host-gateway"]`，所以�
 
 ## 回滚
 - 自动：Smoke 失败 → 读 `.last_tag`（上一次冒烟成功的镜像）→ `compose up -d` → 再确认 `/readyz` 200。没有 `.last_tag` 时报错，不瞎回滚。
-- 手动：
+- 手动（Jenkins 参数化）：在 Jenkins 界面传入 `ROLLBACK_TAG=<目标tag>` 并勾选 `CONFIRM_ROLLBACK` 进行二次确认。流水线将跳过测试与构建，直接拉取该镜像发布并冒烟。
+- 手动（部署机命令行）：
   ```bash
   cd /opt/agent-memory && cat .last_tag            # 例：ghcr.io/zhangqi77ok-sys/agent-memory:<tag>
   IMAGE=ghcr.io/zhangqi77ok-sys/agent-memory TAG=<要回到的tag> docker compose -p agent-memory up -d
   curl -s 127.0.0.1:8090/readyz
   ```
-- 迁移只做「先扩后缩」（只加列/表），所以回滚镜像不需要回滚数据库。
+- **注意（迁移降级陷阱）**：通常情况下迁移遵循「先扩后缩」，回滚镜像不需要回滚数据库。但若回滚到 **0006 之前的历史版本**，因迁移 0006 删除了历史标识列（旧列），而旧版代码强依赖该列，切镜像前**必须先在部署机执行 `alembic downgrade 0005_app_id`**，再启动旧镜像（详见 `docs/runbook.md`）。
+
 
 ## 前端
 - 访问路径：`/memory/ui/`，nginx-gw 里 `location /memory/ui/ { proxy_pass http://127.0.0.1:8091; }`（**末尾不带斜杠**，必须写在 `/memory/` 之前）。裸路径 `location = /memory` 返回 301 `/memory/`。两条反代都有 `proxy_http_version 1.1` 和 `proxy_read_timeout 60s`；`/memory/` 另有 `client_max_body_size 50m`。模板见 `deploy/nginx/gateway-memory.conf.example`。
