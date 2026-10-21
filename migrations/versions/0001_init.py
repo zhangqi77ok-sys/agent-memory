@@ -22,7 +22,9 @@ def upgrade():
         op.execute("CREATE EXTENSION IF NOT EXISTS vector")
     Base.metadata.create_all(bind, tables=[Base.metadata.tables[t] for t in V1_TABLES])
     if is_pg:
-        op.execute("CREATE INDEX IF NOT EXISTS ix_fact_active ON memory_fact (tenant_id, user_id) WHERE valid_to IS NULL")
+        op.execute("DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='memory_fact' "
+                   "AND column_name='tenant_id') THEN CREATE INDEX IF NOT EXISTS ix_fact_active ON memory_fact "
+                   "(tenant_id, user_id) WHERE valid_to IS NULL; END IF; END $$")
         op.execute("CREATE INDEX IF NOT EXISTS ix_fact_hnsw ON memory_fact USING hnsw (embedding vector_cosine_ops)")
         op.execute("CREATE INDEX IF NOT EXISTS ix_fact_fts ON memory_fact USING gin (to_tsvector('simple', content))")
         for t in ("session_message", "memory_fact", "memory_preference", "session_summary", "memory_job"):
