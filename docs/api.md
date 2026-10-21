@@ -13,12 +13,13 @@
 | 401 | 未授权：缺少或错误的服务密钥请求头 `X-Service-Key` |
 | 404 | 资源不存在**或不属于当前用户**（不区分，避免暴露存在性） |
 | 422 | 缺少或非法 `user_id` / 参数校验失败 / 请求体含未定义字段（如 `app_id`） |
-| 429 | 🚧 超过用户限流或每日配额 |
+| 429 | 请求过多：超过 user_id 限流阈值（写/导出更严格），带 Retry-After 响应头 |
 | 5xx | 服务异常；调用方按降级策略处理（见 architecture.md 5.3） |
 
-## 健康检查 ✅
+## 健康检查与监控 ✅
 - `GET /healthz` → `200 {"status":"ok"}`：进程存活
 - `GET /readyz` → `200 {"status":"ready"}`：数据库可连，可接流量
+- `GET /metrics` → `200`（Prometheus 文本格式）：请求计数、5xx 数量、`memory_job` 各状态堆积与最旧任务年龄、就绪探针状态
 
 ## 写入记忆 ✅　`POST /v1/memories`
 - 头：`Idempotency-Key: <调用方生成，建议 session_id + 轮次>`（必填）

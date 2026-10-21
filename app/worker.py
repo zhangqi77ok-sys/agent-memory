@@ -15,7 +15,7 @@ from app import models as m
 from app.auth import UserContext
 from app.db import WorkerSession
 from app.extract import PROMPT_VERSION, InvalidExtraction, decide, is_injection, norm, strip_injection
-from app.redact import redact
+from app.redact import mask_user_id, redact
 
 MAX_ATTEMPTS = 3
 LOCK_SECONDS = 120
@@ -84,7 +84,7 @@ def _finish(db: Session, job: m.MemoryJob, decision: str, fact_ids: list[str]) -
         fact_ids=fact_ids, decision=decision,
     ))
     db.commit()
-    log.info("job=%s user=%s decision=%s n=%s prompt=%s", job.id, job.user_id, decision, len(fact_ids), PROMPT_VERSION)
+    log.info("job=%s user=%s decision=%s n=%s prompt=%s", job.id, mask_user_id(job.user_id), decision, len(fact_ids), PROMPT_VERSION)
     return decision
 
 
@@ -194,7 +194,7 @@ def process_job(db: Session, job: m.MemoryJob, extractor) -> str:
     except InvalidExtraction:
         db.rollback()
         current = db.scalar(select(m.MemoryJob).where(m.MemoryJob.id == job_id).with_for_update())
-        log.info("job=%s user=%s decision=discard prompt=%s", job_id, current.user_id, PROMPT_VERSION)
+        log.info("job=%s user=%s decision=discard prompt=%s", job_id, mask_user_id(current.user_id), PROMPT_VERSION)
         return _finish(db, current, "discard", [])
     except Exception:
         db.rollback()

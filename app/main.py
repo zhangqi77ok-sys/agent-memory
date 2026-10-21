@@ -1,4 +1,6 @@
-from fastapi import FastAPI, Request
+import json
+
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
@@ -7,10 +9,14 @@ from app.api.memories import router as memories_router
 from app.auth import is_valid_service_key
 from app.config import Settings, check_settings, settings
 from app.db import engine
+from app.metrics import metrics_collector
+from app.ratelimit import UserRateLimiter
+from app.redact import setup_logging_filters
 
 
 def create_app(s: Settings = settings) -> FastAPI:
     check_settings(s)
+    setup_logging_filters()
     docs_on = s.docs_enabled if s.docs_enabled is not None else not s.is_prod
     # 反向代理前缀（如 /memory）由 uvicorn --root-path 传入，openapi.json 地址随之正确
     application = FastAPI(
@@ -21,20 +27,55 @@ def create_app(s: Settings = settings) -> FastAPI:
         openapi_url="/openapi.json" if docs_on else None,
     )
 
+    rate_limiter = UserRateLimiter(s)
+
     @application.middleware("http")
-    async def verify_service_key(request: Request, call_next):
+    async def request_middleware(request: Request, call_next):
         path = request.scope.get("path") or request.url.path
         path = path.rstrip("/") or "/"
         if path.startswith("/memory/"):
             path = path[len("/memory"):]
-        # 健康检查与文档接口不需要服务密钥
-        if path in ("/healthz", "/readyz", "/openapi.json") or path.startswith("/docs"):
-            return await call_next(request)
 
-        key = request.headers.get("x-service-key")
-        if not is_valid_service_key(key, s):
-            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
-        return await call_next(request)
+        # 健康检查、探针、监控与文档接口不需要服务密钥与限流
+        is_exempt = path in ("/healthz", "/readyz", "/metrics", "/openapi.json") or path.startswith("/docs")
+
+        if not is_exempt:
+            key = request.headers.get("x-service-key")
+            if not is_valid_service_key(key, s):
+                metrics_collector.record_request(request.method, path, 401)
+                return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+
+            # 应用层 user_id 限流
+            if s.is_rate_limit_enabled and path.startswith("/v1/"):
+                user_id = request.query_params.get("user_id")
+                if not user_id and request.method in ("POST", "PUT", "PATCH"):
+                    try:
+                        body_bytes = await request.body()
+
+                        async def receive():
+                            return {"type": "http.request", "body": body_bytes}
+
+                        request._receive = receive
+                        if body_bytes:
+                            data = json.loads(body_bytes)
+                            if isinstance(data, dict):
+                                user_id = data.get("user_id")
+                    except Exception:
+                        pass
+
+                if user_id:
+                    allowed, retry_after = rate_limiter.check(user_id, path, request.method)
+                    if not allowed:
+                        metrics_collector.record_request(request.method, path, 429)
+                        return JSONResponse(
+                            status_code=429,
+                            content={"detail": "Too Many Requests"},
+                            headers={"Retry-After": str(int(retry_after))},
+                        )
+
+        response = await call_next(request)
+        metrics_collector.record_request(request.method, path, response.status_code)
+        return response
 
     application.include_router(memories_router)
     application.include_router(me_router)
@@ -48,6 +89,11 @@ def create_app(s: Settings = settings) -> FastAPI:
         with engine.connect() as c:
             c.execute(text("SELECT 1"))
         return {"status": "ready"}
+
+    @application.get("/metrics")
+    def metrics():
+        content = metrics_collector.generate_metrics_text(engine)
+        return Response(content=content, media_type="text/plain; version=0.0.4; charset=utf-8")
 
     return application
 

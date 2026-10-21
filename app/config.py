@@ -19,6 +19,15 @@ class Settings(BaseSettings):
     llm_model: str = ""
     recall_timeout_s: float = 2.0
     docs_enabled: bool | None = None  # Swagger UI；None=非 prod 开启、prod 关闭；演示部署可设 DOCS_ENABLED=true
+    rate_limit_enabled: bool | None = None  # None: 非 test 环境开启，test 环境默认关闭
+    rate_limit_read_per_min: int = 120  # 读接口限流阈值（次/分钟）
+    rate_limit_write_per_min: int = 30  # 写/导出/删除接口限流阈值（次/分钟）
+
+    @property
+    def is_rate_limit_enabled(self) -> bool:
+        if self.rate_limit_enabled is not None:
+            return self.rate_limit_enabled
+        return self.effective_env != "test"
 
     @property
     def effective_env(self) -> str:
