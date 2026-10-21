@@ -12,14 +12,15 @@ import {
   needsConsent,
   updateSettings,
 } from './api'
-import { clearToken, resolveToken } from './auth'
+import { clearUserId, getUserId, setUserId } from './user'
 import type { Job, MemoryItem, Settings } from './types'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import ConsentPage from './components/ConsentPage.vue'
 import JobsList from './components/JobsList.vue'
 import MemoryRow from './components/MemoryRow.vue'
 
-const token = ref<string | null>(null)
+const userId = ref<string | null>(null)
+const draft = ref('')
 const settings = ref<Settings | null>(null)
 const items = ref<MemoryItem[]>([])
 const total = ref(0)
@@ -154,19 +155,31 @@ async function onExport() {
   }
 }
 
-function logout() {
-  clearToken()
-  token.value = null
+function useUser() {
+  const id = draft.value.trim()
+  if (!id) {
+    error.value = '请填写 user_id（演示用；正式由天code 业务调用）'
+    return
+  }
+  setUserId(id)
+  userId.value = id
+  void loadAll()
+}
+
+function switchUser() {
+  clearUserId()
+  userId.value = null
   settings.value = null
   items.value = []
   jobs.value = []
-  error.value = '已退出本地登录态。请通过 ?token= 重新进入。'
+  error.value = '请填写 user_id（演示用；正式由天code 业务调用）'
 }
 
 onMounted(async () => {
-  token.value = resolveToken()
-  if (token.value) await loadAll()
-  else error.value = '未登录：请在 URL 加上 ?token=<JWT>（由 tiancode 签发）。'
+  userId.value = getUserId()
+  draft.value = userId.value || ''
+  if (userId.value) await loadAll()
+  else error.value = '请填写 user_id（演示用；正式由天code 业务调用）'
 })
 </script>
 
@@ -177,20 +190,22 @@ onMounted(async () => {
       <p class="muted" style="margin: 0">查看、纠正、删除与导出你保存在记忆服务中的数据</p>
     </div>
     <span class="spacer" />
-    <button v-if="token" type="button" class="btn" data-testid="logout" @click="logout">退出</button>
+    <input data-testid="user-id" v-model="draft" placeholder="user_id" />
+    <button type="button" class="btn" data-testid="use-user" @click="useUser">使用</button>
+    <button v-if="userId" type="button" class="btn" data-testid="logout" @click="switchUser">切换用户</button>
   </header>
 
   <div v-if="error" class="error" data-testid="error">{{ error }}</div>
   <div v-if="notice" class="ok" data-testid="notice">{{ notice }}</div>
 
   <ConsentPage
-    v-if="token && settings && showConsent"
+    v-if="userId && settings && showConsent"
     :settings="settings"
     :busy="busy"
     @agree="agree"
   />
 
-  <template v-else-if="token && settings">
+  <template v-else-if="userId && settings">
     <section class="card" data-testid="settings-panel">
       <div class="row">
         <div>
