@@ -59,3 +59,19 @@ def test_metrics_tracks_job_metrics_directly():
     assert "pending" in counts
     assert "running" in counts
     assert oldest_age >= 0.0
+
+
+def test_job_metrics_see_all_users_under_rls(db):
+    """应用账号不带 app.user_id 也要统计到所有用户的任务（Postgres 上 RLS 真实生效）。"""
+    for i, u in enumerate(("alice", "bob")):
+        db.add(m.MemoryJob(app_id=settings.app_id, user_id=u, idempotency_key=f"rls-{i}",
+                           session_id="s1", status="pending"))
+    db.commit()
+    counts, oldest_age = metrics_collector.collect_job_metrics(engine)
+    assert counts["pending"] == 2
+    assert oldest_age >= 0.0
+    if engine.dialect.name == "postgresql":
+        from sqlalchemy import text
+        with engine.connect() as c:
+            # RLS 仍然生效：应用账号直接查表看不到任何行
+            assert c.execute(text("SELECT count(*) FROM memory_job")).scalar() == 0

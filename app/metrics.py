@@ -1,8 +1,11 @@
+import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 from threading import Lock
 
 from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
 
 
 class MetricsCollector:
@@ -37,16 +40,18 @@ class MetricsCollector:
         now = datetime.now(timezone.utc)
         try:
             with engine.connect() as c:
-                rows = c.execute(text("SELECT status, count(*) FROM memory_job GROUP BY status")).all()
-                for status, cnt in rows:
-                    if status in counts:
-                        counts[status] = int(cnt)
-                    else:
-                        counts[str(status)] = int(cnt)
-
-                oldest_created = c.execute(
-                    text("SELECT min(created_at) FROM memory_job WHERE status = 'pending'")
-                ).scalar()
+                if c.dialect.name == "postgresql":
+                    # memory_job 开了 FORCE RLS，应用账号不带 app.user_id 时直接查是 0 行；
+                    # 走 SECURITY DEFINER 汇总函数（迁移 0007），只拿聚合结果，不放宽 RLS。
+                    rows = c.execute(text("SELECT status, job_count, oldest_created_at FROM memory_job_stats()")).all()
+                else:
+                    rows = c.execute(text(
+                        "SELECT status, count(*), min(created_at) FROM memory_job GROUP BY status")).all()
+                oldest_created = None
+                for status, cnt, oldest in rows:
+                    counts[str(status)] = int(cnt)
+                    if status == "pending":
+                        oldest_created = oldest
                 if oldest_created:
                     if isinstance(oldest_created, str):
                         try:
@@ -59,7 +64,8 @@ class MetricsCollector:
                         oldest_dt = oldest_dt.replace(tzinfo=timezone.utc)
                     oldest_age = max(0.0, (now - oldest_dt).total_seconds())
         except Exception:
-            pass
+            # 统计失败不能让 /metrics 500，但要留痕，避免像 RLS 问题那样静默变 0
+            logger.exception("collect_job_metrics failed")
         return counts, oldest_age
 
     def check_db_ready(self, engine) -> int:
