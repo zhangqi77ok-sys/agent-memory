@@ -48,11 +48,11 @@ Jenkins 全局环境变量：`DEPLOY_HOST`（Jenkins 容器访问宿主用 docke
 ## `.env` 变量（模板见 `deploy/.env.example`）
 | 变量 | 含义 |
 |---|---|
-| `ENV` / `APP_ENV` | `prod`。非 dev/test 时，`JWT_SECRET` 仍是 `dev-only-` 默认值会拒绝启动 |
+| `ENV` / `APP_ENV` | `prod`。`APP_ID` 必须是 1-64 位小写字母、数字、`-` 或 `_` |
 | `POSTGRES_PASSWORD` | 表 owner 账号 `memory` 的密码，只用于迁移和备份 |
 | `APP_DB_PASSWORD` | api 运行账号 `memsvc_app`（非 owner、受 FORCE RLS 约束） |
 | `WORKER_DB_PASSWORD` | worker 账号 `memsvc_worker`（BYPASSRLS、非超级用户） |
-| `JWT_SECRET` | 签发/校验用户 JWT 的密钥，`openssl rand -hex 32` |
+| `APP_ID` | 固定应用标识，默认 `tiancode`。调用方不能切换 |
 | `API_BIND` / `API_PORT` | api 映射到宿主的地址和端口，默认 `127.0.0.1:8090`，不对公网直接开放 |
 | `ROOT_PATH` | 反向代理前缀 `/memory`，传给 `uvicorn --root-path`，Swagger 才能加载正确的 `openapi.json` |
 | `DOCS_ENABLED` | Swagger UI 开关。默认 prod 关闭；演示部署设 `true` 打开 `/memory/docs`。正式上线前改回 `false` |
