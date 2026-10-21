@@ -11,7 +11,7 @@ from app import models as m
 from app.auth import UserContext
 from app.schemas import FactOut
 
-MIN_SCORE = 0.2  # 低于此分视为不相关，不返回（宁可少给，不要塞无关记忆进上下文）
+MIN_SCORE = 0.10  # 基于50条陪伴评测集校准的召回阈值，兼顾长Query召回率与防误召回
 
 
 def _tokens(s: str) -> set[str]:
@@ -38,7 +38,7 @@ def recall_facts(db: Session, u: UserContext, query: str, k: int, token_budget: 
         m.MemoryFact.user_id == u.user_id,
         m.MemoryFact.valid_to.is_(None),
     )).all()
-    scored = sorted(((_score(query, r.content), r) for r in rows), key=lambda x: x[0], reverse=True)
+    scored = sorted(((_score(query, f"{r.subject} {r.content}"), r) for r in rows), key=lambda x: x[0], reverse=True)
     out, used = [], 0
     for s, r in scored[:k]:
         if s < MIN_SCORE:

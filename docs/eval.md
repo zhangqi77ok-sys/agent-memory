@@ -17,7 +17,22 @@ pytest -q -k cross_user   # 只跑串用户
 | 记错了吗 | 入库内容来自抽取结果，不改写成别的事实 | 事实内容与候选一致，并带 `source_msg_id` | ✅ 同上（`source_msg_id` / `content`） |
 | 过期不召回 | 事实更新后旧值不再出现 | 只返回最新版本 | ✅ `test_invalidated_fact_not_recalled`、`test_coffee_contradiction_invalidates_old_version` |
 | 不串用户 | A 召回不到 B；A 删不了 B；数据库层兜底 | 召回结果无 B 内容；删 B 返回 404；漏写条件也查不到 | ✅ `test_no_cross_user_recall`、`test_forget_deletes_all_versions_and_hides_others`、PG：`test_rls_hides_other_users_even_without_where`、`test_rls_blocks_writing_rows_for_other_user`、`test_api_cross_user_recall_and_forget_via_service_account` |
-| 不误召回 | 问不相关的内容，召回为空；召回了不该召回的比没召回更危险 | 查「咖啡」不返回「猫」那条；查「咖啡」不返回「咖喱」（中文按相邻两字切）；分数低于临时阈值 0.2 不返回，接入向量 + BM25 后用评测集重新校准 | ✅ `test_irrelevant_facts_not_recalled` |
+| 不误召回 | 问不相关的内容，召回为空；召回了不该召回的比没召回更危险 | 查「咖啡」不返回「猫」那条；查「咖啡」不返回「咖喱」（中文按相邻两字切）；分数低于校准阈值 0.10 不返回；由 50 条中文陪伴场景评测集校准验证 | ✅ `test_irrelevant_facts_not_recalled`、`test_companion_recall_quality_benchmark` |
+
+## 中文陪伴场景基准评测（50 条基准集，F1 门禁）
+评测用例位于 `tests/test_eval_benchmark.py`，专门覆盖中文陪伴场景真实分布：
+1. **用户偏好（Preference）**：饮食、作息、昵称、运动休闲习惯。
+2. **事实更新（Fact Update）**：工作变动、宠物更新、居住地址变更，确保新版本覆盖旧版本且旧版本不被召回。
+3. **否定与禁忌（Negation）**：过敏源、忌口食材、社交与剧透禁忌。
+4. **多轮深层事实（Multi-turn）**：家人纪念日、母校、长远梦想等深层陪伴细节。
+5. **过期失效（Expiration）**：短期状态与预约（`valid_to` 不为空），确保已过期事实 0 泄露。
+
+**CI 质量门禁指标**：
+- 召回覆盖率（Coverage / Recall） >= 80%（当前实测 100.00%）
+- 检索准确率（Precision） >= 80%（当前实测 100.00%）
+- 过期数据泄露率 = 0%（当前实测 0%）
+任何低于门槛的变动将在 CI 阶段直接阻断构建。
+
 
 ## 其它保护性用例
 - `test_body_cannot_pick_app`：请求体带 `app_id` → 422

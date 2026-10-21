@@ -22,6 +22,7 @@
 |---|---|---|
 | [architecture.md](docs/architecture.md) | 所有人 | 唯一的架构出处 |
 | [api.md](docs/api.md) | 调用方 | 接口、示例、错误码、幂等规则 |
+| [tiancode-integration.md](docs/tiancode-integration.md) | tiancode 研发 | 接入指南、完整交互示例、异常处理 |
 | [eval.md](docs/eval.md) | 开发/评审 | 四类评测与门禁 |
 | deploy.md / runbook.md | 运维 | 由 Docker运维 补充 |
 | [adr/](docs/adr/) | 面试/评审 | 关键取舍 |

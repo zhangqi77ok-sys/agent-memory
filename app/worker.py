@@ -46,6 +46,42 @@ def fail_job(db: Session, job: m.MemoryJob, err: str) -> None:
     db.commit()
 
 
+def expire_memories(db: Session, ttl_days: int = 0, now: datetime | None = None) -> int:
+    """定期将超过保留时长的有效记忆标记为过期失效（valid_to = now）。
+
+    返回标记失效的条数。
+    """
+    if ttl_days <= 0:
+        return 0
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=ttl_days)
+    count = 0
+
+    # 事实过期
+    facts = db.scalars(select(m.MemoryFact).where(
+        m.MemoryFact.valid_to.is_(None),
+        m.MemoryFact.valid_from < cutoff,
+    )).all()
+    for f in facts:
+        f.valid_to = now
+        count += 1
+
+    # 偏好过期
+    prefs = db.scalars(select(m.MemoryPreference).where(
+        m.MemoryPreference.valid_to.is_(None),
+        m.MemoryPreference.valid_from < cutoff,
+    )).all()
+    for p in prefs:
+        p.valid_to = now
+        count += 1
+
+    if count > 0:
+        db.commit()
+        log.info("expired memories count=%s ttl_days=%s", count, ttl_days)
+    return count
+
+
+
 def _call_extractor(extractor, text: str):
     fn = extractor.extract if hasattr(extractor, "extract") else extractor
     return list(fn(text))
@@ -222,12 +258,20 @@ def run_once(db: Session, extractor) -> m.MemoryJob | None:
 
 def main() -> None:  # pragma: no cover
     logging.basicConfig(level=logging.INFO)
+    from app.config import settings
     from app.extract import build_extractor
 
     extractor = build_extractor()
     log.info("worker started prompt=%s", PROMPT_VERSION)
+    last_cleanup = 0.0
     while True:
         with WorkerSession() as db:
+            if settings.memory_ttl_days > 0 and time.time() - last_cleanup > 3600:
+                try:
+                    expire_memories(db, settings.memory_ttl_days)
+                    last_cleanup = time.time()
+                except Exception as e:
+                    log.warning("expire_memories error: %s", e)
             job = run_once(db, extractor)
         if job is None:
             time.sleep(2)

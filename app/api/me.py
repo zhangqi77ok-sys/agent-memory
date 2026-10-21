@@ -126,8 +126,12 @@ def export(u: UserContext = Depends(user_from_query), db: Session = Depends(get_
 
 
 def _settings_out(s: m.UserSetting | None) -> SettingsOut:
-    return SettingsOut(memory_enabled=bool(s and s.memory_enabled),
-                       consent_version=s.consent_version if s else None, consent_at=s.consent_at if s else None)
+    return SettingsOut(
+        memory_enabled=bool(s and s.memory_enabled),
+        consent_version=s.consent_version if s else None,
+        consent_at=s.consent_at if s else None,
+        current_consent_version=CONSENT_VERSION,
+    )
 
 
 @router.get("/settings", response_model=SettingsOut)

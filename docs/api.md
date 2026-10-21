@@ -5,6 +5,7 @@
 - 身份：业务调用方在上游完成身份校验与鉴权后传入 `user_id`（有 JSON body 的接口放 body，GET/DELETE 用 `?user_id=`），本服务不做用户登录。缺失或空串返回 `422`。`app_id` 由服务配置 `APP_ID` 固定（默认 `tiancode`），调用方不能切换；body 里出现 `app_id` 等未定义字段一律 `422`。
 - 交互式文档：非 prod 环境或配置 `DOCS_ENABLED=true` 时可访问 `/docs`（Swagger UI）或 `/openapi.json`；prod 默认关闭（返回 `404`）。
 - C 端面板：`/memory/ui/`（Vue 静态站，只调本文 `/v1/me/*`；仅内网可访问；演示填写 `user_id`，也可用 `?user_id=` 预填）。
+- 接入指南与调用代码示例：详见 [tiancode 业务方接入指南](tiancode-integration.md)。
 - 状态：✅ 已实现　🚧 已设计未实现
 
 ## 错误码
@@ -12,6 +13,7 @@
 |---|---|
 | 401 | 未授权：缺少或错误的服务密钥请求头 `X-Service-Key` |
 | 404 | 资源不存在**或不属于当前用户**（不区分，避免暴露存在性） |
+| 409 | 冲突：隐私协议版本升级，需用户重新同意（返回 `code: consent_required`） |
 | 422 | 缺少或非法 `user_id` / 参数校验失败 / 请求体含未定义字段（如 `app_id`） |
 | 429 | 请求过多：超过 user_id 限流阈值（写/导出更严格），带 Retry-After 响应头 |
 | 5xx | 服务异常；调用方按降级策略处理（见 architecture.md 5.3） |

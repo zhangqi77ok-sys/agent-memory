@@ -152,3 +152,15 @@ def test_0006_drops_tenant_id_everywhere(db):
     idx = {r[0] for r in c.execute(text("SELECT indexname FROM pg_indexes WHERE schemaname='public'"))}
     assert not {"ix_fact_active", "ix_fact_user_subject", "uq_job_idem", "uq_user_setting"} & idx
     assert {"ix_fact_active_app", "ix_fact_app_user_subject", "uq_job_idem_app", "uq_user_setting_app"} <= idx
+
+
+def test_migration_roundtrip():
+    """O5 迁移往返测试：验证整个 Alembic 迁移链 upgrade -> downgrade -> upgrade 可逆性。"""
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config("alembic.ini")
+    command.downgrade(cfg, "base")
+    command.upgrade(cfg, "head")
+
+
