@@ -16,7 +16,7 @@ def test_migration_artifacts(db):
     c = db.connection()
     assert c.execute(text("SELECT 1 FROM pg_extension WHERE extname='vector'")).scalar() == 1
     idx = {r[0] for r in c.execute(text("SELECT indexname FROM pg_indexes WHERE tablename='memory_fact'"))}
-    assert {"ix_fact_active", "ix_fact_active_app", "ix_fact_hnsw", "ix_fact_fts"} <= idx
+    assert {"ix_fact_active_app", "ix_fact_hnsw", "ix_fact_fts"} <= idx
     rows = c.execute(text("SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = ANY(:t)"),
                      {"t": list(TABLES)}).all()
     assert len(rows) == 5 and all(r[1] and r[2] for r in rows)
@@ -140,4 +140,15 @@ def test_0005_backfills_app_id_from_tenant_id():
         )).scalar()
         assert nullable == "NO"
         idx = {r[0] for r in c.execute(text("SELECT indexname FROM pg_indexes WHERE tablename='memory_fact'"))}
-        assert {"ix_fact_active", "ix_fact_active_app", "ix_fact_app_user_subject"} <= idx
+        assert {"ix_fact_active_app", "ix_fact_app_user_subject"} <= idx
+        assert "ix_fact_active" not in idx
+
+
+def test_0006_drops_tenant_id_everywhere(db):
+    c = db.connection()
+    left = c.execute(text("SELECT table_name FROM information_schema.columns WHERE column_name='tenant_id' "
+                          "AND table_schema='public'")).all()
+    assert left == []
+    idx = {r[0] for r in c.execute(text("SELECT indexname FROM pg_indexes WHERE schemaname='public'"))}
+    assert not {"ix_fact_active", "ix_fact_user_subject", "uq_job_idem", "uq_user_setting"} & idx
+    assert {"ix_fact_active_app", "ix_fact_app_user_subject", "uq_job_idem_app", "uq_user_setting_app"} <= idx

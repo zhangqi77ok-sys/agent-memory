@@ -3,10 +3,10 @@
 状态：已采纳（2026-10-20）
 
 ## 背景
-需要：按租户硬隔离、全链路审计回放、与 Jenkins/Compose 部署、面试可讲清原理、无 GPU。
+需要：按应用与用户硬隔离、全链路审计回放、与 Jenkins/Compose 部署、面试可讲清原理、无 GPU。
 
 ## 选项
-- Mem0（Apache-2.0）：抽取+多信号检索成熟；开源 v3 去掉图记忆，租户隔离与审计需自行包装。
+- Mem0（Apache-2.0）：抽取+多信号检索成熟；开源 v3 去掉图记忆，应用隔离与审计需自行包装。
 - Zep / Graphiti：时序失效模型好；Zep 商用托管、社区版已停维护；Graphiti 需额外运维图数据库。
 - Letta：完整 Agent Runtime，会与 tiancode 自己的 Runtime 重叠。
 - LangMem（MIT）：绑定 LangGraph。

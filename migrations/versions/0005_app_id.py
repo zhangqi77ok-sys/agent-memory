@@ -19,9 +19,12 @@ def upgrade():
     bind = op.get_bind()
     insp = sa.inspect(bind)
     for t in TABLES:
-        if "app_id" not in {c["name"] for c in insp.get_columns(t)}:
+        cols = {c["name"] for c in insp.get_columns(t)}
+        if "app_id" not in cols:
             op.add_column(t, sa.Column("app_id", sa.String(64), nullable=True, server_default="tiancode"))
-        op.execute(f"UPDATE {t} SET app_id = tenant_id WHERE tenant_id IS NOT NULL")
+        # 0001 用当前模型 create_all。PR2 模型不再有 tenant_id 时，全新库没有这一列，不能回填。
+        if "tenant_id" in cols:
+            op.execute(f"UPDATE {t} SET app_id = tenant_id WHERE tenant_id IS NOT NULL")
         with op.batch_alter_table(t) as b:  # batch：SQLite 也能 ALTER NOT NULL
             b.alter_column("app_id", existing_type=sa.String(64), nullable=False, server_default="tiancode")
     if "ix_fact_app_user_subject" not in {i["name"] for i in insp.get_indexes("memory_fact")}:
