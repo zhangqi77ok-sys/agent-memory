@@ -2,6 +2,8 @@
 
 只替换明显的联系方式和证件号，不试图理解语义。占位符固定，方便后面核对「原文没进模型和库」。
 """
+import hashlib
+import logging
 import re
 
 # 顺序：邮箱 → 身份证 → 手机号 → 银行卡。身份证是 18 位，必须先于「长数字当卡号」拿掉。
@@ -11,6 +13,57 @@ _CN_ID = re.compile(
 )
 _PHONE = re.compile(r"(?<!\d)(?:\+?86[\s\-]?)?1[3-9](?:[\s\-]?\d){9}(?!\d)")
 _CARD = re.compile(r"(?<!\d)(?:\d[ \-]?){13,19}(?!\d)")
+
+_USER_ID_QUERY = re.compile(r"((?:^|[?&]|\b)user_id=)([^& \t\r\n\"']+)")
+
+
+def mask_user_id(user_id: str | None) -> str:
+    """脱敏 user_id：用 sha256 取前 8 位短哈希，例如 usr#a1b2c3d4。应用日志和 access log 统一使用。"""
+    if not user_id:
+        return ""
+    h = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:8]
+    return f"usr#{h}"
+
+
+def redact_query_string(query_or_url: str) -> str:
+    """将 query string 或 url 中的 user_id=<val> 替换为 user_id=<mask_user_id(val)>。"""
+    if not query_or_url:
+        return query_or_url
+    return _USER_ID_QUERY.sub(lambda m: m.group(1) + mask_user_id(m.group(2)), query_or_url)
+
+
+class RedactUserIdFilter(logging.Filter):
+    """日志过滤器：对日志记录中的明文 user_id 进行脱敏处理，防止泄露。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            new_args = []
+            for arg in record.args:
+                if isinstance(arg, str) and "user_id=" in arg:
+                    new_args.append(redact_query_string(arg))
+                else:
+                    new_args.append(arg)
+            record.args = tuple(new_args)
+        elif isinstance(record.args, dict):
+            new_dict = {}
+            for k, v in record.args.items():
+                if isinstance(v, str) and "user_id=" in v:
+                    new_dict[k] = redact_query_string(v)
+                else:
+                    new_dict[k] = v
+            record.args = new_dict
+
+        if isinstance(record.msg, str) and "user_id=" in record.msg:
+            record.msg = redact_query_string(record.msg)
+        return True
+
+
+def setup_logging_filters() -> None:
+    """为 uvicorn.access 以及 root logger 添加 RedactUserIdFilter，确保日志中不出现明文 user_id。"""
+    f = RedactUserIdFilter()
+    logging.getLogger("uvicorn.access").addFilter(f)
+    logging.getLogger("uvicorn").addFilter(f)
+    logging.getLogger().addFilter(f)
 
 
 def redact(text: str) -> str:

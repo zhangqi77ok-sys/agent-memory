@@ -27,6 +27,8 @@ location /memory/ui/ {
 }
 
 # 业务 API /memory/v1/：只放行内网和业务服务器 IP，其他一律 deny
+# 需在 nginx.conf 的 http 块中定义：limit_req_zone $binary_remote_addr zone=mem_ip_limit:10m rate=30r/s;
+# 超限返回 429：limit_req_status 429;
 location /memory/v1/ {
     allow 10.0.0.0/8;
     allow 172.16.0.0/12;
@@ -34,6 +36,9 @@ location /memory/v1/ {
     allow 127.0.0.1;
     # allow <BUSINESS_SERVER_IP>;  # 生产环境按需补充业务调用方 IP
     deny all;
+
+    # 网关层 IP 限速防刷（结合应用层 user_id 双重保护）
+    limit_req zone=mem_ip_limit burst=20 nodelay;
 
     client_max_body_size 50m;
     proxy_pass http://127.0.0.1:8090/v1/;
