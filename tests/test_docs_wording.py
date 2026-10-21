@@ -4,6 +4,7 @@ import subprocess
 DOCS = ["docs/api.md", "docs/architecture.md", "docs/lessons/me-ui.md", "README.md", "web/README.md"]
 ALLOWED = ("migrations/versions/0001_init.py", "migrations/versions/0003_user_setting.py",
            "migrations/versions/0005_app_id.py", "migrations/versions/0006_drop_tenant_id.py",
+           "migrations/versions/0007_memory_job_stats_fn.py",
            "docs/superpowers/", "tests/test_docs_wording.py", "tests/test_postgres.py", "tests/test_app_id.py")
 
 
