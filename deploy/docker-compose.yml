@@ -40,6 +40,8 @@ services:
 
   worker:
     image: ${IMAGE:-ghcr.io/zhangqi77ok-sys/agent-memory}:${TAG:-latest}
+    deploy:
+      replicas: 2
     env_file: .env
     environment:
       APP_ENV: prod

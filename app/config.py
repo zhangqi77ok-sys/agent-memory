@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool | None = None  # None: 非 test 环境开启，test 环境默认关闭
     rate_limit_read_per_min: int = 120  # 读接口限流阈值（次/分钟）
     rate_limit_write_per_min: int = 30  # 写/导出/删除接口限流阈值（次/分钟）
+    memory_ttl_days: int = 0  # 记忆自动过期时长（天）；0 表示不过期
 
     @property
     def is_rate_limit_enabled(self) -> bool:
