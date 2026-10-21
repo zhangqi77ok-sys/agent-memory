@@ -2,8 +2,8 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint, event
+from sqlalchemy.orm import Mapped, Session, mapped_column
 from sqlalchemy.types import TypeDecorator
 
 from app.config import settings
@@ -33,7 +33,8 @@ class Embedding(TypeDecorator):
 
 
 class UserScoped:
-    tenant_id: Mapped[str] = mapped_column(String(64), default="tiancode")
+    app_id: Mapped[str] = mapped_column(String(64), default=lambda: settings.app_id, server_default="tiancode")
+    tenant_id: Mapped[str] = mapped_column(String(64), default="tiancode")  # PR2 删除；过渡期与 app_id 同值
     user_id: Mapped[str] = mapped_column(String(64), index=True)
 
 
@@ -60,7 +61,10 @@ class MemoryFact(UserScoped, Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     source_session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source_msg_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    __table_args__ = (Index("ix_fact_user_subject", "tenant_id", "user_id", "subject"),)
+    __table_args__ = (
+        Index("ix_fact_user_subject", "tenant_id", "user_id", "subject"),
+        Index("ix_fact_app_user_subject", "app_id", "user_id", "subject"),
+    )
 
 
 class MemoryPreference(UserScoped, Base):
@@ -93,7 +97,10 @@ class MemoryJob(UserScoped, Base):
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
-    __table_args__ = (UniqueConstraint("tenant_id", "user_id", "idempotency_key", name="uq_job_idem"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", "idempotency_key", name="uq_job_idem"),
+        UniqueConstraint("app_id", "user_id", "idempotency_key", name="uq_job_idem_app"),
+    )
 
 
 class ForgottenId(Base):
@@ -109,7 +116,8 @@ class AuditLog(Base):
     __tablename__ = "audit_log"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
     trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    tenant_id: Mapped[str] = mapped_column(String(64))
+    app_id: Mapped[str] = mapped_column(String(64), default=lambda: settings.app_id, server_default="tiancode")
+    tenant_id: Mapped[str] = mapped_column(String(64), default="tiancode")
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     action: Mapped[str] = mapped_column(String(16))
     fact_ids: Mapped[list] = mapped_column(JSON, default=list)
@@ -125,4 +133,19 @@ class UserSetting(UserScoped, Base):
     consent_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
-    __table_args__ = (UniqueConstraint("tenant_id", "user_id", name="uq_user_setting"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", name="uq_user_setting"),
+        UniqueConstraint("app_id", "user_id", name="uq_user_setting_app"),
+    )
+
+
+_DUAL = (SessionMessage, MemoryFact, MemoryPreference, SessionSummary, MemoryJob, AuditLog, UserSetting)
+
+
+@event.listens_for(Session, "before_flush")
+def _dual_write_tenant_id(session, flush_context, instances):
+    """过渡期双写：tenant_id 永远跟 app_id 同值。PR2 连同 tenant_id 一起删掉。"""
+    for obj in session.new:
+        if isinstance(obj, _DUAL):
+            obj.app_id = obj.app_id or settings.app_id
+            obj.tenant_id = obj.app_id
