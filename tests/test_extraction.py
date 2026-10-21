@@ -23,7 +23,7 @@ from app.extract import (
 )
 from app.redact import redact
 from app.worker import run_once
-from tests.conftest import consent, token
+from tests.conftest import consent, uid
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,8 +31,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def _write(client, user, content, key, session_id="s1", msg_id="m1"):
     return client.post(
         "/v1/memories",
-        headers={**token(user), "Idempotency-Key": key},
-        json={"session_id": session_id, "messages": [{"msg_id": msg_id, "role": "user", "content": content}]},
+        headers={"Idempotency-Key": key},
+        json={"user_id": user, "session_id": session_id, "messages": [{"msg_id": msg_id, "role": "user", "content": content}]},
     )
 
 
@@ -174,10 +174,10 @@ def test_consented_write_is_extracted_into_list_and_export(client, db):
 
     jobs = _drain(extractor)
     assert jobs and jobs[0].status == "done"
-    page = client.get("/v1/me/memories", headers=token("alice")).json()
+    page = client.get("/v1/me/memories", params=uid("alice")).json()
     assert page["total"] >= 1
     assert any(i["content"] == "喜欢用 Python" and i["kind"] == "fact" for i in page["items"])
-    exported = client.get("/v1/me/memories/export", headers=token("alice")).json()
+    exported = client.get("/v1/me/memories/export", params=uid("alice")).json()
     assert any(f["content"] == "喜欢用 Python" and f["valid_to"] is None for f in exported["facts"])
     db.expire_all()
     fact = db.query(m.MemoryFact).filter_by(user_id="alice").one()
@@ -205,7 +205,7 @@ def test_coffee_contradiction_invalidates_old_version(client, db):
     assert _write(client, "alice", "不喝咖啡了", "k-stop", msg_id="m-stop").status_code == 202
     _drain(extractor)
 
-    page = client.get("/v1/me/memories", headers=token("alice")).json()
+    page = client.get("/v1/me/memories", params=uid("alice")).json()
     assert page["total"] == 1
     assert [i["content"] for i in page["items"]] == ["不喝咖啡了"]
     assert page["items"][0]["version"] == 2
@@ -216,12 +216,12 @@ def test_coffee_contradiction_invalidates_old_version(client, db):
     assert rows[0].content == "喜欢咖啡" and rows[0].valid_to is not None
     assert rows[1].content == "不喝咖啡了" and rows[1].valid_to is None and rows[1].version == 2
 
-    recalled = client.post("/v1/memories/recall", headers=token("alice"), json={"query": "咖啡"}).json()["facts"]
+    recalled = client.post("/v1/memories/recall", json={"user_id": "alice", "query": "咖啡"}).json()["facts"]
     ids = {f["fact_id"] for f in recalled}
     assert rows[0].id not in ids
     assert ids == {rows[1].id}
 
-    exported = client.get("/v1/me/memories/export", headers=token("alice")).json()["facts"]
+    exported = client.get("/v1/me/memories/export", params=uid("alice")).json()["facts"]
     by_content = {f["content"]: f for f in exported}
     assert by_content["不喝咖啡了"]["valid_to"] is None
     assert by_content["喜欢咖啡"]["valid_to"] is not None
@@ -277,7 +277,7 @@ def test_reprocess_job_is_idempotent(client, db):
 def test_consent_off_at_processing_skips_write(client, db):
     consent(client, "alice")
     _write(client, "alice", "喜欢咖啡", "k-pause")
-    assert client.put("/v1/me/settings", headers=token("alice"), json={"memory_enabled": False}).status_code == 200
+    assert client.put("/v1/me/settings", json={"user_id": "alice", "memory_enabled": False}).status_code == 200
     called = {"n": 0}
 
     def extractor(_text):
@@ -339,7 +339,7 @@ def test_preference_key_conflict_updates(client, db):
         return [Candidate("preference", "lang", "zh", "ADD")]
 
     _drain(extractor)
-    page = client.get("/v1/me/memories?kind=preference", headers=token("alice")).json()
+    page = client.get("/v1/me/memories", params={**uid("alice"), "kind": "preference"}).json()
     assert page["total"] == 1 and page["items"][0]["content"] == "zh" and page["items"][0]["version"] == 2
     db.expire_all()
     assert db.get(m.MemoryPreference, old.id).valid_to is not None

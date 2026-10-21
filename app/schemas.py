@@ -4,8 +4,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class Strict(BaseModel):
-    # 禁止多余字段：body 里出现 tenant_id / user_id 直接 422
+    # 禁止多余字段：body 里出现 app_id 等未定义字段直接 422
     model_config = ConfigDict(extra="forbid")
+
+
+class UserScopedRequest(Strict):
+    user_id: str = Field(min_length=1, max_length=64)
 
 
 class Message(Strict):
@@ -14,7 +18,7 @@ class Message(Strict):
     content: str = Field(max_length=8000)
 
 
-class WriteRequest(Strict):
+class WriteRequest(UserScopedRequest):
     session_id: str
     messages: list[Message] = Field(min_length=1, max_length=50)
 
@@ -25,7 +29,7 @@ class WriteAccepted(BaseModel):
     skipped: bool = False  # 用户未同意或已暂停记忆：本次没有写入
 
 
-class RecallRequest(Strict):
+class RecallRequest(UserScopedRequest):
     query: str = Field(min_length=1, max_length=2000)
     k: int = Field(default=8, ge=1, le=50)
     token_budget: int = Field(default=1500, ge=100, le=8000)
@@ -64,7 +68,7 @@ class MemoryPage(BaseModel):
     limit: int
 
 
-class CorrectRequest(Strict):
+class CorrectRequest(UserScopedRequest):
     content: str = Field(min_length=1, max_length=2000)
 
 
@@ -75,7 +79,7 @@ class SettingsOut(BaseModel):
     current_consent_version: str = CONSENT_VERSION
 
 
-class SettingsIn(Strict):
+class SettingsIn(UserScopedRequest):
     memory_enabled: bool
     # 首次开启必须带上同意的隐私说明版本；版本不对返回 409，前端重新展示授权页
     consent_version: str | None = None

@@ -69,22 +69,22 @@ def test_rls_blocks_writing_rows_for_other_user():
 
 
 def test_api_cross_user_recall_and_forget_via_service_account(client, db):
-    from tests.conftest import consent, token
+    from tests.conftest import consent, uid
     consent(client, 'alice', 'bob')
 
     _seed(db)
     bob_id = db.scalar(select(m.MemoryFact.id).where(m.MemoryFact.user_id == "bob"))
-    facts = client.post("/v1/memories/recall", headers=token("alice"), json={"query": "A"}).json()["facts"]
+    facts = client.post("/v1/memories/recall", json={"user_id": "alice", "query": "A"}).json()["facts"]
     assert [f["content"] for f in facts] == ["A"]
-    assert client.delete(f"/v1/me/memories/{bob_id}", headers=token("alice")).status_code == 404
+    assert client.delete(f"/v1/me/memories/{bob_id}", params=uid("alice")).status_code == 404
 
 
 def test_api_write_goes_through_rls(client, db):
-    from tests.conftest import consent, token
+    from tests.conftest import consent
     consent(client, 'alice')
 
-    r = client.post("/v1/memories", headers={**token("alice"), "Idempotency-Key": "k"},
-                    json={"session_id": "s", "messages": [{"msg_id": "1", "role": "user", "content": "hi"}]})
+    r = client.post("/v1/memories", headers={"Idempotency-Key": "k"},
+                    json={"user_id": "alice", "session_id": "s", "messages": [{"msg_id": "1", "role": "user", "content": "hi"}]})
     assert r.status_code == 202
     assert db.scalar(select(m.MemoryJob.user_id)) == "alice"
 
@@ -116,6 +116,7 @@ def test_user_setting_is_rls_protected(db):
 def test_0005_backfills_app_id_from_tenant_id():
     from alembic import command
     from alembic.config import Config
+
     from tests.conftest import admin_engine
 
     cfg = Config("alembic.ini")

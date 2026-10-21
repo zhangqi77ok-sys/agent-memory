@@ -16,3 +16,27 @@ def test_parallel_constraints_exist():
     names = {c.name for c in m.MemoryJob.__table__.constraints} | {c.name for c in m.UserSetting.__table__.constraints}
     assert {"uq_job_idem", "uq_job_idem_app", "uq_user_setting", "uq_user_setting_app"} <= names
     assert {"ix_fact_user_subject", "ix_fact_app_user_subject"} <= {i.name for i in m.MemoryFact.__table__.indexes}
+
+
+def test_rows_written_via_api_carry_config_app_id(client, db):
+    from tests.conftest import consent
+    consent(client, "alice")
+    r = client.post("/v1/memories", headers={"Idempotency-Key": "k"},
+                    json={"user_id": "alice", "session_id": "s", "messages": [{"msg_id": "1", "role": "user", "content": "hi"}]})
+    assert r.status_code == 202
+    job = db.query(m.MemoryJob).one()
+    assert (job.app_id, job.tenant_id, job.user_id) == ("tiancode", "tiancode", "alice")
+    assert db.query(m.UserSetting).filter_by(user_id="alice").one().app_id == "tiancode"
+
+
+def test_bearer_header_is_ignored(client):
+    r = client.get("/v1/me/settings", headers={"Authorization": "Bearer whatever"})
+    assert r.status_code == 422  # 只认 user_id，不解析任何 token
+
+
+def test_other_app_rows_are_invisible(client, db):
+    from tests.conftest import consent, uid
+    consent(client, "alice")
+    db.add(m.MemoryFact(app_id="other", user_id="alice", subject="s", content="别的应用的记忆"))
+    db.commit()
+    assert client.get("/v1/me/memories", params=uid("alice")).json()["total"] == 0
