@@ -75,7 +75,7 @@ def test_build_extractor_fails_clearly_when_env_missing():
     with pytest.raises(RuntimeError, match="LLM_BASE_URL"):
         build_extractor(blank)
     partial = Settings(
-        app_env="prod", jwt_secret="k" * 40,
+        app_env="prod",
         llm_base_url="http://host.docker.internal:8080/v1", llm_api_key="", llm_model="demo",
     )
     with pytest.raises(RuntimeError, match="LLM_API_KEY"):

@@ -6,8 +6,8 @@ def _docs(s: Settings) -> bool:
 
 
 def test_docs_off_in_prod_by_default():
-    assert _docs(Settings(app_env="prod", jwt_secret="x" * 32)) is False
+    assert _docs(Settings(app_env="prod")) is False
 
 
 def test_docs_flag_overrides_prod():
-    assert _docs(Settings(app_env="prod", jwt_secret="x" * 32, docs_enabled=True)) is True
+    assert _docs(Settings(app_env="prod", docs_enabled=True)) is True
