@@ -52,6 +52,28 @@ def norm(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip().casefold()
 
 
+def _bigrams(s: str) -> set[str]:
+    if len(s) <= 1:
+        return {s} if s else set()
+    return {s[i:i + 2] for i in range(len(s) - 1)}
+
+
+def same_subject(a: str, b: str) -> bool:
+    """两个 subject/key 是否在说同一件事：规范化后相等、互相包含，或 bigram Jaccard ≥ 0.5。
+
+    提示词要求模型更新时复用同一 subject，但模型并不总听话（这次「咖啡」、下次「咖啡偏好」）。
+    写入侧用这个做兜底合并，避免意思相同、字面不同的两条记忆同时有效、互相矛盾。
+    阈值取严：宁可漏合并（多一条冗余），不可错合并（会误杀不相干的旧值）。
+    """
+    na, nb = norm(a), norm(b)
+    if not na or not nb:
+        return False
+    if na == nb or na in nb or nb in na:
+        return True
+    ga, gb = _bigrams(na), _bigrams(nb)
+    return len(ga & gb) / len(ga | gb) >= 0.5
+
+
 def is_injection(text: str) -> bool:
     return bool(text and _INJECTION.search(text))
 

@@ -9,13 +9,13 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session
 
 from app import models as m
 from app.auth import UserContext
 from app.db import WorkerSession
-from app.extract import PROMPT_VERSION, InvalidExtraction, decide, is_injection, norm, strip_injection
+from app.extract import PROMPT_VERSION, InvalidExtraction, decide, is_injection, norm, same_subject, strip_injection
 from app.redact import mask_user_id, redact
 
 MAX_ATTEMPTS = 3
@@ -144,14 +144,36 @@ def _embed_fact(embedder, fact: m.MemoryFact) -> None:
     fact.embed_model = getattr(embedder, "model", None)
 
 
-def _apply_fact(db: Session, job: m.MemoryJob, subject: str, content: str, proposal: str,
-                source_msg_id: str | None, embedder=None) -> tuple[str, str | None]:
-    rows = list(db.scalars(select(m.MemoryFact).where(
+def _matched_facts(db: Session, job: m.MemoryJob, subject: str) -> list[m.MemoryFact]:
+    """找与 subject 说同一件事的有效事实。先只查 (id, subject) 轻列做相似匹配，
+    命中的才整行加载——不再把该用户的全部事实拉进内存逐条比。
+    相似合并（same_subject）顺带治旧账：历史上字面不同、意思相同的重复行会在下一次写入时被一并失效。"""
+    light = db.execute(select(m.MemoryFact.id, m.MemoryFact.subject).where(
         m.MemoryFact.app_id == job.app_id,
         m.MemoryFact.user_id == job.user_id,
         m.MemoryFact.valid_to.is_(None),
-    )))
-    active = [row for row in rows if norm(row.subject) == norm(subject)]
+    )).all()
+    ids = [fid for fid, subj in light if same_subject(subj, subject)]
+    if not ids:
+        return []
+    return list(db.scalars(select(m.MemoryFact).where(m.MemoryFact.id.in_(ids))))
+
+
+def _matched_preferences(db: Session, job: m.MemoryJob, key: str) -> list[m.MemoryPreference]:
+    light = db.execute(select(m.MemoryPreference.id, m.MemoryPreference.key).where(
+        m.MemoryPreference.app_id == job.app_id,
+        m.MemoryPreference.user_id == job.user_id,
+        m.MemoryPreference.valid_to.is_(None),
+    )).all()
+    ids = [pid for pid, k in light if same_subject(k, key)]
+    if not ids:
+        return []
+    return list(db.scalars(select(m.MemoryPreference).where(m.MemoryPreference.id.in_(ids))))
+
+
+def _apply_fact(db: Session, job: m.MemoryJob, subject: str, content: str, proposal: str,
+                source_msg_id: str | None, embedder=None) -> tuple[str, str | None]:
+    active = _matched_facts(db, job, subject)
     decision = decide(_active_value(active, content, "content"), content, proposal=proposal)
     if decision == "NOOP":
         return "noop", None
@@ -171,12 +193,7 @@ def _apply_fact(db: Session, job: m.MemoryJob, subject: str, content: str, propo
 
 
 def _apply_preference(db: Session, job: m.MemoryJob, key: str, value: str, proposal: str) -> tuple[str, str | None]:
-    rows = list(db.scalars(select(m.MemoryPreference).where(
-        m.MemoryPreference.app_id == job.app_id,
-        m.MemoryPreference.user_id == job.user_id,
-        m.MemoryPreference.valid_to.is_(None),
-    )))
-    active = [row for row in rows if norm(row.key) == norm(key)]
+    active = _matched_preferences(db, job, key)
     decision = decide(_active_value(active, value, "value"), value, proposal=proposal)
     if decision == "NOOP":
         return "noop", None
@@ -211,9 +228,20 @@ def _summarize(decisions: list[str]) -> str:
     return "noop"
 
 
+def _lock_user(db: Session, job: m.MemoryJob) -> None:
+    """同一用户的写入串行化。job 领取的 SKIP LOCKED 只锁任务行，两个 Worker 并发处理
+    同一用户时 _apply 的读-改-写会竞态出双 active。Postgres 用事务级咨询锁兜底
+    （随 commit/rollback 自动释放）；SQLite 单写者天然串行，跳过。"""
+    bind = db.get_bind()
+    if bind is not None and bind.dialect.name == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k)::bigint)"),
+                   {"k": f"{job.app_id}:{job.user_id}"})
+
+
 def _extract_and_write(db: Session, job: m.MemoryJob, extractor, embedder=None) -> tuple[str, list[str]]:
     if not _memory_on(db, job):
         return "skip", []
+    _lock_user(db, job)
     messages = _messages(db, job)
     text = strip_injection(_render(messages)).strip()
     if not text:
