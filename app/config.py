@@ -11,8 +11,11 @@ class Settings(BaseSettings):
     worker_database_url: str | None = None  # Worker 账号 memsvc_worker（BYPASSRLS）；为空时用 database_url（仅 SQLite/开发）
     migrate_database_url: str | None = None  # 迁移账号（owner）；为空时用 database_url
     app_id: str = "tiancode"  # 固定应用标识，不由调用方切换
-    embedding_model: str = "text-embedding-3-small"
-    embedding_dim: int = 1536
+    embedding_model: str = "gemini-embedding-001"  # 向量供应商固定为 Google Gemini
+    embedding_dim: int = 1536  # gemini-embedding-001 支持 768/1536/3072，与既有 pgvector 列维度一致
+    embedding_provider: str = "gemini"  # 目前仅支持 gemini；留空表示关闭向量（召回走关键词）
+    gemini_api_key: str = ""  # GEMINI_API_KEY；为空时不生成向量，写入/召回自动降级
+    embedding_timeout_s: float = 30.0  # Worker 批量嵌入超时；召回侧改用 recall_timeout_s
     # OpenAI 兼容抽取接口。三项都空着时 Worker 启动失败，不会改用假抽取器。
     llm_base_url: str = ""
     llm_api_key: str = ""

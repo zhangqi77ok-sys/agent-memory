@@ -5,7 +5,9 @@ from sqlalchemy.orm import Session
 
 from app import models as m
 from app.auth import UserContext, bind_user, user_ctx, user_from_query
+from app.config import settings
 from app.db import SessionLocal
+from app.embeddings import build_embedder
 from app.recall import recall_facts
 from app.schemas import RecallRequest, RecallResponse, WriteAccepted, WriteRequest
 
@@ -64,7 +66,8 @@ def recall(req: RecallRequest, db: Session = Depends(get_db)):
     prefs = db.scalars(select(m.MemoryPreference).where(
         m.MemoryPreference.app_id == u.app_id, m.MemoryPreference.user_id == u.user_id,
         m.MemoryPreference.valid_to.is_(None))).all()
-    facts = recall_facts(db, u, req.query, req.k, req.token_budget)
+    facts = recall_facts(db, u, req.query, req.k, req.token_budget,
+                         embedder=build_embedder(timeout=settings.recall_timeout_s))
     _audit(db, u, "recall", [f.fact_id for f in facts])
     db.commit()
     return RecallResponse(preferences={p.key: p.value for p in prefs}, facts=facts)

@@ -2,7 +2,8 @@
 
 领取仍是 SKIP LOCKED + 处理超时 + 最多 3 次重试。
 抽取失败（网络/5xx）回到 pending，超过次数进 dead；模型输出不合法则丢弃该批并完成任务。
-向量嵌入仍留空，召回继续走关键词。缺 LLM 配置时进程直接退出，不用假抽取器。
+事实入库时同步生成 Gemini 向量（未配 GEMINI_API_KEY 或调用失败则留空，召回自动走关键词）。
+缺 LLM 配置时进程直接退出，不用假抽取器。
 """
 import logging
 import time
@@ -132,8 +133,19 @@ def _active_value(rows: list, content: str, attr: str) -> str | None:
     return getattr(rows[0], attr)
 
 
+def _embed_fact(embedder, fact: m.MemoryFact) -> None:
+    """给一条新事实补向量。失败只记警告：向量是增强项，不能拖垮写入任务。"""
+    try:
+        vec = embedder.embed([f"{fact.subject} {fact.content}"], task_type="RETRIEVAL_DOCUMENT")[0]
+    except Exception as e:
+        log.warning("embed fact=%s failed: %s", fact.id, e)
+        return
+    fact.embedding = vec
+    fact.embed_model = getattr(embedder, "model", None)
+
+
 def _apply_fact(db: Session, job: m.MemoryJob, subject: str, content: str, proposal: str,
-                source_msg_id: str | None) -> tuple[str, str | None]:
+                source_msg_id: str | None, embedder=None) -> tuple[str, str | None]:
     rows = list(db.scalars(select(m.MemoryFact).where(
         m.MemoryFact.app_id == job.app_id,
         m.MemoryFact.user_id == job.user_id,
@@ -153,6 +165,8 @@ def _apply_fact(db: Session, job: m.MemoryJob, subject: str, content: str, propo
     )
     db.add(created)
     db.flush()
+    if embedder is not None:
+        _embed_fact(embedder, created)
     return decision.lower(), created.id
 
 
@@ -179,14 +193,14 @@ def _apply_preference(db: Session, job: m.MemoryJob, key: str, value: str, propo
     return decision.lower(), created.id
 
 
-def _apply(db: Session, job: m.MemoryJob, candidate, source_msg_id: str | None) -> tuple[str, str | None]:
+def _apply(db: Session, job: m.MemoryJob, candidate, source_msg_id: str | None, embedder=None) -> tuple[str, str | None]:
     subject = redact(candidate.subject).strip()
     content = redact(candidate.content).strip()
     if not subject or not content or is_injection(subject) or is_injection(content):
         return "noop", None
     if candidate.kind == "preference":
         return _apply_preference(db, job, subject, content, candidate.action)
-    return _apply_fact(db, job, subject, content, candidate.action, source_msg_id)
+    return _apply_fact(db, job, subject, content, candidate.action, source_msg_id, embedder=embedder)
 
 
 def _summarize(decisions: list[str]) -> str:
@@ -197,7 +211,7 @@ def _summarize(decisions: list[str]) -> str:
     return "noop"
 
 
-def _extract_and_write(db: Session, job: m.MemoryJob, extractor) -> tuple[str, list[str]]:
+def _extract_and_write(db: Session, job: m.MemoryJob, extractor, embedder=None) -> tuple[str, list[str]]:
     if not _memory_on(db, job):
         return "skip", []
     messages = _messages(db, job)
@@ -209,14 +223,14 @@ def _extract_and_write(db: Session, job: m.MemoryJob, extractor) -> tuple[str, l
     decisions: list[str] = []
     ids: list[str] = []
     for candidate in candidates:
-        decision, new_id = _apply(db, job, candidate, source_msg_id)
+        decision, new_id = _apply(db, job, candidate, source_msg_id, embedder=embedder)
         decisions.append(decision)
         if new_id:
             ids.append(new_id)
     return _summarize(decisions), ids
 
 
-def process_job(db: Session, job: m.MemoryJob, extractor) -> str:
+def process_job(db: Session, job: m.MemoryJob, extractor, embedder=None) -> str:
     """处理一条已领取的任务。成功、跳过、丢弃非法输出都把 status 置为 done。可重试错误向外抛。"""
     job_id = job.id
     current = db.scalar(select(m.MemoryJob).where(m.MemoryJob.id == job_id).with_for_update())
@@ -226,7 +240,7 @@ def process_job(db: Session, job: m.MemoryJob, extractor) -> str:
         db.commit()
         return "done"
     try:
-        decision, fact_ids = _extract_and_write(db, current, extractor)
+        decision, fact_ids = _extract_and_write(db, current, extractor, embedder=embedder)
     except InvalidExtraction:
         db.rollback()
         current = db.scalar(select(m.MemoryJob).where(m.MemoryJob.id == job_id).with_for_update())
@@ -238,14 +252,14 @@ def process_job(db: Session, job: m.MemoryJob, extractor) -> str:
     return _finish(db, current, decision, fact_ids)
 
 
-def run_once(db: Session, extractor) -> m.MemoryJob | None:
+def run_once(db: Session, extractor, embedder=None) -> m.MemoryJob | None:
     """领一条并处理。没有待处理任务时返回 None。失败写入 last_error，超限后 status=dead。"""
     job = claim_job(db)
     if not job:
         return None
     job_id = job.id
     try:
-        process_job(db, job, extractor)
+        process_job(db, job, extractor, embedder=embedder)
     except Exception as e:
         db.rollback()
         failed = db.get(m.MemoryJob, job_id)
@@ -259,10 +273,13 @@ def run_once(db: Session, extractor) -> m.MemoryJob | None:
 def main() -> None:  # pragma: no cover
     logging.basicConfig(level=logging.INFO)
     from app.config import settings
+    from app.embeddings import build_embedder
     from app.extract import build_extractor
 
     extractor = build_extractor()
-    log.info("worker started prompt=%s", PROMPT_VERSION)
+    embedder = build_embedder()
+    log.info("worker started prompt=%s embedding=%s", PROMPT_VERSION,
+             embedder.model if embedder is not None else "off")
     last_cleanup = 0.0
     while True:
         with WorkerSession() as db:
@@ -272,7 +289,7 @@ def main() -> None:  # pragma: no cover
                     last_cleanup = time.time()
                 except Exception as e:
                     log.warning("expire_memories error: %s", e)
-            job = run_once(db, extractor)
+            job = run_once(db, extractor, embedder=embedder)
         if job is None:
             time.sleep(2)
         elif job.status == "pending":
