@@ -82,7 +82,10 @@ def test_gemini_dim_mismatch_rejected(monkeypatch):
 def test_build_embedder_gating():
     assert build_embedder(Settings(gemini_api_key="")) is None
     assert build_embedder(Settings(gemini_api_key="k", embedding_provider="")) is None
-    emb = build_embedder(Settings(gemini_api_key="k"))
+    # embedding_dim 显式钉住：PG 真库测试会用 EMBEDDING_DIM=2 对齐假嵌入器的 2 维
+    # 向量（见 scripts/test-pg.sh），本用例验的是「缺省构建出 1536 维的 Gemini 嵌入器」，
+    # 不能被环境变量污染。
+    emb = build_embedder(Settings(gemini_api_key="k", embedding_dim=1536))
     assert isinstance(emb, GeminiEmbedder)
     assert emb.model == "gemini-embedding-001" and emb.dim == 1536
 

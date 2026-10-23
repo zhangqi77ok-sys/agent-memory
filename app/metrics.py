@@ -68,6 +68,38 @@ class MetricsCollector:
             logger.exception("collect_job_metrics failed")
         return counts, oldest_age
 
+    def collect_experience_metrics(self, engine) -> dict:
+        """经验侧指标（第十二轮补：此前待提炼积压、简报命中全无可观测，出问题靠人猜）。
+
+        PG 上 task_episode / memory_insight / audit_log 都开了 RLS，应用账号直查是 0 行，
+        走 SECURITY DEFINER 的 experience_stats()（迁移 0012，只返回聚合数不暴露内容）；
+        SQLite 直查。统计失败只记日志返回零值，不能让 /metrics 500（与 job 指标同一纪律）。"""
+        out = {"episodes": {}, "insights_active": 0, "brief_total": 0, "brief_hits": 0}
+        try:
+            with engine.connect() as c:
+                if c.dialect.name == "postgresql":
+                    rows = c.execute(text("SELECT metric, label, val FROM experience_stats()")).all()
+                    for metric, label, val in rows:
+                        if metric == "episode":
+                            out["episodes"][str(label)] = int(val)
+                        elif metric in ("insights_active", "brief_total", "brief_hits"):
+                            out[metric] = int(val)
+                else:
+                    for status, cnt in c.execute(text(
+                            "SELECT distill_status, count(*) FROM task_episode "
+                            "GROUP BY distill_status")).all():
+                        out["episodes"][str(status)] = int(cnt)
+                    out["insights_active"] = int(c.execute(text(
+                        "SELECT count(*) FROM memory_insight WHERE valid_to IS NULL")).scalar() or 0)
+                    out["brief_total"] = int(c.execute(text(
+                        "SELECT count(*) FROM audit_log WHERE action='brief'")).scalar() or 0)
+                    out["brief_hits"] = int(c.execute(text(
+                        "SELECT count(*) FROM audit_log WHERE action='brief' "
+                        "AND fact_ids IS NOT NULL AND fact_ids NOT IN ('[]', '')")).scalar() or 0)
+        except Exception:
+            logger.exception("collect_experience_metrics failed")
+        return out
+
     def check_db_ready(self, engine) -> int:
         try:
             with engine.connect() as c:
@@ -78,6 +110,7 @@ class MetricsCollector:
 
     def generate_metrics_text(self, engine) -> str:
         job_counts, oldest_age = self.collect_job_metrics(engine)
+        exp = self.collect_experience_metrics(engine)
         db_ready = self.check_db_ready(engine)
 
         with self._lock:
@@ -105,6 +138,25 @@ class MetricsCollector:
             "# HELP memory_job_oldest_pending_age_seconds Age of oldest pending memory job in seconds.",
             "# TYPE memory_job_oldest_pending_age_seconds gauge",
             f"memory_job_oldest_pending_age_seconds {oldest_age:.2f}",
+            "# HELP agent_memory_episodes Task episodes grouped by distill status.",
+            "# TYPE agent_memory_episodes gauge",
+        ])
+        for st, cnt in sorted(exp["episodes"].items()):
+            lines.append(f'agent_memory_episodes{{status="{st}"}} {cnt}')
+        backlog = sum(exp["episodes"].get(s, 0) for s in ("pending", "running"))
+        lines.extend([
+            "# HELP agent_memory_episode_backlog Episodes waiting to be distilled (pending+running).",
+            "# TYPE agent_memory_episode_backlog gauge",
+            f"agent_memory_episode_backlog {backlog}",
+            "# HELP agent_memory_insights_active Currently active (not superseded) insights.",
+            "# TYPE agent_memory_insights_active gauge",
+            f"agent_memory_insights_active {exp['insights_active']}",
+            "# HELP agent_memory_brief_total Brief requests served (audit count).",
+            "# TYPE agent_memory_brief_total counter",
+            f"agent_memory_brief_total {exp['brief_total']}",
+            "# HELP agent_memory_brief_hits Brief requests that returned at least one insight.",
+            "# TYPE agent_memory_brief_hits counter",
+            f"agent_memory_brief_hits {exp['brief_hits']}",
             "# HELP memory_readyz_status Database readiness probe status (1=ready, 0=unhealthy).",
             "# TYPE memory_readyz_status gauge",
             f"memory_readyz_status {db_ready}",

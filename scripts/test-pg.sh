@@ -30,5 +30,9 @@ done
 sleep 2
 
 if [ -x .venv/bin/activate ]; then . .venv/bin/activate; fi
+# EMBEDDING_DIM=2 必带：测试里的假嵌入器是 2 维向量，PG 的 vector 列按配置维度建表，
+# 不对齐会全员 DataError（expected 1536 dimensions, not 2）——2026-10-23 本机真库首跑
+# 的 12 个失败全是这个。生产用自己的配置（缺省 1536，与 Gemini 输出一致），不受影响。
 TEST_DATABASE_URL="postgresql+psycopg://memory:memory@127.0.0.1:${PORT}/memory_test" \
+  EMBEDDING_DIM=2 \
   python3 -m pytest -q "$@"

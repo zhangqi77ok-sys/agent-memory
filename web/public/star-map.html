@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>记忆星图 · agent-memory</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; overflow: hidden; background: #04060f; }
+  body { font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; color: #e2e8f0; }
+  #sky { position: fixed; inset: 0; display: block; cursor: crosshair; }
+  .panel {
+    position: fixed; z-index: 10; background: rgba(8, 12, 28, .72);
+    border: 1px solid rgba(125, 160, 255, .22); border-radius: 14px;
+    backdrop-filter: blur(10px); box-shadow: 0 8px 32px rgba(0,0,0,.45);
+  }
+  #hud { top: 16px; left: 16px; padding: 14px 16px; max-width: 340px; }
+  #hud h1 { font-size: 17px; letter-spacing: .12em; font-weight: 600; }
+  #hud h1 .thin { color: #7dd3fc; }
+  #hud .sub { margin-top: 4px; font-size: 12px; color: #94a3b8; line-height: 1.5; }
+  #hud .stats { margin-top: 10px; display: flex; gap: 14px; font-size: 12px; color: #cbd5e1; }
+  #hud .stats b { color: #fff; font-size: 15px; }
+  #hud .badge { display: inline-block; margin-top: 8px; padding: 2px 8px; font-size: 11px;
+    border-radius: 999px; border: 1px solid rgba(251,191,36,.5); color: #fbbf24; }
+  #hud .badge.live { border-color: rgba(52,211,153,.5); color: #34d399; }
+  #controls { top: 16px; right: 16px; padding: 12px; display: flex; flex-direction: column; gap: 10px; width: 232px; }
+  #search { width: 100%; padding: 8px 10px; border-radius: 9px; border: 1px solid rgba(125,160,255,.25);
+    background: rgba(15,23,42,.8); color: #e2e8f0; font-size: 13px; outline: none; }
+  #search:focus { border-color: #7dd3fc; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { padding: 4px 9px; font-size: 12px; border-radius: 999px; cursor: pointer; user-select: none;
+    border: 1px solid rgba(148,163,184,.35); color: #cbd5e1; background: transparent; transition: all .15s; }
+  .chip.off { opacity: .32; }
+  .chip .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; vertical-align: 1px; }
+  #detail { right: 16px; bottom: 16px; width: 320px; padding: 16px; display: none; }
+  #detail.show { display: block; }
+  #detail .kind { font-size: 11px; letter-spacing: .18em; }
+  #detail h2 { font-size: 16px; margin: 6px 0 8px; }
+  #detail .content { font-size: 13px; line-height: 1.65; color: #cbd5e1; white-space: pre-wrap; }
+  #detail .when { margin-top: 8px; font-size: 12px; color: #94a3b8; line-height: 1.6; }
+  #detail .meta { margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; font-size: 12px; color: #94a3b8; }
+  #detail .meta b { color: #e2e8f0; font-weight: 500; }
+  .bar { height: 6px; border-radius: 3px; background: rgba(148,163,184,.2); margin-top: 4px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: linear-gradient(90deg, #38bdf8, #34d399); }
+  #tip { position: fixed; z-index: 20; pointer-events: none; display: none; padding: 6px 10px;
+    font-size: 12px; border-radius: 8px; background: rgba(2,6,23,.92); border: 1px solid rgba(125,160,255,.3); }
+  #hint { position: fixed; left: 16px; bottom: 16px; z-index: 10; font-size: 12px; color: #64748b; }
+  @media (max-width: 760px) { #controls { display: none; } #hud { max-width: 250px; } #detail { width: calc(100vw - 32px); } }
+</style>
+</head>
+<body>
+<canvas id="sky"></canvas>
+
+<div id="hud" class="panel">
+  <h1>记忆星图 <span class="thin">MEMORY STARFIELD</span></h1>
+  <div class="sub">每一颗星是一条记忆：事实与偏好是近处的亮星，经验按教训 / 策略 / 避坑 / 捷径着色，
+    轨迹是远处暗星。同主题的星以星座线相连；星越大用得越多，越亮置信度越高。</div>
+  <div class="stats">
+    <span><b id="stTotal">–</b> 记忆</span>
+    <span><b id="stInsight">–</b> 经验</span>
+    <span><b id="stConf">–</b> 平均置信</span>
+  </div>
+  <span id="modeBadge" class="badge">演示数据</span>
+</div>
+
+<div id="controls" class="panel">
+  <input id="search" type="search" placeholder="搜索主题或内容…">
+  <div class="chips" id="chips"></div>
+</div>
+
+<div id="detail" class="panel"></div>
+<div id="tip"></div>
+<div id="hint">拖动平移 · 滚轮缩放 · 点击星星查看详情</div>
+
+<script>
+"use strict";
+/* ============ 数据：优先实时接口，失败则用演示数据 ============ */
+const KINDS = {
+  fact:       { label: "事实",   color: "#7dd3fc" },
+  preference: { label: "偏好",   color: "#c4b5fd" },
+  lesson:     { label: "教训",   color: "#fbbf24" },
+  strategy:   { label: "策略",   color: "#34d399" },
+  pitfall:    { label: "避坑",   color: "#fb7185" },
+  cost_saver: { label: "捷径",   color: "#2dd4bf" },
+  episode:    { label: "轨迹",   color: "#64748b" },
+};
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const params = new URLSearchParams(location.search);
+const USER_ID = params.get("user_id") || "demo";
+const API = (params.get("api") || "").replace(/\/$/, "");
+const KEY = params.get("key") || "";
+
+const DEMO = [
+  // 经验
+  { t:"insight", kind:"pitfall", subject:"部署端口选择", content:"部署前先探测端口占用，8080、8081 常被占用，不要逐个试错", applies_when:"部署或启动本地服务、需要绑定端口时", confidence:0.8, use:6, succ:4, project:"agent-memory" },
+  { t:"insight", kind:"strategy", subject:"部署端口选择", content:"先用 ss -tlnp 批量探测端口段，再从空闲段里挑，一次到位", applies_when:"部署或启动本地服务、需要绑定端口时", confidence:0.67, use:3, succ:2, project:"agent-memory" },
+  { t:"insight", kind:"lesson", subject:"数据库测试", content:"SQLite 上全绿不代表 PG 没问题：列长度、行级权限、锁语义只有真库能测", applies_when:"涉及数据库行为的改动合并前", confidence:0.75, use:4, succ:3, project:"agent-memory" },
+  { t:"insight", kind:"pitfall", subject:"数据库测试", content:"提交前不跑真库 CI，两个 P0 都是这类问题：本地测不出、生产才爆", applies_when:"准备推送涉及迁移的改动时", confidence:0.83, use:5, succ:5, project:"agent-memory" },
+  { t:"insight", kind:"cost_saver", subject:"向量召回校准", content:"余弦门槛不要拍脑袋：拿真实向量跑命中/未命中样本，0.66 恰好分开两组", applies_when:"调召回阈值或换嵌入模型时", confidence:0.8, use:2, succ:2, project:"agent-memory" },
+  { t:"insight", kind:"strategy", subject:"MCP 接入", content:"让多个 AI 工具共享记忆，统一走 MCP 门面，身份按用户隔离，接口不要各写一套", applies_when:"新工具要接入共享记忆时", confidence:0.67, use:3, succ:2, project:"agent-memory" },
+  { t:"insight", kind:"pitfall", subject:"轨迹脱敏", content:"任务轨迹里最容易夹带密钥和口令，入库前先脱敏，库里、备份里、导出里都只留占位符", applies_when:"提交任务过程给记忆系统之前", confidence:0.9, use:7, succ:6, project:"agent-memory" },
+  { t:"insight", kind:"lesson", subject:"Git 推送", content:"这台机器的 ssh 按 passwd 家目录找钥匙，必须显式 -i 指定，否则永远 Permission denied", applies_when:"在本机向 GitHub 推送失败时", confidence:0.86, use:4, succ:4, project:"infra" },
+  { t:"insight", kind:"cost_saver", subject:"Git 推送", content:"SSH 走 443 端口经代理 CONNECT，比折腾应用授权更快打通推送通道", applies_when:"常规 git push 不通时", confidence:0.75, use:2, succ:2, project:"infra" },
+  { t:"insight", kind:"pitfall", subject:"命名阈值", content:"主体合并的包含匹配会误伤：Java 与 JavaScript 是两个东西，收紧前先列误合清单", applies_when:"做主题归一化或去重时", confidence:0.67, use:2, succ:1, project:"agent-memory" },
+  { t:"insight", kind:"strategy", subject:"经验提炼", content:"提炼输入要限长：保头尾、失败步骤优先，其余省略并标注步号，模型要知道轨迹被截断过", applies_when:"把长轨迹喂给提炼器时", confidence:0.6, use:1, succ:1, project:"agent-memory" },
+  { t:"insight", kind:"lesson", subject:"申诉沟通", content:"给平台写复核邮件只陈述可核验事实：本人注册、唯一使用、用途与行程，不编造任何细节", applies_when:"账号异常需要申诉时", confidence:0.5, use:1, succ:0, project:"life" },
+  // 事实与偏好
+  { t:"fact", kind:"fact", subject:"域名", content:"52it.cc 在腾讯云注册，主域名解析不能动，只用二级域名", confidence:1, use:9 },
+  { t:"fact", kind:"fact", subject:"域名", content:"aiscan.top 已接入 Cloudflare，用于节点中继，52it.cc 不受影响", confidence:1, use:5 },
+  { t:"fact", kind:"fact", subject:"咖啡", content:"喝咖啡喜欢拿铁", confidence:1, use:3 },
+  { t:"fact", kind:"preference", subject:"咖啡", content:"咖啡相关记录优先按拿铁理解", confidence:1, use:2 },
+  { t:"fact", kind:"fact", subject:"GitHub", content:"仓库 agent-memory 走 SSH 通道推送，分支 feat/mcp-gemini-embeddings", confidence:1, use:6 },
+  { t:"fact", kind:"preference", subject:"协作方式", content:"每次完成工作都要 commit 并 push 到 GitHub", confidence:1, use:8 },
+  { t:"fact", kind:"preference", subject:"协作方式", content:"跑代码要报完整控制台日志和退出码，不要摘要掉失败", confidence:1, use:8 },
+  { t:"fact", kind:"preference", subject:"学习方式", content:"教学要实践优先：先给能跑的演示，理论从运行结果讲起", confidence:1, use:4 },
+  // 轨迹
+  { t:"episode", kind:"episode", subject:"部署服务", content:"在 8080 启动被占用，改探测后一次成功", confidence:0, use:0, project:"agent-memory" },
+  { t:"episode", kind:"episode", subject:"推送代码", content:"App 授权 403，改走 SSH deploy key 打通", confidence:0, use:0, project:"infra" },
+  { t:"episode", kind:"episode", subject:"账号申诉", content:"两封复核邮件已发，等对方人工回复", confidence:0, use:0, project:"life" },
+  { t:"episode", kind:"episode", subject:"召回校准", content:"6 条经验 × 8 个任务实测向量分布后定下门槛", confidence:0, use:0, project:"agent-memory" },
+];
+
+async function loadData() {
+  const headers = KEY ? { "X-Service-Key": KEY } : {};
+  const q = `user_id=${encodeURIComponent(USER_ID)}`;
+  const [ins, mem, exp] = await Promise.allSettled([
+    fetch(`${API}/v1/me/insights?${q}`, { headers }).then(r => { if (!r.ok) throw 0; return r.json(); }),
+    fetch(`${API}/v1/me/memories?${q}&limit=200`, { headers }).then(r => { if (!r.ok) throw 0; return r.json(); }),
+    fetch(`${API}/v1/me/memories/export?${q}`, { headers }).then(r => { if (!r.ok) throw 0; return r.json(); }),
+  ]);
+  const nodes = [];
+  if (ins.status === "fulfilled" && Array.isArray(ins.value)) {
+    for (const i of ins.value) nodes.push({ t:"insight", kind:i.kind, subject:i.subject,
+      content:i.content, applies_when:i.applies_when, confidence:i.confidence ?? 0.5,
+      use:i.use_count || 0, succ:i.success_count || 0, project:i.project, pinned:i.pinned, muted:i.muted });
+  }
+  if (mem.status === "fulfilled" && mem.value && Array.isArray(mem.value.items)) {
+    for (const f of mem.value.items) nodes.push({ t:"fact",
+      kind: f.kind === "preference" ? "preference" : "fact", subject:f.subject,
+      content:f.content, confidence:1, use:0 });
+  }
+  if (exp.status === "fulfilled" && exp.value && Array.isArray(exp.value.episodes)) {
+    for (const e of exp.value.episodes) nodes.push({ t:"episode", kind:"episode",
+      subject:e.title, content:`结果：${e.outcome} · 提炼状态：${e.distill_status}`,
+      confidence:0, use:0, project:e.project });
+  }
+  if (!nodes.length) throw new Error("empty");
+  return nodes;
+}
+
+/* ============ 星图布局与渲染 ============ */
+const canvas = document.getElementById("sky");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1;
+let nodes = [], bgStars = [], nebulas = [];
+let cam = { x: 0, y: 0, z: 1 }, mouse = { x: -999, y: -999 }, hover = null, selected = null;
+let drag = null, query = "", enabledKinds = new Set(Object.keys(KINDS));
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W * DPR; canvas.height = H * DPR;
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener("resize", resize); resize();
+
+function layout(data) {
+  const groups = new Map();
+  for (const n of data) {
+    if (!groups.has(n.subject)) groups.set(n.subject, []);
+    groups.get(n.subject).push(n);
+  }
+  const centers = new Map();
+  const subjects = [...groups.keys()];
+  subjects.forEach((s, i) => {
+    const ang = i * 2.399963;                       // 黄金角螺旋，像星系盘
+    const rad = 90 + 62 * Math.sqrt(i + 1);
+    centers.set(s, { x: Math.cos(ang) * rad, y: Math.sin(ang) * rad * 0.82 });
+  });
+  nodes = data.map((n, idx) => {
+    const c = centers.get(n.subject);
+    const a = Math.random() * Math.PI * 2, rr = 12 + Math.random() * 42;
+    const conf = n.confidence ?? 0.5;
+    const r = n.t === "insight" ? 3.2 + Math.sqrt(n.use || 0) * 1.5 + conf * 2.4
+            : n.t === "fact" ? 3.0 : 2.0;
+    return { ...n, gx: c.x, gy: c.y, ox: Math.cos(a) * rr, oy: Math.sin(a) * rr,
+             r, phase: Math.random() * Math.PI * 2, speed: 0.15 + Math.random() * 0.5,
+             idx, x: 0, y: 0 };
+  });
+  bgStars = Array.from({ length: 260 }, () => ({ x: Math.random(), y: Math.random(),
+    r: Math.random() * 1.3 + 0.3, p: Math.random() * Math.PI * 2, s: 0.4 + Math.random() }));
+  nebulas = [
+    { x: .22, y: .3, r: .55, c: "56,89,199" }, { x: .8, y: .65, r: .6, c: "88,28,135" },
+    { x: .55, y: .15, r: .4, c: "8,145,178" }, { x: .35, y: .85, r: .5, c: "30,64,175" },
+  ];
+  document.getElementById("stTotal").textContent = nodes.length;
+  const ins = nodes.filter(n => n.t === "insight");
+  document.getElementById("stInsight").textContent = ins.length;
+  document.getElementById("stConf").textContent = ins.length
+    ? (ins.reduce((s, n) => s + (n.confidence ?? 0.5), 0) / ins.length).toFixed(2) : "–";
+}
+
+const sprites = {};
+function sprite(color) {
+  if (sprites[color]) return sprites[color];
+  const c = document.createElement("canvas"); c.width = c.height = 64;
+  const g = c.getContext("2d");
+  const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0, "#ffffff"); grad.addColorStop(0.25, color);
+  grad.addColorStop(0.55, color + "55"); grad.addColorStop(1, "transparent");
+  g.fillStyle = grad; g.fillRect(0, 0, 64, 64);
+  sprites[color] = c; return c;
+}
+function visible(n) {
+  if (!enabledKinds.has(n.kind)) return false;
+  if (!query) return true;
+  const q = query.toLowerCase();
+  return (n.subject + " " + n.content).toLowerCase().includes(q);
+}
+function frame(t) {
+  const time = t / 1000;
+  ctx.clearRect(0, 0, W, H);
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, "#04060f"); bg.addColorStop(0.6, "#070b1d"); bg.addColorStop(1, "#03040a");
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  for (const nb of nebulas) {
+    const g = ctx.createRadialGradient(nb.x * W, nb.y * H, 0, nb.x * W, nb.y * H, nb.r * Math.max(W, H) * 0.5);
+    g.addColorStop(0, `rgba(${nb.c},0.13)`); g.addColorStop(1, "transparent");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+  ctx.fillStyle = "#dbeafe";
+  for (const s of bgStars) {
+    const tw = 0.35 + 0.65 * Math.abs(Math.sin(time * s.s + s.p));
+    ctx.globalAlpha = tw * 0.75;
+    ctx.beginPath(); ctx.arc(s.x * W + cam.x * 0.012 * s.r, s.y * H + cam.y * 0.012 * s.r, s.r, 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  const cx = W / 2 + cam.x, cy = H / 2 + cam.y;
+  for (const n of nodes) {
+    const wob = Math.sin(time * n.speed + n.phase) * 2.2;
+    n.x = cx + (n.gx + n.ox + wob) * cam.z;
+    n.y = cy + (n.gy + n.oy + Math.cos(time * n.speed * 0.8 + n.phase) * 2.2) * cam.z;
+  }
+  // 星座连线：同主题
+  const bySubject = new Map();
+  for (const n of nodes) {
+    if (!visible(n)) continue;
+    if (!bySubject.has(n.subject)) bySubject.set(n.subject, []);
+    bySubject.get(n.subject).push(n);
+  }
+  ctx.lineWidth = 1;
+  for (const [, arr] of bySubject) {
+    if (arr.length < 2) continue;
+    ctx.strokeStyle = "rgba(125,160,255,0.16)";
+    ctx.beginPath();
+    arr.forEach((n, i) => i ? ctx.lineTo(n.x, n.y) : ctx.moveTo(n.x, n.y));
+    ctx.stroke();
+  }
+  // 星体
+  for (const n of nodes) {
+    const vis = visible(n);
+    const color = KINDS[n.kind].color;
+    const tw = 0.82 + 0.18 * Math.sin(time * (1 + n.speed) + n.phase);
+    const R = n.r * cam.z * (n === hover || n === selected ? 1.5 : 1) * 26;
+    ctx.globalAlpha = vis ? tw : 0.06;
+    ctx.drawImage(sprite(color), n.x - R / 2, n.y - R / 2, R, R);
+    ctx.globalAlpha = vis ? 1 : 0.08;
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(n.x, n.y, Math.max(1.1, n.r * cam.z * 0.34), 0, 7); ctx.fill();
+    if (n.pinned) { ctx.strokeStyle = "#fbbf24"; ctx.beginPath(); ctx.arc(n.x, n.y, n.r * cam.z + 5, 0, 7); ctx.stroke(); }
+  }
+  ctx.globalAlpha = 1;
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ============ 交互 ============ */
+function pick(mx, my) {
+  let best = null, bd = 18;
+  for (const n of nodes) {
+    if (!visible(n)) continue;
+    const d = Math.hypot(n.x - mx, n.y - my);
+    if (d < bd + n.r) { best = n; bd = d; }
+  }
+  return best;
+}
+canvas.addEventListener("mousemove", e => {
+  mouse = { x: e.clientX, y: e.clientY };
+  if (drag) { cam.x += e.clientX - drag.x; cam.y += e.clientY - drag.y; drag = { x: e.clientX, y: e.clientY }; return; }
+  hover = pick(e.clientX, e.clientY);
+  canvas.style.cursor = hover ? "pointer" : "crosshair";
+  const tip = document.getElementById("tip");
+  if (hover) {
+    tip.style.display = "block";
+    tip.style.left = (e.clientX + 14) + "px"; tip.style.top = (e.clientY + 12) + "px";
+    tip.innerHTML = `<span style="color:${KINDS[hover.kind].color}">●</span> ${esc(hover.subject)} · ${KINDS[hover.kind].label}`;
+  } else tip.style.display = "none";
+});
+canvas.addEventListener("mousedown", e => { drag = { x: e.clientX, y: e.clientY }; });
+window.addEventListener("mouseup", () => { drag = null; });
+canvas.addEventListener("wheel", e => {
+  e.preventDefault();
+  cam.z = Math.min(2.6, Math.max(0.45, cam.z * (e.deltaY < 0 ? 1.08 : 0.93)));
+}, { passive: false });
+canvas.addEventListener("click", e => {
+  const n = pick(e.clientX, e.clientY);
+  selected = n;
+  const d = document.getElementById("detail");
+  if (!n) { d.classList.remove("show"); return; }
+  const k = KINDS[n.kind];
+  const pct = Math.round((n.confidence ?? 0) * 100);
+  d.innerHTML = `
+    <div class="kind" style="color:${k.color}">● ${k.label}${n.pinned ? " · 已置顶" : ""}${n.project ? " · " + esc(n.project) : ""}</div>
+    <h2>${esc(n.subject)}</h2>
+    <div class="content">${esc(n.content)}</div>
+    ${n.applies_when ? `<div class="when">适用情境：${esc(n.applies_when)}</div>` : ""}
+    ${n.t === "insight" ? `<div class="meta">
+      <span>置信度 <b>${pct}%</b><span class="bar"><i style="width:${pct}%"></i></span></span>
+      <span>被递出 <b>${n.use || 0}</b> 次</span>
+      <span>关联成功 <b>${n.succ || 0}</b> 次</span>
+      <span>类型 <b>${k.label}</b></span></div>` : ""}`;
+  d.classList.add("show");
+});
+
+/* ============ 筛选条 ============ */
+const chipsBox = document.getElementById("chips");
+for (const [key, k] of Object.entries(KINDS)) {
+  const el = document.createElement("button");
+  el.className = "chip"; el.dataset.kind = key;
+  el.innerHTML = `<span class="dot" style="background:${k.color}"></span>${k.label}`;
+  el.onclick = () => {
+    enabledKinds.has(key) ? enabledKinds.delete(key) : enabledKinds.add(key);
+    el.classList.toggle("off");
+  };
+  chipsBox.appendChild(el);
+}
+document.getElementById("search").addEventListener("input", e => { query = e.target.value.trim(); });
+
+/* ============ 启动 ============ */
+(async () => {
+  try {
+    const data = await loadData();
+    layout(data);
+    const badge = document.getElementById("modeBadge");
+    badge.textContent = "实时数据 · " + USER_ID;
+    badge.classList.add("live");
+  } catch {
+    layout(DEMO);
+  }
+})();
+</script>
+</body>
+</html>

@@ -12,8 +12,8 @@
 - 边界（主动说清）：不做知识图谱，实体关系推理请选 Zep；不是 agent 框架，不替你跑 agent；定位个人与小团队，没有托管云与 SDK 生态。
 
 ## v1 范围
-- 长期事实与偏好 + 会话摘要
-- 接口：`write / recall / summarize / forget`（`/v1` 前缀，业务传 `user_id`，应用由 `APP_ID` 固定，写入带幂等键）
+- 长期事实与偏好；任务轨迹提炼的经验（教训/策略/避坑/捷径）与情境简报
+- 接口：`write / recall / forget` + 经验线 `episodes / brief / insights`（`/v1` 前缀，业务传 `user_id`，应用由 `APP_ID` 固定，写入带幂等键）。会话摘要表为预留结构，暂无生成路径，不算现行能力
 - 事实变更：`valid_from / valid_to` 失效旧值，不物理删除；`forget` 才真删
 - 召回：应用 + 用户硬过滤 → 向量 + BM25（RRF 融合）→ token 预算裁剪
 - 评测门禁：记住 / 记错 / 失效后不召回旧值 / 不串用户

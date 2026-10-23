@@ -76,6 +76,12 @@ class MemoryPreference(UserScoped, Base):
 
 
 class SessionSummary(UserScoped, Base):
+    """会话摘要——预留表，当前未启用（第十二轮处置结论）。
+
+    全仓没有任何生成或读取它的代码路径（只有 clear_all 会连带清它）：会话的
+    长期价值已由事实抽取与经验提炼两条管线承接，再加一条摘要管线是重复建设。
+    表结构保留待将来真有需求时启用；README 的范围说明已同步纠正，不再宣称
+    summarize 是现行能力。"""
     __tablename__ = "session_summary"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
     session_id: Mapped[str] = mapped_column(String(64), index=True)
