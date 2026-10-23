@@ -6,14 +6,16 @@
 """
 import json
 import logging
+from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import UserContext
 from app.distill import KINDS
 from app.embeddings import GeminiEmbedder, cosine
-from app.extract import InvalidExtraction, decide, is_injection, norm, same_subject, strip_injection
+from app.extract import MAX_SUBJECT_LEN, InvalidExtraction, decide, is_injection, norm, same_subject, strip_injection
 from app.models import AuditLog, MemoryInsight, TaskEpisode, _now
 from app.recall import COS_MIN, MIN_SCORE, VECTOR_WEIGHT, _query_vector, _score
 from app.redact import redact
@@ -22,14 +24,41 @@ from app.schemas import InsightOut
 log = logging.getLogger(__name__)
 
 MAX_DISTILL_ATTEMPTS = 3
+EPISODE_LOCK_SECONDS = 120  # 领取锁定期，与 memory_job 的 LOCK_SECONDS 对齐；过期视为领取者已崩溃，可重领
+
+
+def find_episode_by_key(db: Session, app_id: str, user_id: str, idempotency_key: str) -> TaskEpisode | None:
+    """按幂等键查已有 episode（提交防重的第一道：查到就复用，不重复落库）。"""
+    if not idempotency_key:
+        return None
+    return db.scalar(select(TaskEpisode).where(
+        TaskEpisode.app_id == app_id, TaskEpisode.user_id == user_id,
+        TaskEpisode.idempotency_key == idempotency_key))
 
 
 def submit_episode(db: Session, u: UserContext, *, source: str, title: str,
-                   outcome: str, steps: list[dict], cost: dict) -> TaskEpisode:
+                   outcome: str, steps: list[dict], cost: dict,
+                   idempotency_key: str | None = None) -> TaskEpisode:
+    """落一条 episode。带 idempotency_key 时同一键只落一次：客户端（尤其会自己重试的
+    工具调用）超时重试不会产生重复轨迹、不会重复烧提炼——语义与 /v1/memories 的写入幂等一致：
+    查已有 → 返回已有；并发同键靠唯一约束兜底，撞上后回滚再查。"""
+    if idempotency_key:
+        existing = find_episode_by_key(db, u.app_id, u.user_id, idempotency_key)
+        if existing is not None:
+            return existing
     ep = TaskEpisode(app_id=u.app_id, user_id=u.user_id, source=source, title=title,
-                     outcome=outcome, steps=steps, cost=cost)
+                     outcome=outcome, steps=steps, cost=cost,
+                     idempotency_key=idempotency_key)
     db.add(ep)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        if idempotency_key:
+            existing = find_episode_by_key(db, u.app_id, u.user_id, idempotency_key)
+            if existing is not None:
+                return existing
+        raise
     db.refresh(ep)
     return ep
 
@@ -108,6 +137,16 @@ def _apply_insight(db: Session, u: UserContext, cand, episode_id: str,
     return decision.lower(), row.id
 
 
+def _lock_user(db: Session, app_id: str, user_id: str) -> None:
+    """同一用户的经验写入串行化，与 worker 对事实的 _lock_user 同一把咨询锁（同键）：
+    两个 Worker 并发提炼同一用户的不同 episode 时，_apply_insight 的读-改-写不能交错，
+    否则会写出双 active 经验。SQLite 单写者天然串行，跳过。"""
+    bind = db.get_bind()
+    if bind is not None and bind.dialect.name == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k)::bigint)"),
+                   {"k": f"{app_id}:{user_id}"})
+
+
 def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmbedder | None = None) -> str:
     """对一个 episode 做复盘提炼并入库，返回聚合裁决 update > add > noop（无产出为 empty）。
 
@@ -116,6 +155,7 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
     闸门拦截本身留痕在日志里方便复盘。
     """
     u = UserContext(ep.app_id, ep.user_id)
+    _lock_user(db, ep.app_id, ep.user_id)
     text = strip_injection(_render_episode(ep)).strip()
     fn = distiller.distill if hasattr(distiller, "distill") else distiller
     candidates = fn(text) if text else []
@@ -128,6 +168,8 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
         applies_when = redact(str(getattr(cand, "applies_when", "") or "")).strip()
         if kind not in KINDS or not subject or not content:
             continue
+        if len(subject) > MAX_SUBJECT_LEN:
+            continue  # 兜底：绕过解析层直达这里的候选同样不能把整批拖死在 PG 长度校验上
         if is_injection(subject) or is_injection(content) or is_injection(applies_when):
             log.warning("insight dropped by injection gate episode=%s subject=%s", ep.id, subject[:40])
             continue
@@ -136,6 +178,7 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
         if iid:
             insight_ids.append(iid)
     ep.distill_status = "done"
+    ep.locked_until = None
     ep.last_error = None
     summary = ("update" if "update" in decisions else
                "add" if "add" in decisions else
@@ -155,13 +198,23 @@ class _Cand:
 
 
 def claim_episode(db: Session) -> TaskEpisode | None:
+    """领取一条待提炼 episode，与 claim_job 同构：状态先转 running 并设锁定期，
+    SKIP LOCKED 只防同一瞬间，状态+锁定才防得住「领了还没处理完又被别人领走」。
+    旧版只 attempts+1 不改状态，同一条能被连续领两次（实测可复现），多 Worker 必重复提炼。
+    running 且锁已过期的视为领取者崩溃，可重领；attempts 达上限的不再领取。"""
+    now = _now()
     ep = db.scalars(
-        select(TaskEpisode).where(TaskEpisode.distill_status == "pending")
+        select(TaskEpisode).where(
+            TaskEpisode.attempts < MAX_DISTILL_ATTEMPTS,
+            or_(TaskEpisode.distill_status == "pending",
+                (TaskEpisode.distill_status == "running") & (TaskEpisode.locked_until < now)))
         .order_by(TaskEpisode.created_at).limit(1)
         .with_for_update(skip_locked=True)).first()
     if ep is None:
         return None
+    ep.distill_status = "running"
     ep.attempts += 1
+    ep.locked_until = now + timedelta(seconds=EPISODE_LOCK_SECONDS)
     db.commit()
     return ep
 
@@ -178,6 +231,7 @@ def run_episode_once(db: Session, distiller, embedder: GeminiEmbedder | None = N
         db.rollback()
         ep = db.get(TaskEpisode, ep.id)
         ep.distill_status = "done"
+        ep.locked_until = None
         ep.last_error = "discarded: invalid distiller output"
         db.add(AuditLog(app_id=ep.app_id, user_id=ep.user_id, action="distill",
                         decision="discard"))
@@ -186,6 +240,7 @@ def run_episode_once(db: Session, distiller, embedder: GeminiEmbedder | None = N
         db.rollback()
         ep = db.get(TaskEpisode, ep.id)
         ep.distill_status = "failed" if ep.attempts >= MAX_DISTILL_ATTEMPTS else "pending"
+        ep.locked_until = None
         ep.last_error = str(e)[:2000]
         db.commit()
     return db.get(TaskEpisode, ep.id)

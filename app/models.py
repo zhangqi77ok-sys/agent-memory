@@ -98,10 +98,15 @@ class TaskEpisode(UserScoped, Base):
     outcome: Mapped[str] = mapped_column(String(16), default="success")  # success|failure|partial
     steps: Mapped[list] = mapped_column(JSON, default=list)  # [{action, observation?, error?}]
     cost: Mapped[dict] = mapped_column(JSON, default=dict)  # {tokens, duration_s, retries...}
-    distill_status: Mapped[str] = mapped_column(String(16), default="pending", index=True)  # pending/done/failed
+    distill_status: Mapped[str] = mapped_column(String(16), default="pending", index=True)  # pending/running/done/failed
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # 领取锁定期；过期可被其他 Worker 重领
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)  # 客户端重试防重；为空表示不防重
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    __table_args__ = (
+        UniqueConstraint("app_id", "user_id", "idempotency_key", name="uq_episode_idem_app"),
+    )
 
 
 class MemoryInsight(UserScoped, Base):

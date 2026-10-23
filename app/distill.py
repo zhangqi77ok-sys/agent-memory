@@ -12,7 +12,7 @@ import urllib.request
 from dataclasses import dataclass
 
 from app.config import Settings, settings
-from app.extract import ExtractionError, InvalidExtraction
+from app.extract import MAX_SUBJECT_LEN, ExtractionError, InvalidExtraction
 
 DISTILL_PROMPT_VERSION = "distill-2026-10-v1"
 KINDS = ("lesson", "strategy", "pitfall", "cost_saver")
@@ -65,6 +65,8 @@ def parse_insights(raw) -> list[InsightCandidate]:
             continue  # 单条类型不对就丢这一条，不连累整批（与 extract 抛错的区别：经验允许部分采纳）
         if not subject or not content:
             continue
+        if len(subject) > MAX_SUBJECT_LEN:
+            continue  # 超长主题单条丢弃：String(128) 列在 PG 上会整批报错，SQLite 测不出来
         out.append(InsightCandidate(kind=kind, subject=subject, content=content, applies_when=applies_when))
     return out
 

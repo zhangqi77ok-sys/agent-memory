@@ -32,7 +32,7 @@ from app.auth import UserContext, bind_user
 from app.config import settings
 from app.db import SessionLocal
 from app.embeddings import build_embedder
-from app.episodes import brief_for_task, submit_episode
+from app.episodes import brief_for_task, find_episode_by_key, submit_episode
 from app.recall import recall_facts
 from app.schemas import CONSENT_VERSION, Message, WriteRequest
 
@@ -149,12 +149,15 @@ def memory_list(limit: int = 50, offset: int = 0) -> dict:
 
 @mcp.tool()
 def memory_episode_submit(title: str, outcome: str = "success", steps: list[dict] | None = None,
-                          source: str = "", tokens: int = 0, duration_s: float = 0.0) -> dict:
+                          source: str = "", tokens: int = 0, duration_s: float = 0.0,
+                          idempotency_key: str = "") -> dict:
     """任务做完后，把全过程提交给共享记忆，用于提炼可复用的经验。
 
     steps 是轨迹：每步 {"action": "做了什么", "observation": "看到什么", "error": "报了什么错"}，
     失败和绕路尤其要如实记——经验主要从失败里长出来。后台 Worker 会复盘提炼出教训/打法/
     避坑/省钱招存入经验库；返回 episode_id 表示已受理，skipped=True 表示用户未开启记忆。
+    防重：传 idempotency_key 时同一键只受理一次；不传时按内容指纹防重——同一次提交的
+    超时重试会被认出来（duplicate=True），但内容一字不差的两次真实提交也会被并作一次。
     """
     src = (source or os.environ.get("MEMORY_SOURCE") or "mcp").strip()[:32] or "mcp"
     cost: dict = {}
@@ -172,15 +175,30 @@ def memory_episode_submit(title: str, outcome: str = "success", steps: list[dict
         if s.get("error"):
             step["error"] = str(s["error"])[:2000]
         clean_steps.append(step)
+    clean_outcome = outcome if outcome in ("success", "failure", "partial") else "success"
+    clean_title = title[:500]
+    if idempotency_key:
+        idem = idempotency_key[:128]
+    else:
+        import hashlib
+        import json as _json
+        fingerprint = _json.dumps({"t": clean_title, "o": clean_outcome, "s": clean_steps, "c": cost},
+                                  ensure_ascii=False, sort_keys=True)
+        idem = "auto-" + hashlib.sha256(fingerprint.encode()).hexdigest()[:32]
     with _session() as (db, u):
         if not memory_enabled(db, u):
             return {"episode_id": None, "skipped": True,
                     "note": "该用户未同意开启记忆：先通过 REST /v1/me/settings 同意，"
                             "或启动服务时设 MEMORY_AUTO_CONSENT=1"}
-        ep = submit_episode(db, u, source=src, title=title[:500],
-                            outcome=outcome if outcome in ("success", "failure", "partial") else "success",
-                            steps=clean_steps, cost=cost)
-    return {"episode_id": ep.id, "skipped": False, "note": "已受理，后台 Worker 会复盘提炼经验"}
+        existing = find_episode_by_key(db, u.app_id, u.user_id, idem)
+        if existing is not None:
+            return {"episode_id": existing.id, "skipped": False, "duplicate": True,
+                    "note": "同一提交已受理过，没有重复落库"}
+        ep = submit_episode(db, u, source=src, title=clean_title,
+                            outcome=clean_outcome,
+                            steps=clean_steps, cost=cost, idempotency_key=idem)
+    return {"episode_id": ep.id, "skipped": False, "duplicate": False,
+            "note": "已受理，后台 Worker 会复盘提炼经验"}
 
 
 @mcp.tool()

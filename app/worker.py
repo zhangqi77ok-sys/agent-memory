@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app import models as m
 from app.auth import UserContext
 from app.db import WorkerSession
-from app.extract import PROMPT_VERSION, InvalidExtraction, decide, is_injection, norm, same_subject, strip_injection
+from app.extract import MAX_SUBJECT_LEN, PROMPT_VERSION, InvalidExtraction, decide, is_injection, norm, same_subject, strip_injection
 from app.redact import mask_user_id, redact
 
 MAX_ATTEMPTS = 3
@@ -213,7 +213,7 @@ def _apply_preference(db: Session, job: m.MemoryJob, key: str, value: str, propo
 def _apply(db: Session, job: m.MemoryJob, candidate, source_msg_id: str | None, embedder=None) -> tuple[str, str | None]:
     subject = redact(candidate.subject).strip()
     content = redact(candidate.content).strip()
-    if not subject or not content or is_injection(subject) or is_injection(content):
+    if not subject or not content or len(subject) > MAX_SUBJECT_LEN or is_injection(subject) or is_injection(content):
         return "noop", None
     if candidate.kind == "preference":
         return _apply_preference(db, job, subject, content, candidate.action)

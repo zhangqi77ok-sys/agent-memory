@@ -58,17 +58,83 @@ def _bigrams(s: str) -> set[str]:
     return {s[i:i + 2] for i in range(len(s) - 1)}
 
 
+MAX_SUBJECT_LEN = 128  # 与 DB 列 String(128) 对齐：超长 subject 在解析层单条丢弃，不让整批死在 PG 的长度校验上
+
+# 包含合并时认的「通用修饰」：长主题 = 短主题 + 这些词，才算同一件事的展开写法
+_GENERIC_EXTRA_CJK = ("偏好", "设置", "习惯", "方法", "方式", "相关", "记录", "信息", "居住", "的", "喝")
+_GENERIC_EXTRA_ASCII = {"preference", "preferences", "setting", "settings"}
+
+
+def _extra_is_generic(extra: str) -> bool:
+    """长主题比短主题多出的部分是否只是通用修饰（如「咖啡」→「咖啡偏好」的「偏好」）。
+
+    ASCII 的通用词整词比对；中文按最长优先逐段吃掉，全吃完才算——
+    「咖啡因过敏」多出的「因过敏」吃不掉，于是不会被误判成「咖啡」的话题。
+    """
+    extra = extra.strip(" -_")
+    if not extra:
+        return True
+    if extra in _GENERIC_EXTRA_ASCII:
+        return True
+    rest = extra
+    while rest:
+        for tok in _GENERIC_EXTRA_CJK:
+            if rest.startswith(tok):
+                rest = rest[len(tok):]
+                break
+        else:
+            return False
+    return True
+    return True
+
+
+def _junction_is_compound(short_raw: str, long_raw: str) -> bool:
+    """短主题在长主题原文里命中的位置，后一个字符是否大写字母（驼峰拼接点）。
+
+    Java|Script 这类拼接是两个专名合成的新词，不是同一件事的展开写法；
+    规范化会把大小写抹掉，所以必须回到原文上看这一眼。
+    """
+    m = re.search(re.escape(short_raw.strip()), long_raw.strip(), re.IGNORECASE)
+    if m is None or m.end() >= len(long_raw.strip()):
+        return False
+    return long_raw.strip()[m.end()].isupper()
+
+
+def _containment_same(short_raw: str, long_raw: str, short: str, long_: str) -> bool:
+    """规范化后 short 被 long_ 包含时，是否真的是同一件事（防误合并版）。
+
+    旧版见包含就合并，实测误伤：Java/JavaScript、Go/Google、C/C++、咖啡/咖啡因过敏。
+    现在的门：短主题太短不认（ASCII < 3 字、或只有 1 字）；驼峰拼接点不认；
+    多出的部分必须是通用修饰，或纯小写词族延续（lang→language，短侧至少 4 字）。
+    已知取舍：Python/Pythonic 这类同词族派生仍会合并——同一话题的可能性远大于两个话题。
+    """
+    if short not in long_:
+        return False
+    if len(short) < 2 or (short.isascii() and len(short) < 3):
+        return False
+    if _junction_is_compound(short_raw, long_raw):
+        return False
+    idx = long_.find(short)
+    extra = (long_[:idx] + long_[idx + len(short):]).strip(" -_")
+    if _extra_is_generic(extra):
+        return True
+    return extra.isascii() and extra.isalpha() and extra.islower() and len(short) >= 4
+
+
 def same_subject(a: str, b: str) -> bool:
-    """两个 subject/key 是否在说同一件事：规范化后相等、互相包含，或 bigram Jaccard ≥ 0.5。
+    """两个 subject/key 是否在说同一件事：规范化后相等、受控的包含合并，或 bigram Jaccard ≥ 0.5。
 
     提示词要求模型更新时复用同一 subject，但模型并不总听话（这次「咖啡」、下次「咖啡偏好」）。
     写入侧用这个做兜底合并，避免意思相同、字面不同的两条记忆同时有效、互相矛盾。
-    阈值取严：宁可漏合并（多一条冗余），不可错合并（会误杀不相干的旧值）。
+    阈值取严：宁可漏合并（多一条冗余），不可错合并（会误杀不相干的旧值）——
+    包含合并的收紧规则见 _containment_same。
     """
     na, nb = norm(a), norm(b)
     if not na or not nb:
         return False
-    if na == nb or na in nb or nb in na:
+    if na == nb:
+        return True
+    if _containment_same(a, b, na, nb) or _containment_same(b, a, nb, na):
         return True
     ga, gb = _bigrams(na), _bigrams(nb)
     return len(ga & gb) / len(ga | gb) >= 0.5
@@ -129,6 +195,8 @@ def parse_items(raw: str) -> list[Candidate]:
             action = "ADD"
         if not subject or not content:
             continue
+        if len(subject) > MAX_SUBJECT_LEN:
+            continue  # 超长主题单条丢弃：硬塞进 String(128) 列会在 PG 上把整批写入拖死
         out.append(Candidate(kind, subject, content, action))
     return out
 

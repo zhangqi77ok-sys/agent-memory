@@ -111,6 +111,7 @@ class EpisodeSubmitRequest(UserScopedRequest):
 class EpisodeAccepted(BaseModel):
     episode_id: str | None
     skipped: bool = False  # 用户未同意或已暂停记忆：不落任何数据
+    duplicate: bool = False  # 同一 Idempotency-Key 已提交过：返回的是已有 episode，没有重复落库
 
 
 class BriefRequest(UserScopedRequest):
