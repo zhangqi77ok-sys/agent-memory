@@ -75,7 +75,8 @@ def recall(req: RecallRequest, db: Session = Depends(get_db)):
 
 @router.delete("/me/memories/{item_id}", status_code=204)
 def forget(item_id: str, u: UserContext = Depends(user_from_query), db: Session = Depends(get_db)):
-    """删除一条事实（同 subject 全部版本）或一条偏好。不属于当前用户一律 404。"""
+    """删除一条记忆：事实/偏好/经验按同 subject（key）全部版本删，轨迹（episode）按行删。
+    不属于当前用户一律 404。"""
     bind_user(db, u)
     fact = db.get(m.MemoryFact, item_id)
     if fact and fact.user_id == u.user_id and fact.app_id == u.app_id:
@@ -100,6 +101,26 @@ def forget(item_id: str, u: UserContext = Depends(user_from_query), db: Session 
         for i in ids:
             db.merge(m.ForgottenId(id=i, kind="preference"))
         _audit(db, u, "forget", ids)
+        db.commit()
+        return
+    insight = db.get(m.MemoryInsight, item_id)
+    if insight and insight.user_id == u.user_id and insight.app_id == u.app_id:
+        # 经验与事实同语义：删同主题全部版本并登记防恢复（第七轮前经验没有任何删除入口）
+        versions = db.scalars(select(m.MemoryInsight).where(
+            m.MemoryInsight.app_id == u.app_id, m.MemoryInsight.user_id == u.user_id,
+            m.MemoryInsight.subject == insight.subject)).all()
+        ids = [v.id for v in versions]
+        db.execute(delete(m.MemoryInsight).where(m.MemoryInsight.id.in_(ids)))
+        for i in ids:
+            db.merge(m.ForgottenId(id=i, kind="insight"))
+        _audit(db, u, "forget", ids)
+        db.commit()
+        return
+    episode = db.get(m.TaskEpisode, item_id)
+    if episode and episode.user_id == u.user_id and episode.app_id == u.app_id:
+        # 轨迹是单行原始记录：直接删行（派生出的经验不在此联动删除，按各自 id 删）
+        db.execute(delete(m.TaskEpisode).where(m.TaskEpisode.id == item_id))
+        _audit(db, u, "forget", [item_id])
         db.commit()
         return
     raise HTTPException(404)

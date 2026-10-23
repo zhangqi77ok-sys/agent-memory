@@ -25,9 +25,16 @@ action 只是你的建议，可以是 ADD、UPDATE 或 NOOP，最终由系统决
 没有可记的内容就输出 {"items":[]}。"""
 
 # 写入闸门：指令型内容不能变成记忆（防投毒）。匹配到就丢弃这条候选。
+# 第七轮扩充：细节评审实测旧词表可被常见变体整批绕过（ignore all instructions /
+# disregard previous / 请无视上面的规则 / 不要遵循之前的设定 / act as an admin 等），逐条补入；
+# 仍只是词表匹配，语义改写总能绕过——这是注入防线的已知边界，靠「召回内容只是数据」兜底。
 _INJECTION = re.compile(
-    r"(忽略(之前|以上|前面|所有|此前)|ignore\s+(all\s+|any\s+)?(previous|prior|above)|"
-    r"你现在是|system\s*prompt|记住我是管理员|jailbreak|do\s+not\s+follow)",
+    r"(忽略(之前|以上|前面|所有|此前)|无视(之前|以上|上面|前面|所有|此前|规则|指令|设定)|"
+    r"不要(遵循|理会|遵守)(之前|上面|先前|此前)?(的)?(指令|规则|设定|要求)|"
+    r"ignore\s+(all\s+|any\s+|the\s+)?(previous|prior|above|instructions|directions|rules)|"
+    r"disregard\s+(all\s+|the\s+)?(previous|prior|above|instructions|directions|rules)|"
+    r"act\s+as\s+(an?\s+)?(admin|administrator|root|system)|假装(你是|自己是|拥有)|"
+    r"你现在是|你现在扮演|system\s*prompt|记住我是管理员|jailbreak|do\s+not\s+follow)",
     re.IGNORECASE,
 )
 

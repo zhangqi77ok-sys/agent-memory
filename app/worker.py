@@ -76,6 +76,23 @@ def expire_memories(db: Session, ttl_days: int = 0, now: datetime | None = None)
         p.valid_to = now
         count += 1
 
+    # 经验过期（第七轮补：新表此前不在 TTL 覆盖内，只进不出）
+    insights = db.scalars(select(m.MemoryInsight).where(
+        m.MemoryInsight.valid_to.is_(None),
+        m.MemoryInsight.valid_from < cutoff,
+    )).all()
+    for ins in insights:
+        ins.valid_to = now
+        count += 1
+
+    # 轨迹过期：原始过程比经验更敏感，不做软失效，直接删行（已提炼的经验按上一条独立过期）
+    old_episodes = db.scalars(select(m.TaskEpisode).where(
+        m.TaskEpisode.created_at < cutoff,
+    )).all()
+    for ep in old_episodes:
+        db.delete(ep)
+        count += 1
+
     if count > 0:
         db.commit()
         log.info("expired memories count=%s ttl_days=%s", count, ttl_days)

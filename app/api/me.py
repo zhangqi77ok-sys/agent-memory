@@ -85,20 +85,25 @@ def correct(item_id: str, req: CorrectRequest, db: Session = Depends(get_db)):
 
 @router.delete("/memories", status_code=204)
 def clear_all(u: UserContext = Depends(user_from_query), db: Session = Depends(get_db)):
-    """全部清空：事实（含历史版本和向量）、偏好、摘要、原始消息、未完成的写入任务。
+    """全部清空：事实（含历史版本和向量）、偏好、摘要、原始消息、未完成的写入任务、
+    经验与任务轨迹（第七轮补：此前清空后经验侧会残留，与「全部」二字不符）。
 
     v1 同步执行（单用户数据量小）；id 记入 forgotten_id，备份恢复后据此重删。
     """
     bind_user(db, u)
     fact_ids = list(db.scalars(select(m.MemoryFact.id).where(*_mine(m.MemoryFact, u))))
     pref_ids = list(db.scalars(select(m.MemoryPreference.id).where(*_mine(m.MemoryPreference, u))))
-    for model in (m.MemoryFact, m.MemoryPreference, m.SessionSummary, m.SessionMessage, m.MemoryJob):
+    insight_ids = list(db.scalars(select(m.MemoryInsight.id).where(*_mine(m.MemoryInsight, u))))
+    for model in (m.MemoryFact, m.MemoryPreference, m.SessionSummary, m.SessionMessage, m.MemoryJob,
+                  m.MemoryInsight, m.TaskEpisode):
         db.execute(delete(model).where(*_mine(model, u)))
     for i in fact_ids:
         db.merge(m.ForgottenId(id=i, kind="fact"))
     for i in pref_ids:
         db.merge(m.ForgottenId(id=i, kind="preference"))
-    _audit(db, u, "clear_all", fact_ids + pref_ids)
+    for i in insight_ids:
+        db.merge(m.ForgottenId(id=i, kind="insight"))
+    _audit(db, u, "clear_all", fact_ids + pref_ids + insight_ids)
     db.commit()
 
 

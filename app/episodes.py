@@ -27,6 +27,26 @@ MAX_DISTILL_ATTEMPTS = 3
 EPISODE_LOCK_SECONDS = 120  # 领取锁定期，与 memory_job 的 LOCK_SECONDS 对齐；过期视为领取者已崩溃，可重领
 
 
+def _redact_steps(steps: list[dict]) -> list[dict]:
+    """轨迹入库前脱敏：轨迹最容易夹带命令输出、令牌、手机号，库里不能存明文。
+
+    旧版只在送 LLM 前脱敏（_render_episode），落库的是原文——查库实测令牌与手机号皆为明文。
+    现在入库与送模型用同一套 redact，库里、备份里、导出里都只有占位符。
+    """
+    out = []
+    for st in steps or []:
+        clean = {}
+        for k, v in st.items():
+            clean[k] = redact(v) if isinstance(v, str) else v
+        out.append(clean)
+    return out
+
+
+def _redact_cost(cost: dict) -> dict:
+    """成本字典同样过脱敏：键名保持（成本要可读），字符串值里的密钥/PII 换成占位符。"""
+    return {k: (redact(v) if isinstance(v, str) else v) for k, v in (cost or {}).items()}
+
+
 def find_episode_by_key(db: Session, app_id: str, user_id: str, idempotency_key: str) -> TaskEpisode | None:
     """按幂等键查已有 episode（提交防重的第一道：查到就复用，不重复落库）。"""
     if not idempotency_key:
@@ -46,8 +66,8 @@ def submit_episode(db: Session, u: UserContext, *, source: str, title: str,
         existing = find_episode_by_key(db, u.app_id, u.user_id, idempotency_key)
         if existing is not None:
             return existing
-    ep = TaskEpisode(app_id=u.app_id, user_id=u.user_id, source=source, title=title,
-                     outcome=outcome, steps=steps, cost=cost,
+    ep = TaskEpisode(app_id=u.app_id, user_id=u.user_id, source=source, title=redact(title),
+                     outcome=outcome, steps=_redact_steps(steps), cost=_redact_cost(cost),
                      idempotency_key=idempotency_key)
     db.add(ep)
     try:

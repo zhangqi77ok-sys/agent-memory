@@ -9,16 +9,25 @@ import re
 # 顺序：邮箱 → 身份证 → 手机号 → 银行卡。身份证是 18 位，必须先于「长数字当卡号」拿掉。
 # 密钥形态（轨迹、报错、命令里最容易夹带的东西）。只认已知形状，不猜任意长串：
 # 任意密钥若长得不像下面任何一种，仍可能漏过——这是规则脱敏的固有边界，评测集里有案可查。
+# 第七轮补（细节评审实测漏检）：PEM 私钥块、JSON 键值形态、复合键名（aws_secret_access_key）、
+# Cookie / Basic 认证头、中文口语密码句。键名按「段」匹配：secretary 这类整词不含独立密钥段，不误伤。
+_SECRET_KEY_SEGMENT = r"(?:[a-z0-9]+[_-])*(?:api[_-]?key|secret|password|passwd|token)(?:[_-][a-z0-9]+)*"
 _SECRET_SUBS = [
+    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.S), "[私钥]"),
+    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"), "[私钥]"),  # 只有头没有尾（被截断的轨迹）
     (re.compile(r"sk-[A-Za-z0-9_\-]{10,}"), "[密钥]"),  # OpenAI 风格 API key
     (re.compile(r"AIza[A-Za-z0-9_\-]{10,}"), "[密钥]"),  # Google API key
     (re.compile(r"ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"), "[密钥]"),  # GitHub 令牌
     (re.compile(r"AKIA[0-9A-Z]{16}"), "[密钥]"),  # AWS access key id
     (re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"), "[令牌]"),  # JWT
     (re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]{8,}"), "Bearer [令牌]"),
+    (re.compile(r"(?i)basic\s+[A-Za-z0-9+/=]{8,}"), "Basic [令牌]"),
+    (re.compile(r"(?i)\b(set-cookie|cookie)\s*:\s*[^\n]+"), r"\1: [已脱敏]"),  # 会话 Cookie 整行
     (re.compile(r"://[^\s/:@]+:[^\s/@]+@"), "://[账号口令]@"),  # 连接串/URL 里的口令
-    (re.compile(r"(?i)\b(api[_-]?key|secret|password|passwd|token)\b\s*[:=]\s*[\"']?[^\s\"',;]+"),
-     r"\1=[已脱敏]"),  # 键值对形态：password=... / api_key: ...
+    (re.compile(r'(?i)("' + _SECRET_KEY_SEGMENT + r'"\s*:\s*")[^"]*"'), r"\1[已脱敏]\""),  # JSON 形态："api_key": "…"
+    (re.compile(r"(?i)(" + _SECRET_KEY_SEGMENT + r")\s*[:=]\s*[\"']?[^\s\"',;]+"),
+     r"\1=[已脱敏]"),  # 键值对形态：password=... / aws_secret_access_key: ...
+    (re.compile(r"(密码|口令)(是|为)\s*\S+"), r"\1\2[已脱敏]"),  # 中文口语：我的密码是 …
 ]
 
 _EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
