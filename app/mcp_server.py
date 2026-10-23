@@ -14,6 +14,10 @@
     MEMORY_AUTO_CONSENT   =1 时每次调用前自动为该用户开启记忆同意。仅建议个人自用部署开启；
                           不开则需先通过 REST 的 /v1/me/settings 完成同意，否则写入会被跳过、召回为空。
 数据库与嵌入配置沿用 app.config 的环境变量（DATABASE_URL、GEMINI_API_KEY 等）。
+
+信任边界（第八轮补注）：身份来自环境变量 MEMORY_USER_ID，是自断言的，没有凭证校验——
+能启动这个进程的人可以冒充任意用户。stdio 本地自用（一个用户一台机器）时可接受；
+不要把它包装成网络服务对外暴露，要暴露先在 REST 层用 X-Service-Key 那套鉴权。
 """
 import os
 import uuid
@@ -22,6 +26,7 @@ from datetime import UTC, datetime
 
 from fastapi import HTTPException, Response
 from mcp.server.fastmcp import FastMCP
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -73,6 +78,16 @@ def _ensure_auto_consent(db: Session, u: UserContext) -> None:
         db.commit()
 
 
+def _clamp_int(value, lo: int, hi: int, default: int) -> int:
+    """把工具参数收进与 REST schemas 相同的范围：MCP 参数是裸类型，不校验时
+    负数/超大值会一路穿到服务层（k=-1 曾切出错误结果集）。收不拢的值用默认值。"""
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, v))
+
+
 @contextmanager
 def _session():
     u = _user()
@@ -94,11 +109,17 @@ def memory_write(content: str, role: str = "user", source: str = "", idempotency
     skipped=True 表示该用户尚未同意开启记忆，本次没有写入任何数据。
     """
     src = (source or os.environ.get("MEMORY_SOURCE") or "mcp").strip()[:24] or "mcp"
-    req = WriteRequest(
-        user_id=_user().user_id,
-        session_id=f"mcp-{src}"[:64],
-        messages=[Message(msg_id=uuid.uuid4().hex, role=role, content=content)],
-    )
+    try:
+        req = WriteRequest(
+            user_id=_user().user_id,
+            session_id=f"mcp-{src}"[:64],
+            messages=[Message(msg_id=uuid.uuid4().hex, role=role, content=content)],
+        )
+    except ValidationError as e:
+        # 第八轮补：MCP 参数不走 REST 的 schemas 校验，非法 role/超长内容旧版会把
+        # ValidationError 直接抛穿工具层；改成结构化错误返回，调用方看得懂、能自纠。
+        return {"job_id": None, "duplicate": False, "skipped": False, "error": "invalid_request",
+                "note": f"参数不合法（role 只能是 user/assistant，content 至多 8000 字）：{e.errors()[0]['msg']}"}
     with _session() as (db, _u):
         accepted = memories_api.write(req, Response(), idempotency_key or uuid.uuid4().hex, db)
     out = {"job_id": accepted.job_id, "duplicate": accepted.duplicate, "skipped": accepted.skipped}
@@ -114,6 +135,7 @@ def memory_search(query: str, k: int = 8) -> dict:
     回答涉及用户背景、偏好、既往决定前应先查这里。返回 facts（含 subject/content/score，
     reason=hybrid 表示向量参与了打分）和 preferences 字典。用户未开启记忆时返回空并附 note。
     """
+    k = _clamp_int(k, 1, 50, 8)  # 与 REST RecallRequest 的范围对齐（第八轮补校验平权）
     with _session() as (db, u):
         if not memory_enabled(db, u):
             return {"preferences": {}, "facts": [], "note": "该用户未同意开启记忆，召回为空"}
@@ -133,6 +155,8 @@ def memory_search(query: str, k: int = 8) -> dict:
 @mcp.tool()
 def memory_list(limit: int = 50, offset: int = 0) -> dict:
     """列出当前全部有效记忆（事实+偏好，按生效时间倒序），供浏览、核对与纠错定位。"""
+    limit = _clamp_int(limit, 1, 200, 50)
+    offset = _clamp_int(offset, 0, 1_000_000, 0)
     with _session() as (db, u):
         if not memory_enabled(db, u):
             return {"items": [], "total": 0, "note": "该用户未同意开启记忆"}
@@ -210,19 +234,23 @@ def memory_brief(task: str, k: int = 5) -> dict:
     经验来自以往任务过程的复盘提炼，照着做能跳过过去踩过的坑。返回 insights
     （含 kind/subject/content/applies_when/score）；没有匹配经验时为空列表。
     """
+    k = _clamp_int(k, 1, 20, 5)  # 与 REST BriefRequest 的范围对齐（旧版 k=-1 会切出「除最后一条」）
     with _session() as (db, u):
         if not memory_enabled(db, u):
             return {"insights": [], "note": "该用户未同意开启记忆，经验库为空"}
         insights = brief_for_task(db, u, task, k,
                                   embedder=build_embedder(timeout=settings.recall_timeout_s))
+        db.add(m.AuditLog(app_id=u.app_id, user_id=u.user_id, action="brief",
+                          fact_ids=[i.insight_id for i in insights]))
+        db.commit()
         return {"insights": [i.model_dump() for i in insights]}
 
 
 @mcp.tool()
 def memory_forget(item_id: str) -> dict:
-    """按 id 删除一条记忆（事实连同同主题全部历史版本，或一条偏好），并登记防恢复。
+    """按 id 删除一条记忆：事实/偏好/经验连同同主题全部历史版本并登记防恢复，轨迹按行删。
 
-    item_id 来自 memory_list / memory_search 的结果。删错无法恢复，调用前先确认 id 无误。
+    item_id 来自 memory_list / memory_search / memory_brief 的结果。删错无法恢复，调用前先确认 id 无误。
     """
     with _session() as (db, u):
         try:

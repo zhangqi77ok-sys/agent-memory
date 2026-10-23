@@ -6,6 +6,7 @@
 from fastapi import APIRouter, Depends, Header, status
 from sqlalchemy.orm import Session
 
+from app import models as m
 from app.api.me import memory_enabled
 from app.auth import bind_user, user_ctx
 from app.config import settings
@@ -39,5 +40,10 @@ def brief(req: BriefRequest, db: Session = Depends(get_db)):
     if not memory_enabled(db, u):
         return BriefResponse(insights=[])
     insights = brief_for_task(db, u, req.task, req.k,
-                              embedder=build_embedder(timeout=settings.recall_timeout_s))
+                              embedder=build_embedder(timeout=settings.recall_timeout_s),
+                              token_budget=req.token_budget)
+    # 与事实召回对齐留审计（第八轮补：此前 brief 查了什么、给了什么完全无痕）
+    db.add(m.AuditLog(app_id=u.app_id, user_id=u.user_id, action="brief",
+                      fact_ids=[i.insight_id for i in insights]))
+    db.commit()
     return BriefResponse(insights=insights)

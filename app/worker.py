@@ -349,7 +349,11 @@ def main() -> None:  # pragma: no cover
                 except Exception as e:
                     log.warning("expire_memories error: %s", e)
             job = run_once(db, extractor, embedder=embedder)
-            ep = run_episode_once(db, distiller, embedder=embedder)
+            ep = None
+            for _ in range(5):  # 一轮最多连提 5 条：历史回放批量导入时不至于一条一轮慢慢磨（第八轮补）
+                ep = run_episode_once(db, distiller, embedder=embedder)
+                if ep is None:
+                    break
         time.sleep(_post_run_wait(job, ep))
 
 

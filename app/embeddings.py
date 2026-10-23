@@ -26,6 +26,19 @@ class EmbeddingError(Exception):
     """嵌入调用失败（网络/HTTP/响应格式）。可降级，不应让写入或召回整体失败。"""
 
 
+def vector_usable(row_model, row_vec, query_vec, embedder_model) -> bool:
+    """一条存量向量能不能和本次查询向量比：非空、维度一致、且生成模型一致。
+
+    第八轮补（此前静默降级）：维度或模型对不上时 cosine 只会给出 0，却仍被当作
+    有效向量参与融合打分（分数被悄悄压低、reason 还误标 hybrid）。改配置或换模型后
+    应把对不上的存量向量当作「没有向量」，走关键词路，并靠 backfill 补齐新向量。
+    row_model 为空是早期未记模型的老数据：维度对得上就放行。
+    """
+    if not row_vec or not query_vec or len(row_vec) != len(query_vec):
+        return False
+    return row_model is None or embedder_model is None or row_model == embedder_model
+
+
 def cosine(a, b) -> float:
     """纯 Python 余弦相似度。向量为空或长度不一致返回 0。"""
     if not a or not b or len(a) != len(b):
@@ -131,15 +144,36 @@ def backfill_embeddings(db: Session, embedder, limit: int = 200) -> int:
     return len(rows)
 
 
+def backfill_insight_embeddings(db: Session, embedder, limit: int = 200) -> int:
+    """给尚无向量的有效经验批量补向量（第八轮补：此前只有事实有补向量通道，
+    无 key 期间攒下的经验在配好 key 后也永远没向量，brief 长期只有关键词一路）。
+    匹配面与入库时一致：主题 + 指导 + 适用情境。返回补齐条数。"""
+    active = db.scalars(select(m.MemoryInsight).where(m.MemoryInsight.valid_to.is_(None))).all()
+    rows = [r for r in active if r.embedding is None][:limit]
+    if not rows:
+        return 0
+    vectors = embedder.embed([f"{r.subject} {r.content} {r.applies_when}" for r in rows],
+                             task_type="RETRIEVAL_DOCUMENT")
+    for row, vec in zip(rows, vectors, strict=True):
+        row.embedding = vec
+        row.embed_model = getattr(embedder, "model", None)
+    db.commit()
+    return len(rows)
+
+
 if __name__ == "__main__":  # pragma: no cover
-    # 用法：GEMINI_API_KEY=... python -m app.embeddings [--limit N]，给存量事实补向量
+    # 用法：GEMINI_API_KEY=... python -m app.embeddings [--limit N] [--target facts|insights|all]
     import sys
 
     from app.db import WorkerSession
 
     lim = int(sys.argv[sys.argv.index("--limit") + 1]) if "--limit" in sys.argv else 200
+    target = sys.argv[sys.argv.index("--target") + 1] if "--target" in sys.argv else "all"
     emb = build_embedder()
     if emb is None:
         raise SystemExit("未配置 GEMINI_API_KEY，无法补向量")
     with WorkerSession() as session:
-        print(f"backfilled={backfill_embeddings(session, emb, limit=lim)}")
+        if target in ("facts", "all"):
+            print(f"backfilled_facts={backfill_embeddings(session, emb, limit=lim)}")
+        if target in ("insights", "all"):
+            print(f"backfilled_insights={backfill_insight_embeddings(session, emb, limit=lim)}")

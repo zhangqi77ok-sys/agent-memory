@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Strict(BaseModel):
@@ -107,6 +107,15 @@ class EpisodeSubmitRequest(UserScopedRequest):
     steps: list[EpisodeStep] = Field(default_factory=list, max_length=200)
     cost: dict = Field(default_factory=dict)
 
+    @field_validator("cost")
+    @classmethod
+    def _cost_bounded(cls, v: dict) -> dict:
+        # cost 是轨迹侧最松的入口（第八轮补）：键数与序列化体积设上限，防把任意大 blob 塞进库
+        import json as _json
+        if len(v) > 20 or len(_json.dumps(v, ensure_ascii=False)) > 4096:
+            raise ValueError("cost 过大：最多 20 个键、序列化后不超过 4096 字符")
+        return v
+
 
 class EpisodeAccepted(BaseModel):
     episode_id: str | None
@@ -117,6 +126,7 @@ class EpisodeAccepted(BaseModel):
 class BriefRequest(UserScopedRequest):
     task: str = Field(min_length=1, max_length=2000)
     k: int = Field(default=5, ge=1, le=20)
+    token_budget: int = Field(default=1500, ge=100, le=8000)  # 简报正文的 token 上限，与事实召回对齐
 
 
 class InsightOut(BaseModel):

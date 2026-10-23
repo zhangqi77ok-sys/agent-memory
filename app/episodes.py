@@ -14,10 +14,10 @@ from sqlalchemy.orm import Session
 
 from app.auth import UserContext
 from app.distill import KINDS
-from app.embeddings import GeminiEmbedder, cosine
+from app.embeddings import GeminiEmbedder, cosine, vector_usable
 from app.extract import MAX_SUBJECT_LEN, InvalidExtraction, decide, is_injection, norm, same_subject, strip_injection
 from app.models import AuditLog, MemoryInsight, TaskEpisode, _now
-from app.recall import COS_MIN, MIN_SCORE, VECTOR_WEIGHT, _query_vector, _score
+from app.recall import COS_MIN, MIN_SCORE, VECTOR_WEIGHT, _est_tokens, _query_vector, _score
 from app.redact import redact
 from app.schemas import InsightOut
 
@@ -107,14 +107,20 @@ def _matched_insights(db: Session, app_id: str, user_id: str, subject: str) -> l
     ids = [row.id for row in light if same_subject(row.subject, subject)]
     if not ids:
         return []
-    return list(db.scalars(select(MemoryInsight).where(MemoryInsight.id.in_(ids))))
+    # 按生效时间倒序：rows[0] 必须是最新一行（_active_content 的语义依赖于此，旧版无排序是任意序）
+    return list(db.scalars(select(MemoryInsight).where(MemoryInsight.id.in_(ids))
+                           .order_by(MemoryInsight.valid_from.desc())))
 
 
-def _active_content(rows: list[MemoryInsight]) -> str | None:
+def _active_content(rows: list[MemoryInsight], new_content: str = "") -> str | None:
     """同主题现行内容：优先与新内容规范化相等的行（decide 的 NOOP 判定需要它），
-    否则取最新一行。与 worker._active_value 同一套语义，两处各一份避免循环导入。"""
+    否则取最新一行（rows 已按 valid_from 倒序）。与 worker._active_value 同一套语义。"""
     if not rows:
         return None
+    if new_content:
+        for r in rows:
+            if norm(r.content) == norm(new_content):
+                return r.content
     return rows[0].content
 
 
@@ -139,7 +145,7 @@ def _apply_insight(db: Session, u: UserContext, cand, episode_id: str,
     """按 decide() 裁决写入一条经验，返回 (decision, insight_id)。"""
     matched = _matched_insights(db, u.app_id, u.user_id, cand.subject)
     same = next((r for r in matched if norm(r.content) == norm(cand.content)), None)
-    existing = same.content if same is not None else _active_content(matched)
+    existing = _active_content(matched, cand.content)
     decision = decide(existing, cand.content)
     if decision == "NOOP":
         return "noop", (same.id if same is not None else (matched[0].id if matched else None))
@@ -181,6 +187,7 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
     candidates = fn(text) if text else []
     decisions: list[str] = []
     insight_ids: list[str] = []
+    dropped_gate = 0
     for cand in candidates:
         kind = getattr(cand, "kind", "")
         subject = redact(str(getattr(cand, "subject", "") or "")).strip()
@@ -191,6 +198,7 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
         if len(subject) > MAX_SUBJECT_LEN:
             continue  # 兜底：绕过解析层直达这里的候选同样不能把整批拖死在 PG 长度校验上
         if is_injection(subject) or is_injection(content) or is_injection(applies_when):
+            dropped_gate += 1
             log.warning("insight dropped by injection gate episode=%s subject=%s", ep.id, subject[:40])
             continue
         decision, iid = _apply_insight(db, u, _Cand(kind, subject, content, applies_when), ep.id, embedder)
@@ -200,9 +208,11 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
     ep.distill_status = "done"
     ep.locked_until = None
     ep.last_error = None
+    # 审计口径：候选全被注入闸门拦下记 blocked，与「真无产出」的 empty 分开，复盘时看得出是被拦了
     summary = ("update" if "update" in decisions else
                "add" if "add" in decisions else
-               "noop" if decisions else "empty")
+               "noop" if decisions else
+               "blocked" if dropped_gate else "empty")
     db.add(AuditLog(app_id=ep.app_id, user_id=ep.user_id, action="distill",
                     fact_ids=insight_ids, decision=summary))
     db.commit()
@@ -267,13 +277,21 @@ def run_episode_once(db: Session, distiller, embedder: GeminiEmbedder | None = N
 
 
 def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
-                   embedder: GeminiEmbedder | None = None) -> list[InsightOut]:
+                   embedder: GeminiEmbedder | None = None, token_budget: int = 1500) -> list[InsightOut]:
     """情境召回：新任务开始前，按任务描述捞出适用的历史经验。
 
     排序与门槛完全沿用事实混合召回（0.7 向量 + 0.3 关键词；入选需关键词命中
     或余弦过 COS_MIN 标定线），匹配面是 主题+指导+适用情境。
     无向量时退化纯关键词，老数据零成本兼容。
+    COS_MIN 复校（2026-10-23，经验形文本，真 Gemini 向量）：6 条经验 × 8 个任务，
+    命中对余弦 0.670–0.785、未命中对 0.488–0.656，0.66 在经验文本上同样完成分离
+    （但间隔只有约 0.014，样本再扩大时可能要再动——结论先沿用事实侧的标定线）。
+    第八轮补：token 预算裁剪与事实召回对齐（此前只有条数上限，长经验能把简报撑爆）；
+    向量须维度/模型对得上才参与打分（vector_usable），对不上按无向量处理。
     """
+    k = max(1, int(k))  # 服务层兜底：负数 k 会让切片变成「除最后 N 条外全返回」
+    if not token_budget or token_budget <= 0:
+        token_budget = 1500
     rows = list(db.scalars(select(MemoryInsight).where(
         MemoryInsight.app_id == u.app_id, MemoryInsight.user_id == u.user_id,
         MemoryInsight.valid_to.is_(None))))
@@ -285,7 +303,8 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
         text = f"{row.subject} {row.content} {row.applies_when}"
         kw = _score(task, text)
         cos = None
-        if qvec is not None and row.embedding:
+        if qvec is not None and vector_usable(row.embed_model, row.embedding, qvec,
+                                              getattr(embedder, "model", None)):
             cos = cosine(qvec, [float(x) for x in row.embedding])
         if cos is not None:
             if kw < MIN_SCORE and cos < COS_MIN:
@@ -298,7 +317,16 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
             final, reason = kw, "keyword"
         scored.append((final, row, reason))
     scored.sort(key=lambda t: t[0], reverse=True)
-    return [InsightOut(insight_id=row.id, kind=row.kind, subject=row.subject,
-                       content=row.content, applies_when=row.applies_when,
-                       score=round(score, 4), reason=reason)
-            for score, row, reason in scored[:k]]
+    out: list[InsightOut] = []
+    used = 0
+    for score, row, reason in scored:
+        if len(out) >= k:
+            break
+        cost = _est_tokens(row.content)
+        if used + cost > token_budget:
+            break
+        used += cost
+        out.append(InsightOut(insight_id=row.id, kind=row.kind, subject=row.subject,
+                              content=row.content, applies_when=row.applies_when,
+                              score=round(score, 4), reason=reason))
+    return out

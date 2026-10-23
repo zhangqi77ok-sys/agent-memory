@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from app import models as m
 from app.auth import UserContext
-from app.embeddings import cosine
+from app.embeddings import cosine, vector_usable
 from app.schemas import FactOut
 
 MIN_SCORE = 0.10  # 基于50条陪伴评测集校准的召回阈值，兼顾长Query召回率与防误召回
@@ -64,6 +64,7 @@ def _query_vector(embedder, query: str) -> list[float] | None:
 
 
 def recall_facts(db: Session, u: UserContext, query: str, k: int, token_budget: int, embedder=None) -> list[FactOut]:
+    k = max(1, int(k))  # 服务层兜底：负数/0 的 k 会让切片语义出错（MCP 等入口不走 schemas 校验）
     rows = db.scalars(select(m.MemoryFact).where(
         m.MemoryFact.app_id == u.app_id,
         m.MemoryFact.user_id == u.user_id,
@@ -74,7 +75,8 @@ def recall_facts(db: Session, u: UserContext, query: str, k: int, token_budget: 
     def _final(r) -> tuple[float, str, bool]:
         kw = _score(query, f"{r.subject} {r.content}")
         emb = r.embedding
-        if qvec is not None and emb is not None and len(emb) > 0:
+        if qvec is not None and vector_usable(r.embed_model, emb, qvec,
+                                              getattr(embedder, "model", None)):
             cos = cosine(qvec, list(emb))
             blended = VECTOR_WEIGHT * cos + (1 - VECTOR_WEIGHT) * kw
             return blended, "hybrid", kw >= MIN_SCORE or cos >= COS_MIN
