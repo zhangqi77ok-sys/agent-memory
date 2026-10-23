@@ -2,7 +2,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
@@ -98,6 +98,7 @@ class TaskEpisode(UserScoped, Base):
     outcome: Mapped[str] = mapped_column(String(16), default="success")  # success|failure|partial
     steps: Mapped[list] = mapped_column(JSON, default=list)  # [{action, observation?, error?}]
     cost: Mapped[dict] = mapped_column(JSON, default=dict)  # {tokens, duration_s, retries...}
+    project: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)  # 来源项目/仓库（第十轮）：防跨项目串扰；为空=通用
     distill_status: Mapped[str] = mapped_column(String(16), default="pending", index=True)  # pending/running/done/failed
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # 领取锁定期；过期可被其他 Worker 重领
@@ -127,6 +128,16 @@ class MemoryInsight(UserScoped, Base):
     valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     source_episode_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    project: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)  # 继承来源轨迹的项目（第十轮）；为空=通用经验
+    # 反馈闭环（第十轮）：被简报递出记 use_count，任务结果经 memory_feedback 回流成置信度。
+    # confidence 由反馈按拉普拉斯平滑算出 (1+pos)/(2+pos+neg)，无反馈时 0.5（中性先验）；
+    # 它是第十一轮衰减与简报三要素排序的输入，不在这里拍脑袋赋值。
+    confidence: Mapped[float] = mapped_column(Float, default=0.5)
+    use_count: Mapped[int] = mapped_column(Integer, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    feedback_pos: Mapped[int] = mapped_column(Integer, default=0)
+    feedback_neg: Mapped[int] = mapped_column(Integer, default=0)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     __table_args__ = (
         Index("ix_insight_app_user_subject", "app_id", "user_id", "subject"),
     )

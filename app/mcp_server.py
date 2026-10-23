@@ -37,7 +37,7 @@ from app.auth import UserContext, bind_user
 from app.config import settings
 from app.db import SessionLocal
 from app.embeddings import build_embedder
-from app.episodes import brief_for_task, find_episode_by_key, submit_episode
+from app.episodes import brief_for_task, find_episode_by_key, record_feedback, submit_episode
 from app.recall import recall_facts
 from app.schemas import CONSENT_VERSION, Message, WriteRequest
 
@@ -176,7 +176,7 @@ def memory_list(limit: int = 50, offset: int = 0) -> dict:
 @mcp.tool()
 def memory_episode_submit(title: str, outcome: str = "success", steps: list[dict] | None = None,
                           source: str = "", tokens: int = 0, duration_s: float = 0.0,
-                          idempotency_key: str = "") -> dict:
+                          idempotency_key: str = "", project: str = "") -> dict:
     """任务做完后，把全过程提交给共享记忆，用于提炼可复用的经验。
 
     steps 是轨迹：每步 {"action": "做了什么", "observation": "看到什么", "error": "报了什么错"}，
@@ -184,8 +184,11 @@ def memory_episode_submit(title: str, outcome: str = "success", steps: list[dict
     避坑/省钱招存入经验库；返回 episode_id 表示已受理，skipped=True 表示用户未开启记忆。
     防重：传 idempotency_key 时同一键只受理一次；不传时按内容指纹防重——同一次提交的
     超时重试会被认出来（duplicate=True），但内容一字不差的两次真实提交也会被并作一次。
+    project 是来源项目/仓库名（不传时读环境变量 MEMORY_PROJECT）：经验会继承它，
+    之后同项目的任务简报里这条经验加权，别的项目里降权——防止 A 项目的坑串到 B 项目。
     """
     src = (source or os.environ.get("MEMORY_SOURCE") or "mcp").strip()[:32] or "mcp"
+    proj = (project or os.environ.get("MEMORY_PROJECT") or "").strip()[:128] or None
     cost: dict = {}
     if tokens:
         cost["tokens"] = tokens
@@ -222,28 +225,59 @@ def memory_episode_submit(title: str, outcome: str = "success", steps: list[dict
                     "note": "同一提交已受理过，没有重复落库"}
         ep = submit_episode(db, u, source=src, title=clean_title,
                             outcome=clean_outcome,
-                            steps=clean_steps, cost=cost, idempotency_key=idem)
+                            steps=clean_steps, cost=cost, idempotency_key=idem,
+                            project=proj)
     return {"episode_id": ep.id, "skipped": False, "duplicate": False,
             "note": "已受理，后台 Worker 会复盘提炼经验"}
 
 
 @mcp.tool()
-def memory_brief(task: str, k: int = 5) -> dict:
+def memory_brief(task: str, k: int = 5, project: str = "") -> dict:
     """开始一个新任务之前调用：按任务情境从经验库捞出适用的历史教训、打法、避坑与省钱招。
 
     经验来自以往任务过程的复盘提炼，照着做能跳过过去踩过的坑。返回 insights
-    （含 kind/subject/content/applies_when/score）；没有匹配经验时为空列表。
+    （含 kind/subject/content/applies_when/score/confidence/project/source_episode_id）；
+    没有匹配经验时为空列表。任务做完后请对用过的经验调用 memory_feedback 回报效果。
+    project 是当前项目/仓库名（不传时读环境变量 MEMORY_PROJECT）：同项目经验加权、
+    跨项目降权，防串扰。
     """
     k = _clamp_int(k, 1, 20, 5)  # 与 REST BriefRequest 的范围对齐（旧版 k=-1 会切出「除最后一条」）
+    proj = (project or os.environ.get("MEMORY_PROJECT") or "").strip()[:128] or None
     with _session() as (db, u):
         if not memory_enabled(db, u):
             return {"insights": [], "note": "该用户未同意开启记忆，经验库为空"}
         insights = brief_for_task(db, u, task, k,
-                                  embedder=build_embedder(timeout=settings.recall_timeout_s))
+                                  embedder=build_embedder(timeout=settings.recall_timeout_s),
+                                  project=proj)
         db.add(m.AuditLog(app_id=u.app_id, user_id=u.user_id, action="brief",
                           fact_ids=[i.insight_id for i in insights]))
         db.commit()
         return {"insights": [i.model_dump() for i in insights]}
+
+
+@mcp.tool()
+def memory_feedback(insight_id: str, helpful: bool, task_outcome: str = "") -> dict:
+    """任务做完后回报一条经验的效果，让经验库越用越准（反馈闭环）。
+
+    insight_id 来自 memory_brief 的返回；helpful 表示这条经验这次到底有没有帮上忙，
+    task_outcome 是这次任务的结果（success/failure/partial，可空）。回报会更新这条
+    经验的置信度：帮上忙的以后排序靠前，反复没用的会被压下去。不回报，经验库就
+    只能按文本相似度排，学不到「哪条真的管用」。
+    """
+    outcome = task_outcome if task_outcome in ("success", "failure", "partial") else None
+    with _session() as (db, u):
+        if not memory_enabled(db, u):
+            return {"ok": False, "error": "memory_disabled", "note": "该用户未同意开启记忆"}
+        try:
+            row = record_feedback(db, u, insight_id, helpful=bool(helpful),
+                                  task_outcome=outcome)
+        except ValueError:
+            db.rollback()
+            return {"ok": False, "error": "not_found", "note": "该 insight 不存在或不属于当前用户"}
+        db.commit()
+        return {"ok": True, "insight_id": row.id, "confidence": round(row.confidence, 4),
+                "feedback_pos": row.feedback_pos or 0, "feedback_neg": row.feedback_neg or 0,
+                "success_count": row.success_count or 0}
 
 
 @mcp.tool()

@@ -102,6 +102,7 @@ class EpisodeStep(Strict):
 
 class EpisodeSubmitRequest(UserScopedRequest):
     source: str = Field(default="api", max_length=32)
+    project: str | None = Field(default=None, max_length=128)  # 来源项目/仓库（第十轮作用域）
     title: str = Field(min_length=1, max_length=500)
     outcome: str = Field(default="success", pattern="^(success|failure|partial)$")
     steps: list[EpisodeStep] = Field(default_factory=list, max_length=200)
@@ -127,6 +128,21 @@ class BriefRequest(UserScopedRequest):
     task: str = Field(min_length=1, max_length=2000)
     k: int = Field(default=5, ge=1, le=20)
     token_budget: int = Field(default=1500, ge=100, le=8000)  # 简报正文的 token 上限，与事实召回对齐
+    project: str | None = Field(default=None, max_length=128)  # 当前项目（第十轮）：同项目经验加权
+
+
+class FeedbackRequest(UserScopedRequest):
+    insight_id: str = Field(min_length=1, max_length=32)
+    helpful: bool
+    task_outcome: str | None = Field(default=None, pattern="^(success|failure|partial)$")
+
+
+class FeedbackOut(BaseModel):
+    insight_id: str
+    confidence: float
+    feedback_pos: int
+    feedback_neg: int
+    success_count: int
 
 
 class InsightOut(BaseModel):
@@ -137,6 +153,10 @@ class InsightOut(BaseModel):
     applies_when: str
     score: float
     reason: str
+    # 第十轮：置信度（反馈回流算出）、所属项目、来源轨迹——简报里每条经验可溯源、可判断可信度
+    confidence: float = 0.5
+    project: str | None = None
+    source_episode_id: str | None = None
 
 
 class BriefResponse(BaseModel):

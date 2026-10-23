@@ -136,6 +136,7 @@ def export(u: UserContext = Depends(user_from_query), db: Session = Depends(get_
                          "valid_from": iso(p.valid_from), "valid_to": iso(p.valid_to)} for p in prefs],
         "insights": [{"id": i.id, "subject": i.subject, "content": i.content,
                       "applies_when": i.applies_when, "version": i.version,
+                      "project": i.project, "confidence": i.confidence,
                       "valid_from": iso(i.valid_from), "valid_to": iso(i.valid_to)} for i in insights],
         "episodes": [{"id": e.id, "source": e.source, "title": e.title, "outcome": e.outcome,
                       "steps": e.steps, "cost": e.cost, "distill_status": e.distill_status,

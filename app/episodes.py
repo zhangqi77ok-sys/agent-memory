@@ -58,7 +58,8 @@ def find_episode_by_key(db: Session, app_id: str, user_id: str, idempotency_key:
 
 def submit_episode(db: Session, u: UserContext, *, source: str, title: str,
                    outcome: str, steps: list[dict], cost: dict,
-                   idempotency_key: str | None = None) -> TaskEpisode:
+                   idempotency_key: str | None = None,
+                   project: str | None = None) -> TaskEpisode:
     """落一条 episode。带 idempotency_key 时同一键只落一次：客户端（尤其会自己重试的
     工具调用）超时重试不会产生重复轨迹、不会重复烧提炼——语义与 /v1/memories 的写入幂等一致：
     查已有 → 返回已有；并发同键靠唯一约束兜底，撞上后回滚再查。"""
@@ -68,7 +69,7 @@ def submit_episode(db: Session, u: UserContext, *, source: str, title: str,
             return existing
     ep = TaskEpisode(app_id=u.app_id, user_id=u.user_id, source=source, title=redact(title),
                      outcome=outcome, steps=_redact_steps(steps), cost=_redact_cost(cost),
-                     idempotency_key=idempotency_key)
+                     idempotency_key=idempotency_key, project=project)
     db.add(ep)
     try:
         db.commit()
@@ -198,7 +199,8 @@ def _embed_insight(embedder: GeminiEmbedder | None, row: MemoryInsight) -> None:
 
 
 def _apply_insight(db: Session, u: UserContext, cand, episode_id: str,
-                   embedder: GeminiEmbedder | None) -> tuple[str, str | None]:
+                   embedder: GeminiEmbedder | None,
+                   project: str | None = None) -> tuple[str, str | None]:
     """按 decide() 裁决写入一条经验，返回 (decision, insight_id)。"""
     matched = _matched_insights(db, u.app_id, u.user_id, cand.subject)
     same = next((r for r in matched if norm(r.content) == norm(cand.content)), None)
@@ -207,13 +209,24 @@ def _apply_insight(db: Session, u: UserContext, cand, episode_id: str,
     if decision == "NOOP":
         return "noop", (same.id if same is not None else (matched[0].id if matched else None))
     now_version = max((r.version for r in matched), default=0) + 1
+    # 反馈声誉属于这条经验的血统，不属于某一行：新版本继承被关闭各行的计数与置信度，
+    # 否则每次内容更新都把攒下的信任清零，反馈闭环就白建了（第十轮）。
+    inh_pos = sum(r.feedback_pos or 0 for r in matched)
+    inh_neg = sum(r.feedback_neg or 0 for r in matched)
+    inh_use = sum(r.use_count or 0 for r in matched)
+    inh_succ = sum(r.success_count or 0 for r in matched)
+    if project is None and matched:
+        project = matched[0].project
     for row in matched:
         if row is not same:
             row.valid_to = _now()
     row = MemoryInsight(app_id=u.app_id, user_id=u.user_id, kind=cand.kind,
                         subject=cand.subject, content=cand.content,
                         applies_when=cand.applies_when, version=now_version,
-                        source_episode_id=episode_id)
+                        source_episode_id=episode_id, project=project,
+                        confidence=_confidence(inh_pos, inh_neg),
+                        use_count=inh_use, success_count=inh_succ,
+                        feedback_pos=inh_pos, feedback_neg=inh_neg)
     db.add(row)
     db.flush()
     _embed_insight(embedder, row)
@@ -258,7 +271,8 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
             dropped_gate += 1
             log.warning("insight dropped by injection gate episode=%s subject=%s", ep.id, subject[:40])
             continue
-        decision, iid = _apply_insight(db, u, _Cand(kind, subject, content, applies_when), ep.id, embedder)
+        decision, iid = _apply_insight(db, u, _Cand(kind, subject, content, applies_when), ep.id,
+                                       embedder, project=ep.project)
         decisions.append(decision)
         if iid:
             insight_ids.append(iid)
@@ -333,8 +347,40 @@ def run_episode_once(db: Session, distiller, embedder: GeminiEmbedder | None = N
     return db.get(TaskEpisode, ep.id)
 
 
+def _confidence(pos: int, neg: int) -> float:
+    """置信度 = 反馈的拉普拉斯平滑胜率 (1+pos)/(2+pos+neg)：无反馈 0.5（中性先验），
+    证据越多越往两端走。第十一轮的衰减在此值上做，不改计数本身。"""
+    return (1 + pos) / (2 + pos + neg)
+
+
+def record_feedback(db: Session, u: UserContext, insight_id: str, *,
+                    helpful: bool, task_outcome: str | None = None) -> MemoryInsight:
+    """反馈闭环的写入端（第十轮）：任务结束后回报「这条经验用了、有没有用、任务成没成」。
+
+    只认本人名下的经验（跨用户/不存在一律 ValueError，REST 转 404，不泄露存在性）；
+    task_outcome='success' 时记一次成功关联。置信度当场按 _confidence 重算并落库，
+    简报排序直接用它，不必每次现算。调用方负责 commit。"""
+    row = db.scalar(select(MemoryInsight).where(
+        MemoryInsight.id == insight_id, MemoryInsight.app_id == u.app_id,
+        MemoryInsight.user_id == u.user_id))
+    if row is None:
+        raise ValueError("insight not found")
+    if helpful:
+        row.feedback_pos = (row.feedback_pos or 0) + 1
+    else:
+        row.feedback_neg = (row.feedback_neg or 0) + 1
+    if task_outcome == "success":
+        row.success_count = (row.success_count or 0) + 1
+    row.confidence = _confidence(row.feedback_pos or 0, row.feedback_neg or 0)
+    db.add(AuditLog(app_id=u.app_id, user_id=u.user_id, action="feedback",
+                    fact_ids=[row.id]))
+    db.flush()
+    return row
+
+
 def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
-                   embedder: GeminiEmbedder | None = None, token_budget: int = 1500) -> list[InsightOut]:
+                   embedder: GeminiEmbedder | None = None, token_budget: int = 1500,
+                   project: str | None = None) -> list[InsightOut]:
     """情境召回：新任务开始前，按任务描述捞出适用的历史经验。
 
     排序与门槛完全沿用事实混合召回（0.7 向量 + 0.3 关键词；入选需关键词命中
@@ -345,6 +391,10 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
     （但间隔只有约 0.014，样本再扩大时可能要再动——结论先沿用事实侧的标定线）。
     第八轮补：token 预算裁剪与事实召回对齐（此前只有条数上限，长经验能把简报撑爆）；
     向量须维度/模型对得上才参与打分（vector_usable），对不上按无向量处理。
+    第十轮补：门槛仍只看原始相关性（标定不被污染），排序分再乘两个乘子——
+    置信度乘子 0.7+0.6×confidence（反馈攒出的信任，0.7–1.3），项目乘子
+    （同项目 1.15、跨项目 0.85、通用经验 1.0；跨项目只是降权不排除，通用经验不该被埋没）。
+    递出的经验记 use_count/last_used_at（曝光计数；「真用了且有效」由反馈闭环回流）。
     """
     k = max(1, int(k))  # 服务层兜底：负数 k 会让切片变成「除最后 N 条外全返回」
     if not token_budget or token_budget <= 0:
@@ -372,6 +422,13 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
             if kw < MIN_SCORE:
                 continue
             final, reason = kw, "keyword"
+        conf = row.confidence if row.confidence is not None else 0.5
+        final *= 0.7 + 0.6 * conf
+        if project:
+            if row.project == project:
+                final *= 1.15
+            elif row.project:
+                final *= 0.85
         scored.append((final, row, reason))
     scored.sort(key=lambda t: t[0], reverse=True)
     out: list[InsightOut] = []
@@ -383,7 +440,17 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
         if used + cost > token_budget:
             break
         used += cost
+        row.use_count = (row.use_count or 0) + 1
+        row.last_used_at = _now()
         out.append(InsightOut(insight_id=row.id, kind=row.kind, subject=row.subject,
                               content=row.content, applies_when=row.applies_when,
-                              score=round(score, 4), reason=reason))
+                              score=round(score, 4), reason=reason,
+                              confidence=round(row.confidence, 4)
+                              if row.confidence is not None else 0.5,
+                              project=row.project, source_episode_id=row.source_episode_id))
+    # 曝光计数当场提交：brief 从第十轮起是「读 + 记账」，若只 flush 不 commit，
+    # 调用方会话会一直攥着写事务——REST 与直调在同一进程交替出现时能把库锁死
+    # （SQLite 实测 database is locked；PG 上则是行锁干等）。简报的账自己结清，
+    # 调用方随后的审计 commit 不受影响。
+    db.commit()
     return out
