@@ -167,6 +167,56 @@ def _insight_item(i: m.MemoryInsight) -> InsightListItem:
         last_used_at=i.last_used_at)
 
 
+@router.get("/skills")
+def export_skills_ep(project: str | None = Query(None, max_length=128),
+                     min_confidence: float = Query(0.5, ge=0.0, le=1.0),
+                     u: UserContext = Depends(user_from_query),
+                     db: Session = Depends(get_db)):
+    """把高置信经验编译成 Skills 文件（第十三轮）：每个项目一份 SKILL.md + 汇总 AGENTS.md。
+
+    返回 {files: {相对路径: 内容}}，调用方（脚本 / 工具）落盘到仓库里，编程工具
+    即可原生加载。与 JSON 全量导出分工：导出是备份/可携带，这份是给工具吃的成品。"""
+    from app.skills_export import export_skills
+
+    bind_user(db, u)
+    files = export_skills(db, u, project=project, min_confidence=min_confidence)
+    _audit(db, u, "skills_export", [])
+    db.commit()
+    return {"files": files, "count": len(files)}
+
+
+@router.get("/markdown")
+def export_markdown_ep(u: UserContext = Depends(user_from_query),
+                       db: Session = Depends(get_db)):
+    """记忆的 Markdown 镜像（第十三轮）：事实/偏好/经验按主题渲染成 .md（带条目 id）。
+
+    这是给人看的真相文件：可读、可 diff、可进 git。与 JSON 导出的分工——
+    JSON 是备份/可携带的完整数据，这份是日常可编辑的工作副本。"""
+    from app.markdown_sync import render_memory_markdown
+
+    bind_user(db, u)
+    files = render_memory_markdown(db, u)
+    _audit(db, u, "md_export", [])
+    db.commit()
+    return {"files": files, "count": len(files)}
+
+
+@router.post("/markdown/import")
+def import_markdown_ep(payload: dict, u: UserContext = Depends(user_from_query),
+                       db: Session = Depends(get_db)):
+    """把编辑过的 Markdown 导回（第十三轮）：按 id 应用编辑与新增；删除只报告不执行。"""
+    from app.markdown_sync import apply_markdown_import
+
+    files = payload.get("files")
+    if not isinstance(files, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in files.items()):
+        raise HTTPException(422, "files 必须是 {路径: 内容} 的对象")
+    if len(files) > 500:
+        raise HTTPException(422, "文件数超限（500）")
+    bind_user(db, u)
+    return apply_markdown_import(db, u, files)
+
+
 @router.get("/insights", response_model=list[InsightListItem])
 def list_insights(u: UserContext = Depends(user_from_query), db: Session = Depends(get_db)):
     """我的经验库（第十一轮）：现行经验全量可见——学到了什么、置信度多少、用过几次，

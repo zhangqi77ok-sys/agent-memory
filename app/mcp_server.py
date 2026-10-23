@@ -281,6 +281,29 @@ def memory_feedback(insight_id: str, helpful: bool, task_outcome: str = "") -> d
 
 
 @mcp.tool()
+def memory_skills_export(project: str = "", min_confidence: float = 0.5) -> dict:
+    """把经验库里高置信的经验编译成 Skills 文件（SKILL.md / AGENTS.md）。
+
+    返回 {files: {相对路径: 内容}}——把内容按路径写进当前仓库，编程工具就能把
+    这些从历史任务里提炼的教训、策略、避坑当作原生 skill 加载。project 不传时
+    按经验的项目归属逐个成文（通用经验归到 general）。min_confidence 是入选门槛
+    （0~1，缺省 0.5）；人工置顶的经验无条件入选，被禁用的永不入选。
+    """
+    proj = (project or "").strip()[:128] or None
+    mc = min(1.0, max(0.0, float(min_confidence)))
+    with _session() as (db, u):
+        if not memory_enabled(db, u):
+            return {"files": {}, "note": "该用户未同意开启记忆，经验库为空"}
+        from app.skills_export import export_skills
+
+        files = export_skills(db, u, project=proj, min_confidence=mc)
+        db.add(m.AuditLog(app_id=u.app_id, user_id=u.user_id,
+                          action="skills_export", fact_ids=[]))
+        db.commit()
+        return {"files": files, "count": len(files)}
+
+
+@mcp.tool()
 def memory_forget(item_id: str) -> dict:
     """按 id 删除一条记忆：事实/偏好/经验连同同主题全部历史版本并登记防恢复，轨迹按行删。
 

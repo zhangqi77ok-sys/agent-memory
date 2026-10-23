@@ -55,6 +55,23 @@ scripts/test-pg.sh              # 真 Postgres(+pgvector) 全套：需本机 doc
 uvicorn app.main:app --reload   # 默认 SQLite
 ```
 
+### 一键版（lite，个人自用）
+```bash
+python -m app.lite              # 单进程全套：SQLite + 自动迁移 + 自动生成服务密钥
+```
+数据在 `~/.agent-memory/`（`AGENT_MEMORY_HOME` 可改），服务密钥存在该目录的
+`service_key.txt`，MCP 与脚本用它连接。配上 `LLM_BASE_URL/LLM_API_KEY/LLM_MODEL`
+（任意 OpenAI 兼容端点）后自动抽取与提炼开启；配 `GEMINI_API_KEY` 后向量召回开启。
+都不配也能用：关键词简报、Markdown 同步、Skills 导出照常。多用户/高并发请用下面的部署形态。
+
+### 经验走出记忆库（Skills 与 Markdown）
+```bash
+SERVICE_KEY=<密钥> python3 scripts/export_skills.py --user <你> --out <仓库目录>   # 高置信经验 → SKILL.md/AGENTS.md，编程工具直接加载
+SERVICE_KEY=<密钥> python3 scripts/sync_markdown.py --pull --user <你> --dir <目录>  # 记忆 → 人可读 .md（带 id，可进 git）
+SERVICE_KEY=<密钥> python3 scripts/sync_markdown.py --push --user <你> --dir <目录>  # 编辑器里改过的 .md 导回（删除只报告不执行）
+SERVICE_KEY=<密钥> python3 scripts/import_episodes.py --user <你> --file history.jsonl  # 冷启动：历史任务记录批量导入成轨迹
+```
+
 ## 部署
 `deploy/docker-compose.yml`（api + worker + pgvector），`Jenkinsfile`（gitleaks → lint/test → 真 Postgres 测试 → 构建镜像 → 推 GHCR → SSH 部署到部署机 → /readyz 冒烟，失败自动回滚上一个成功 tag），`deploy/backup.sh` / `deploy/restore.sh` / `deploy/ensure-roles.sh`。
 详见 `docs/deploy.md`、`docs/runbook.md`、`docs/adr/0002-jenkins-to-deploy-host.md`。
