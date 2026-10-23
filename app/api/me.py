@@ -11,8 +11,17 @@ from sqlalchemy.orm import Session
 from app import models as m
 from app.api.memories import _audit, get_db
 from app.auth import UserContext, bind_user, user_ctx, user_from_query
-from app.schemas import (CONSENT_VERSION, CorrectRequest, InsightListItem, InsightPatch,
-                         JobOut, MemoryItem, MemoryPage, SettingsIn, SettingsOut)
+from app.schemas import (
+    CONSENT_VERSION,
+    CorrectRequest,
+    InsightListItem,
+    InsightPatch,
+    JobOut,
+    MemoryItem,
+    MemoryPage,
+    SettingsIn,
+    SettingsOut,
+)
 
 router = APIRouter(prefix="/v1/me")
 
