@@ -15,7 +15,7 @@
 - 本服务不做用户登录认证，`user_id` 由业务调用方在上游完成身份校验与鉴权后传入；`APP_ID` 由服务配置固定；数据隔离由 `user_id + app_id`（Postgres RLS）保证。
 
 ## 不在 v1
-情景记忆、图谱、后台整合；任务状态与 checkpoint 属于 tiancode Runtime。
+图谱、后台整合；任务状态与 checkpoint 属于 tiancode Runtime。
 
 ## 文档
 | 文档 | 给谁看 | 内容 |
@@ -54,6 +54,9 @@ uvicorn app.main:app --reload   # 默认 SQLite
 ## 当前状态（骨架）
 - 已实现：身份（业务传 `user_id`，演示页输入框或 `?user_id=`；应用来自 `APP_ID`）、写入入队（幂等）、召回（预过滤有效事实，关键词打分占位）、遗忘（删所有版本 + forgotten_id）、Worker 领取/死信、**抽取管线**（脱敏 → LLM → 代码判定 ADD/UPDATE/NOOP → `valid_to` 失效旧值）、v1 迁移（Postgres 下含 pgvector/HNSW/GIN/RLS）。
 - 已实现（面板）：`/v1/me/*` + `web/`「我的记忆」前端（同意、列表、纠正、删除、清空、导出、总开关、任务状态）。
-- 未实现：向量 + BM25 + RRF（事实的 embedding 仍为空）、摘要。
+- 已实现（跨工具共享，第一轮）：MCP 门面 `app/mcp_server.py`（memory_write / search / list / forget），与 REST 共用同一条代码路径；Codex、Gemini CLI 等 stdio 客户端连同一个库即互通。
+- 已实现（语义召回，第一/二轮）：事实 embedding 由 Gemini `gemini-embedding-001` 生成（1536 维）；混合召回 = 0.7 向量 + 0.3 关键词，入选需关键词命中或余弦 ≥ 0.66（实测标定）；主题合并 same_subject 兜底、worker 并发锁、CJK token 估算。
+- 已实现（经验记忆，第三轮）：任务过程提交（`POST /v1/episodes`、MCP `memory_episode_submit`）→ Worker 复盘提炼为经验条目（教训/打法/避坑/省钱招，`memory_insight` 表，同走脱敏/注入闸门/decide 裁决/时间失效）→ 开工前情境召回（`POST /v1/brief`、MCP `memory_brief`）。A/B 演示：`scripts/episode_demo.py`。
+- 未实现：摘要（summarize）；召回融合为线性加权而非 RRF。
 - Worker 生产配置：`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`（见 `deploy/.env.example`）。测试注入假抽取器，不读这些变量。
 - 已验证：Postgres 上的迁移与 Compose 启动、Jenkins 实跑、GHCR 推送、自动回滚、备份恢复+遗忘重删。

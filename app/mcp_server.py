@@ -32,6 +32,7 @@ from app.auth import UserContext, bind_user
 from app.config import settings
 from app.db import SessionLocal
 from app.embeddings import build_embedder
+from app.episodes import brief_for_task, submit_episode
 from app.recall import recall_facts
 from app.schemas import CONSENT_VERSION, Message, WriteRequest
 
@@ -41,6 +42,8 @@ mcp = FastMCP(
         "这是用户的跨工具共享记忆。涉及用户的偏好、背景、既往决定时，先用 memory_search 查；"
         "对话中出现值得长期记住的事实或偏好时，用 memory_write 存下。记忆写入是异步的："
         "memory_write 返回 job_id 只表示已受理，后台 Worker 会完成抽取与入库。"
+        "接到新任务先用 memory_brief 按情境查历史经验（教训/打法/避坑/省钱招）；"
+        "任务做完用 memory_episode_submit 提交全过程，经验会被复盘提炼，供以后的任务复用。"
     ),
 )
 
@@ -142,6 +145,57 @@ def memory_list(limit: int = 50, offset: int = 0) -> dict:
         page = items[offset:offset + limit]
         return {"items": [it.model_dump(mode="json") for it in page], "total": len(items),
                 "offset": offset, "limit": limit}
+
+
+@mcp.tool()
+def memory_episode_submit(title: str, outcome: str = "success", steps: list[dict] | None = None,
+                          source: str = "", tokens: int = 0, duration_s: float = 0.0) -> dict:
+    """任务做完后，把全过程提交给共享记忆，用于提炼可复用的经验。
+
+    steps 是轨迹：每步 {"action": "做了什么", "observation": "看到什么", "error": "报了什么错"}，
+    失败和绕路尤其要如实记——经验主要从失败里长出来。后台 Worker 会复盘提炼出教训/打法/
+    避坑/省钱招存入经验库；返回 episode_id 表示已受理，skipped=True 表示用户未开启记忆。
+    """
+    src = (source or os.environ.get("MEMORY_SOURCE") or "mcp").strip()[:32] or "mcp"
+    cost: dict = {}
+    if tokens:
+        cost["tokens"] = tokens
+    if duration_s:
+        cost["duration_s"] = duration_s
+    clean_steps = []
+    for s in (steps or [])[:200]:
+        if not isinstance(s, dict):
+            continue
+        step = {"action": str(s.get("action", ""))[:500]}
+        if s.get("observation"):
+            step["observation"] = str(s["observation"])[:2000]
+        if s.get("error"):
+            step["error"] = str(s["error"])[:2000]
+        clean_steps.append(step)
+    with _session() as (db, u):
+        if not memory_enabled(db, u):
+            return {"episode_id": None, "skipped": True,
+                    "note": "该用户未同意开启记忆：先通过 REST /v1/me/settings 同意，"
+                            "或启动服务时设 MEMORY_AUTO_CONSENT=1"}
+        ep = submit_episode(db, u, source=src, title=title[:500],
+                            outcome=outcome if outcome in ("success", "failure", "partial") else "success",
+                            steps=clean_steps, cost=cost)
+    return {"episode_id": ep.id, "skipped": False, "note": "已受理，后台 Worker 会复盘提炼经验"}
+
+
+@mcp.tool()
+def memory_brief(task: str, k: int = 5) -> dict:
+    """开始一个新任务之前调用：按任务情境从经验库捞出适用的历史教训、打法、避坑与省钱招。
+
+    经验来自以往任务过程的复盘提炼，照着做能跳过过去踩过的坑。返回 insights
+    （含 kind/subject/content/applies_when/score）；没有匹配经验时为空列表。
+    """
+    with _session() as (db, u):
+        if not memory_enabled(db, u):
+            return {"insights": [], "note": "该用户未同意开启记忆，经验库为空"}
+        insights = brief_for_task(db, u, task, k,
+                                  embedder=build_embedder(timeout=settings.recall_timeout_s))
+        return {"insights": [i.model_dump() for i in insights]}
 
 
 @mcp.tool()

@@ -85,6 +85,48 @@ class SessionSummary(UserScoped, Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class TaskEpisode(UserScoped, Base):
+    """一次任务的完整过程：目标、步骤轨迹、结果、成本。
+
+    事实抽取看不见这些，而经验提炼（distill）正是以它为原料：
+    系统考的不是记住事实，是能不能把过程变成让后面任务更好/更省的经验。
+    """
+    __tablename__ = "task_episode"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
+    source: Mapped[str] = mapped_column(String(32), default="mcp")  # 提交方（codex / gemini-cli / api…）
+    title: Mapped[str] = mapped_column(Text)  # 任务目标
+    outcome: Mapped[str] = mapped_column(String(16), default="success")  # success|failure|partial
+    steps: Mapped[list] = mapped_column(JSON, default=list)  # [{action, observation?, error?}]
+    cost: Mapped[dict] = mapped_column(JSON, default=dict)  # {tokens, duration_s, retries...}
+    distill_status: Mapped[str] = mapped_column(String(16), default="pending", index=True)  # pending/done/failed
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class MemoryInsight(UserScoped, Base):
+    """从任务过程提炼出的经验条目：不是「用户是什么」，而是「这类任务怎么做更好/更省」。
+
+    与事实同构：时间失效 + 版本递增 + same_subject 合并 + 向量语义召回，
+    靠来源 episode 溯源，靠 decide() 裁决去重与更新。
+    """
+    __tablename__ = "memory_insight"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
+    kind: Mapped[str] = mapped_column(String(16))  # lesson|strategy|pitfall|cost_saver
+    subject: Mapped[str] = mapped_column(String(128))
+    content: Mapped[str] = mapped_column(Text)  # 可直接照着做的指导
+    applies_when: Mapped[str] = mapped_column(Text, default="")  # 适用情境，情境召回的主要匹配面
+    embedding = mapped_column(Embedding, nullable=True)
+    embed_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    source_episode_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    __table_args__ = (
+        Index("ix_insight_app_user_subject", "app_id", "user_id", "subject"),
+    )
+
+
 class MemoryJob(UserScoped, Base):
     __tablename__ = "memory_job"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)

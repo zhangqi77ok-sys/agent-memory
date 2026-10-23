@@ -301,10 +301,13 @@ def run_once(db: Session, extractor, embedder=None) -> m.MemoryJob | None:
 def main() -> None:  # pragma: no cover
     logging.basicConfig(level=logging.INFO)
     from app.config import settings
+    from app.distill import build_distiller
     from app.embeddings import build_embedder
+    from app.episodes import run_episode_once
     from app.extract import build_extractor
 
     extractor = build_extractor()
+    distiller = build_distiller()
     embedder = build_embedder()
     log.info("worker started prompt=%s embedding=%s", PROMPT_VERSION,
              embedder.model if embedder is not None else "off")
@@ -318,7 +321,8 @@ def main() -> None:  # pragma: no cover
                 except Exception as e:
                     log.warning("expire_memories error: %s", e)
             job = run_once(db, extractor, embedder=embedder)
-        if job is None:
+            ep = run_episode_once(db, distiller, embedder=embedder)
+        if job is None and ep is None:
             time.sleep(2)
         elif job.status == "pending":
             time.sleep(min(2 ** max(job.attempts, 1), 30))

@@ -92,3 +92,41 @@ class JobOut(BaseModel):
     attempts: int
     last_error: str | None
     created_at: datetime
+
+
+class EpisodeStep(Strict):
+    action: str = Field(min_length=1, max_length=500)
+    observation: str | None = Field(default=None, max_length=2000)
+    error: str | None = Field(default=None, max_length=2000)
+
+
+class EpisodeSubmitRequest(UserScopedRequest):
+    source: str = Field(default="api", max_length=32)
+    title: str = Field(min_length=1, max_length=500)
+    outcome: str = Field(default="success", pattern="^(success|failure|partial)$")
+    steps: list[EpisodeStep] = Field(default_factory=list, max_length=200)
+    cost: dict = Field(default_factory=dict)
+
+
+class EpisodeAccepted(BaseModel):
+    episode_id: str | None
+    skipped: bool = False  # 用户未同意或已暂停记忆：不落任何数据
+
+
+class BriefRequest(UserScopedRequest):
+    task: str = Field(min_length=1, max_length=2000)
+    k: int = Field(default=5, ge=1, le=20)
+
+
+class InsightOut(BaseModel):
+    insight_id: str
+    kind: str  # lesson|strategy|pitfall|cost_saver
+    subject: str
+    content: str
+    applies_when: str
+    score: float
+    reason: str
+
+
+class BriefResponse(BaseModel):
+    insights: list[InsightOut]

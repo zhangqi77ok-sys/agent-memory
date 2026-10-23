@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from app.api.episodes import router as episodes_router
 from app.api.me import router as me_router
 from app.api.memories import router as memories_router
 from app.auth import is_valid_service_key
@@ -78,6 +79,7 @@ def create_app(s: Settings = settings) -> FastAPI:
         return response
 
     application.include_router(memories_router)
+    application.include_router(episodes_router)
     application.include_router(me_router)
 
     @application.get("/healthz")
