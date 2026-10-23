@@ -145,6 +145,35 @@ class FeedbackOut(BaseModel):
     success_count: int
 
 
+class InsightListItem(BaseModel):
+    """「我的经验」列表项（第十一轮）：经验库对用户可见的全部状态，含反馈计数与策展开关。"""
+    id: str
+    kind: str
+    subject: str
+    content: str
+    applies_when: str
+    project: str | None = None
+    confidence: float = 0.5
+    use_count: int = 0
+    success_count: int = 0
+    feedback_pos: int = 0
+    feedback_neg: int = 0
+    pinned: bool = False
+    muted: bool = False
+    version: int = 1
+    source_episode_id: str | None = None
+    valid_from: datetime
+    last_used_at: datetime | None = None
+
+
+class InsightPatch(BaseModel):
+    """经验单条编辑（第十一轮）：改内容/适用情境会作废旧向量（匹配面变了），置顶/禁用是策展开关。"""
+    content: str | None = Field(default=None, min_length=1, max_length=4000)
+    applies_when: str | None = Field(default=None, max_length=2000)
+    pinned: bool | None = None
+    muted: bool | None = None
+
+
 class InsightOut(BaseModel):
     insight_id: str
     kind: str  # lesson|strategy|pitfall|cost_saver

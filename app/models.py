@@ -138,6 +138,10 @@ class MemoryInsight(UserScoped, Base):
     feedback_pos: Mapped[int] = mapped_column(Integer, default=0)
     feedback_neg: Mapped[int] = mapped_column(Integer, default=0)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 用户策展（第十一轮）：置顶=简报必达（仍受条数与 token 预算约束），禁用=永不召回。
+    # 记忆越自动越要给人留开关——这两列就是经验库对用户的「可见可编辑」承诺的落点。
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    muted: Mapped[bool] = mapped_column(Boolean, default=False)
     __table_args__ = (
         Index("ix_insight_app_user_subject", "app_id", "user_id", "subject"),
     )

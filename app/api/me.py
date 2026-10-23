@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session
 from app import models as m
 from app.api.memories import _audit, get_db
 from app.auth import UserContext, bind_user, user_ctx, user_from_query
-from app.schemas import CONSENT_VERSION, CorrectRequest, JobOut, MemoryItem, MemoryPage, SettingsIn, SettingsOut
+from app.schemas import (CONSENT_VERSION, CorrectRequest, InsightListItem, InsightPatch,
+                         JobOut, MemoryItem, MemoryPage, SettingsIn, SettingsOut)
 
 router = APIRouter(prefix="/v1/me")
 
@@ -137,11 +138,63 @@ def export(u: UserContext = Depends(user_from_query), db: Session = Depends(get_
         "insights": [{"id": i.id, "subject": i.subject, "content": i.content,
                       "applies_when": i.applies_when, "version": i.version,
                       "project": i.project, "confidence": i.confidence,
+                      "pinned": bool(i.pinned), "muted": bool(i.muted),
                       "valid_from": iso(i.valid_from), "valid_to": iso(i.valid_to)} for i in insights],
         "episodes": [{"id": e.id, "source": e.source, "title": e.title, "outcome": e.outcome,
                       "steps": e.steps, "cost": e.cost, "distill_status": e.distill_status,
                       "created_at": iso(e.created_at)} for e in episodes],
     }
+
+
+def _insight_item(i: m.MemoryInsight) -> InsightListItem:
+    return InsightListItem(
+        id=i.id, kind=i.kind, subject=i.subject, content=i.content,
+        applies_when=i.applies_when, project=i.project,
+        confidence=i.confidence if i.confidence is not None else 0.5,
+        use_count=i.use_count or 0, success_count=i.success_count or 0,
+        feedback_pos=i.feedback_pos or 0, feedback_neg=i.feedback_neg or 0,
+        pinned=bool(i.pinned), muted=bool(i.muted), version=i.version,
+        source_episode_id=i.source_episode_id, valid_from=i.valid_from,
+        last_used_at=i.last_used_at)
+
+
+@router.get("/insights", response_model=list[InsightListItem])
+def list_insights(u: UserContext = Depends(user_from_query), db: Session = Depends(get_db)):
+    """我的经验库（第十一轮）：现行经验全量可见——学到了什么、置信度多少、用过几次，
+    不再是黑盒。含已被禁用的（muted 本人要能看见才能取消禁用）。"""
+    bind_user(db, u)
+    rows = db.scalars(select(m.MemoryInsight).where(
+        *_mine(m.MemoryInsight, u), m.MemoryInsight.valid_to.is_(None))
+        .order_by(m.MemoryInsight.valid_from.desc()))
+    return [_insight_item(i) for i in rows]
+
+
+@router.patch("/insights/{insight_id}", response_model=InsightListItem)
+def patch_insight(insight_id: str, req: InsightPatch,
+                  u: UserContext = Depends(user_from_query), db: Session = Depends(get_db)):
+    """单条策展：改指导/适用情境、置顶、禁用。改匹配面（content/applies_when）会作废
+    旧向量——宁可退化成关键词召回，也不能拿着旧向量假装语义命中；补向量走现成 CLI。
+    不存在或不是本人的 → 404（与 feedback 同形，不泄露存在性）。"""
+    bind_user(db, u)
+    row = db.scalar(select(m.MemoryInsight).where(
+        *_mine(m.MemoryInsight, u), m.MemoryInsight.id == insight_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="insight not found")
+    if req.content is not None and req.content != row.content:
+        row.content = req.content
+        row.embedding = None
+        row.embed_model = None
+    if req.applies_when is not None and req.applies_when != row.applies_when:
+        row.applies_when = req.applies_when
+        row.embedding = None
+        row.embed_model = None
+    if req.pinned is not None:
+        row.pinned = req.pinned
+    if req.muted is not None:
+        row.muted = req.muted
+    _audit(db, u, "insight_update", [row.id])
+    db.commit()
+    return _insight_item(row)
 
 
 def _settings_out(s: m.UserSetting | None) -> SettingsOut:

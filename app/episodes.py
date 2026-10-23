@@ -6,7 +6,7 @@
 """
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import or_, select, text
 from sqlalchemy.exc import IntegrityError
@@ -378,6 +378,82 @@ def record_feedback(db: Session, u: UserContext, insight_id: str, *,
     return row
 
 
+DECAY_GRACE_DAYS = 30      # 闲置宽限：最后活跃 30 天内置信度不动
+DECAY_FACTOR = 0.95        # 宽限后每满 30 天置信度乘一次
+CONFIDENCE_FLOOR = 0.1     # 衰减下限：再老也不归零（证据还在，只是久未验证）
+MERGE_COSINE = 0.95        # 向量近似到这个程度且同主题，视为同一条经验
+
+
+def _aware(dt):
+    """SQLite 读回的 datetime 可能丢 tzinfo；统一补 UTC 再参与运算，免得 aware/naive 相减报错。"""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _pair_cosine(a: MemoryInsight, b: MemoryInsight) -> float | None:
+    if a.embedding is None or b.embedding is None or a.embed_model != b.embed_model:
+        return None
+    va = [float(x) for x in a.embedding]
+    vb = [float(x) for x in b.embedding]
+    if len(va) != len(vb):
+        return None
+    return cosine(va, vb)
+
+
+def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
+    """经验生命周期巡检（第十一轮）：衰减、合并、矛盾标记。Worker 每小时跑一轮。
+
+    - 衰减：以 last_used_at（无则 valid_from）为最后活跃时间，闲置超过宽限期后
+      每满 30 天置信度 ×0.95，下限 0.1。只压置信度、不动反馈计数——新反馈进来时
+      record_feedback 按计数重算，等于用新证据覆盖衰减，这正是想要的语义。
+    - 合并：同用户内 same_subject 且（内容规范化相同，或向量余弦 ≥ 0.95）的现行
+      经验对，保留置信度高者（并列取更新的），另一行关行、计数并入保留行、留审计。
+    - 矛盾：合并后仍同主题共存、内容不同的现行对只计数上报，不自动裁决——哪条对
+      是判断题，留给用户在面板里看（GET /v1/me/insights）。
+    返回 {"decayed": n, "merged": n, "conflicts": n}，自己 commit。"""
+    now = now or _now()
+    rows = list(db.scalars(select(MemoryInsight).where(MemoryInsight.valid_to.is_(None))))
+    decayed = 0
+    for row in rows:
+        conf = row.confidence if row.confidence is not None else 0.5
+        idle = (now - _aware(row.last_used_at or row.valid_from)).days
+        if idle > DECAY_GRACE_DAYS:
+            blocks = (idle - 1) // DECAY_GRACE_DAYS
+            new_conf = max(CONFIDENCE_FLOOR, conf * (DECAY_FACTOR ** blocks))
+            if new_conf < conf - 1e-9:
+                row.confidence = round(new_conf, 4)
+                decayed += 1
+    groups: dict[tuple[str, str], list[MemoryInsight]] = {}
+    for row in rows:
+        groups.setdefault((row.app_id, row.user_id), []).append(row)
+    merged = 0
+    conflict_pairs = 0
+    for (app_id, user_id), grows in groups.items():
+        for i in range(len(grows)):
+            for j in range(i + 1, len(grows)):
+                a, b = grows[i], grows[j]
+                if a.valid_to is not None or b.valid_to is not None:
+                    continue
+                if not same_subject(a.subject, b.subject):
+                    continue
+                pc = _pair_cosine(a, b)
+                if norm(a.content) == norm(b.content) or (pc is not None and pc >= MERGE_COSINE):
+                    keeper, loser = (a, b) if ((a.confidence or 0.5), a.valid_from) >= \
+                        ((b.confidence or 0.5), b.valid_from) else (b, a)
+                    loser.valid_to = now
+                    keeper.use_count = (keeper.use_count or 0) + (loser.use_count or 0)
+                    keeper.success_count = (keeper.success_count or 0) + (loser.success_count or 0)
+                    keeper.feedback_pos = (keeper.feedback_pos or 0) + (loser.feedback_pos or 0)
+                    keeper.feedback_neg = (keeper.feedback_neg or 0) + (loser.feedback_neg or 0)
+                    keeper.confidence = _confidence(keeper.feedback_pos, keeper.feedback_neg)
+                    db.add(AuditLog(app_id=app_id, user_id=user_id, action="consolidate",
+                                    fact_ids=[keeper.id, loser.id], decision="merge"))
+                    merged += 1
+                else:
+                    conflict_pairs += 1
+    db.commit()
+    return {"decayed": decayed, "merged": merged, "conflicts": conflict_pairs}
+
+
 def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
                    embedder: GeminiEmbedder | None = None, token_budget: int = 1500,
                    project: str | None = None) -> list[InsightOut]:
@@ -395,17 +471,23 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
     置信度乘子 0.7+0.6×confidence（反馈攒出的信任，0.7–1.3），项目乘子
     （同项目 1.15、跨项目 0.85、通用经验 1.0；跨项目只是降权不排除，通用经验不该被埋没）。
     递出的经验记 use_count/last_used_at（曝光计数；「真用了且有效」由反馈闭环回流）。
+    第十一轮补：排序三要素齐了——相关性（门槛+基础分）× 置信度 × 新近性；
+    用户置顶的经验必达（垫底分入选、reason='pinned'），禁用的永不召回。
     """
     k = max(1, int(k))  # 服务层兜底：负数 k 会让切片变成「除最后 N 条外全返回」
     if not token_budget or token_budget <= 0:
         token_budget = 1500
     rows = list(db.scalars(select(MemoryInsight).where(
         MemoryInsight.app_id == u.app_id, MemoryInsight.user_id == u.user_id,
-        MemoryInsight.valid_to.is_(None))))
+        MemoryInsight.valid_to.is_(None),
+        # 第十一轮：用户禁用的经验永不召回（第十轮前建的存量行 muted 可能为 NULL，一并兼容）
+        or_(MemoryInsight.muted.is_(False), MemoryInsight.muted.is_(None)))))
     if not rows:
         return []
     qvec = _query_vector(embedder, task)
+    now = _now()
     scored: list[tuple[float, MemoryInsight, str]] = []
+    pinned_scored: list[tuple[float, MemoryInsight, str]] = []
     for row in rows:
         text = f"{row.subject} {row.content} {row.applies_when}"
         kw = _score(task, text)
@@ -414,14 +496,16 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
                                               getattr(embedder, "model", None)):
             cos = cosine(qvec, [float(x) for x in row.embedding])
         if cos is not None:
-            if kw < MIN_SCORE and cos < COS_MIN:
-                continue
+            gated = kw < MIN_SCORE and cos < COS_MIN
             final = VECTOR_WEIGHT * cos + (1 - VECTOR_WEIGHT) * kw
             reason = "hybrid"
         else:
-            if kw < MIN_SCORE:
-                continue
+            gated = kw < MIN_SCORE
             final, reason = kw, "keyword"
+        if gated and not row.pinned:
+            continue
+        if gated:  # 置顶必达：分数垫底入选，reason 标明来历，不冒充相关性命中
+            final, reason = 0.0, "pinned"
         conf = row.confidence if row.confidence is not None else 0.5
         final *= 0.7 + 0.6 * conf
         if project:
@@ -429,8 +513,14 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
                 final *= 1.15
             elif row.project:
                 final *= 0.85
-        scored.append((final, row, reason))
+        # 新近性（第十一轮补三要素之三）：越久没被用/没更新，权重越低；乘子区间
+        # 0.85–1.0，只影响排序不影响门槛——老经验不该被埋没，但新鲜的要排前面。
+        age_days = max(0, (now - _aware(row.last_used_at or row.valid_from)).days)
+        final *= 0.85 + 0.15 / (1 + age_days / 180)
+        (pinned_scored if row.pinned else scored).append((final, row, reason))
+    pinned_scored.sort(key=lambda t: t[0], reverse=True)
     scored.sort(key=lambda t: t[0], reverse=True)
+    scored = pinned_scored + scored
     out: list[InsightOut] = []
     used = 0
     for score, row, reason in scored:

@@ -342,12 +342,18 @@ def main() -> None:  # pragma: no cover
     last_cleanup = 0.0
     while True:
         with WorkerSession() as db:
-            if settings.memory_ttl_days > 0 and time.time() - last_cleanup > 3600:
+            if time.time() - last_cleanup > 3600:
                 try:
-                    expire_memories(db, settings.memory_ttl_days)
+                    if settings.memory_ttl_days > 0:
+                        expire_memories(db, settings.memory_ttl_days)
+                    # 经验生命周期巡检与 TTL 同一个小时节拍（第十一轮）：衰减/合并/矛盾计数
+                    from app.episodes import consolidate_insights
+                    stats = consolidate_insights(db)
+                    if stats["decayed"] or stats["merged"] or stats["conflicts"]:
+                        log.info("consolidate_insights: %s", stats)
                     last_cleanup = time.time()
                 except Exception as e:
-                    log.warning("expire_memories error: %s", e)
+                    log.warning("cleanup error: %s", e)
             job = run_once(db, extractor, embedder=embedder)
             ep = None
             for _ in range(5):  # 一轮最多连提 5 条：历史回放批量导入时不至于一条一轮慢慢磨（第八轮补）
