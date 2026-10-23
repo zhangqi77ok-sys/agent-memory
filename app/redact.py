@@ -7,6 +7,20 @@ import logging
 import re
 
 # 顺序：邮箱 → 身份证 → 手机号 → 银行卡。身份证是 18 位，必须先于「长数字当卡号」拿掉。
+# 密钥形态（轨迹、报错、命令里最容易夹带的东西）。只认已知形状，不猜任意长串：
+# 任意密钥若长得不像下面任何一种，仍可能漏过——这是规则脱敏的固有边界，评测集里有案可查。
+_SECRET_SUBS = [
+    (re.compile(r"sk-[A-Za-z0-9_\-]{10,}"), "[密钥]"),  # OpenAI 风格 API key
+    (re.compile(r"AIza[A-Za-z0-9_\-]{10,}"), "[密钥]"),  # Google API key
+    (re.compile(r"ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"), "[密钥]"),  # GitHub 令牌
+    (re.compile(r"AKIA[0-9A-Z]{16}"), "[密钥]"),  # AWS access key id
+    (re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"), "[令牌]"),  # JWT
+    (re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]{8,}"), "Bearer [令牌]"),
+    (re.compile(r"://[^\s/:@]+:[^\s/@]+@"), "://[账号口令]@"),  # 连接串/URL 里的口令
+    (re.compile(r"(?i)\b(api[_-]?key|secret|password|passwd|token)\b\s*[:=]\s*[\"']?[^\s\"',;]+"),
+     r"\1=[已脱敏]"),  # 键值对形态：password=... / api_key: ...
+]
+
 _EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _CN_ID = re.compile(
     r"(?<!\d)\d{6}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx](?!\d)"
@@ -69,6 +83,8 @@ def setup_logging_filters() -> None:
 def redact(text: str) -> str:
     if not text:
         return text
+    for pattern, repl in _SECRET_SUBS:  # 密钥先行：里面常有长数字段，免得被银行卡规则拆碎漏检
+        text = pattern.sub(repl, text)
     text = _EMAIL.sub("[邮箱]", text)
     text = _CN_ID.sub("[身份证]", text)
     text = _PHONE.sub("[手机号]", text)
