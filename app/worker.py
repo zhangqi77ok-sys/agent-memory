@@ -298,6 +298,17 @@ def run_once(db: Session, extractor, embedder=None) -> m.MemoryJob | None:
     return db.get(m.MemoryJob, job_id)
 
 
+def _post_run_wait(job, ep) -> float:
+    """主循环一轮结束后的等待秒数（纯函数，可测试）。
+
+    - job 仍 pending：指数退避，上限 30s；
+    - 其余（无 job / job 已终态）：固定 2s，避免空转。
+    """
+    if job is not None and job.status == "pending":
+        return float(min(2 ** max(job.attempts, 1), 30))
+    return 2.0
+
+
 def main() -> None:  # pragma: no cover
     logging.basicConfig(level=logging.INFO)
     from app.config import settings
@@ -322,10 +333,7 @@ def main() -> None:  # pragma: no cover
                     log.warning("expire_memories error: %s", e)
             job = run_once(db, extractor, embedder=embedder)
             ep = run_episode_once(db, distiller, embedder=embedder)
-        if job is None and ep is None:
-            time.sleep(2)
-        elif job.status == "pending":
-            time.sleep(min(2 ** max(job.attempts, 1), 30))
+        time.sleep(_post_run_wait(job, ep))
 
 
 if __name__ == "__main__":  # pragma: no cover

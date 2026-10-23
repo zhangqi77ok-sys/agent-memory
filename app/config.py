@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = ""
+    llm_timeout_s: float = 30.0  # 抽取/提炼 LLM 调用超时；与 embedding_timeout_s 同量级
     recall_timeout_s: float = 2.0
     docs_enabled: bool | None = None  # Swagger UI；None=非 prod 开启、prod 关闭；演示部署可设 DOCS_ENABLED=true
     rate_limit_enabled: bool | None = None  # None: 非 test 环境开启，test 环境默认关闭
