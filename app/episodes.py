@@ -83,18 +83,75 @@ def submit_episode(db: Session, u: UserContext, *, source: str, title: str,
     return ep
 
 
+# 提炼输入上限（第九轮）：steps 入口允许 200 步 × 每步约 4.5K 字符，整份渲染可达 90 万字符，
+# 全量喂给提炼器既烧钱又容易超时。超限时按「出错步、首尾步优先，其余按原序填充」取舍，
+# 并插入省略标记——让模型知道中间被截断过，而不是误以为轨迹完整。
+MAX_RENDER_CHARS = 24000
+MAX_STEP_LINE_CHARS = 800
+
+
 def _render_episode(ep: TaskEpisode) -> str:
-    """把轨迹渲染成给提炼器的文本；整体先过一遍 redact，步骤里夹带的 PII 不进 LLM。"""
-    lines = [f"任务：{ep.title}", f"结果：{ep.outcome}",
-             f"成本：{json.dumps(ep.cost or {}, ensure_ascii=False)}", "过程："]
-    for i, st in enumerate(ep.steps or [], 1):
+    """把轨迹渲染成给提炼器的文本；整体先过一遍 redact，步骤里夹带的 PII 不进 LLM。
+
+    渲染结果不超过 MAX_RENDER_CHARS：短轨迹原样输出；长轨迹先把单步压到
+    MAX_STEP_LINE_CHARS，再优先保留出错步与首尾各三步，其余按原序装到装满为止，
+    被省略的区间用标记行标明步号范围与步数。"""
+    header = [f"任务：{ep.title}", f"结果：{ep.outcome}",
+              f"成本：{json.dumps(ep.cost or {}, ensure_ascii=False)}", "过程："]
+    raw_steps = ep.steps or []
+    step_lines = []
+    for i, st in enumerate(raw_steps, 1):
         line = f"{i}. {st.get('action', '')}"
         if st.get("observation"):
             line += f" → {st['observation']}"
         if st.get("error"):
             line += f"（出错：{st['error']}）"
-        lines.append(line)
-    return redact("\n".join(lines))
+        step_lines.append(line)
+    full = "\n".join(header + step_lines)
+    if len(full) <= MAX_RENDER_CHARS:
+        return redact(full)
+    # 超限：单步按段压缩——动作/观察/错误分别限长，错误段在行尾绝不能被整行截断切掉
+    def _cap(s: str, n: int) -> str:
+        return s if len(s) <= n else s[:n] + "…"
+
+    step_lines = []
+    for i, st in enumerate(raw_steps, 1):
+        line = f"{i}. {_cap(st.get('action', ''), 200)}"
+        if st.get("observation"):
+            line += f" → {_cap(st['observation'], 400)}"
+        if st.get("error"):
+            line += f"（出错：{_cap(st['error'], 200)}）"
+        step_lines.append(line)
+    n = len(step_lines)
+    anchors = set(range(min(3, n))) | set(range(max(0, n - 3), n))
+    must = anchors | {i for i, st in enumerate(raw_steps) if st.get("error")}
+
+    def render(idxs: list[int]) -> str:
+        out = list(header)
+        prev = -1
+        for i in idxs:
+            if prev >= 0 and i > prev + 1:
+                out.append(f"……（省略第 {prev + 2}–{i} 步，共 {i - prev - 1} 步）……")
+            out.append(step_lines[i])
+            prev = i
+        if idxs and idxs[0] > 0:
+            out.insert(len(header), f"……（省略第 1–{idxs[0]} 步，共 {idxs[0]} 步）……")
+        return "\n".join(out)
+
+    kept = sorted(must)
+    if len(render(kept)) > MAX_RENDER_CHARS:
+        # 连必留步都装不下（大量出错步）：首尾锚点不丢，出错步按原序装到装满为止
+        kept = sorted(anchors)
+        for i in sorted(must - anchors):
+            if len(render(sorted(kept + [i]))) <= MAX_RENDER_CHARS:
+                kept.append(i)
+        kept.sort()
+    else:
+        for i in range(n):
+            if i not in kept and len(render(sorted(kept + [i]))) <= MAX_RENDER_CHARS:
+                kept.append(i)
+        kept.sort()
+    return redact(render(kept))
 
 
 def _matched_insights(db: Session, app_id: str, user_id: str, subject: str) -> list[MemoryInsight]:

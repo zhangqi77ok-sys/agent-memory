@@ -1,6 +1,15 @@
 # agent-memory
 
-纯记忆服务（Python / FastAPI / Postgres + pgvector）。给 tiancode 提供可插拔的远程记忆后端。应用由配置 `APP_ID` 固定（默认 `tiancode`）。
+纯记忆服务（Python / FastAPI / Postgres + pgvector）。给 tiancode 提供可插拔的远程记忆后端。应用由配置 `APP_ID` 固定（默认 `tiancode`）。除事实与偏好外，还把任务过程提炼成可复用的经验，经 MCP 门面供多个 AI 编程工具共享。
+
+## 与主流方案的区别
+一句话：**主流记忆系统让 agent 记住你是谁；这个系统让 agent 记住活是怎么干的——并且能证明下一次干得更省。**
+
+- Mem0 一类从对话抽取事实与偏好，做的是个性化；Zep / Graphiti 是时序知识图谱，强在实体关系与变更追踪；Letta 是自带记忆的 agent 框架（用它的记忆要先用它的运行时）；Claude-mem 一类单工具插件的记忆只属于那一个工具。
+- 本系统的原料是**任务轨迹**：目标、步骤、出错点、重试与成本整份入库，提炼成教训 / 策略 / 避坑 / 捷径四类经验，每条带适用情境；新任务开工前以**情境简报**递回。失败的任务同样是原料——栽过的跟头会被结构化地存下来，下次主动递到手边。
+- **效果可测，而且是门禁**：50 例经验评测是 CI 门禁的一部分；A/B 演示中带简报完成同类任务 token −68%；召回的余弦门槛 0.66 由真实向量实测校准（命中集 0.670–0.785、未命中集 0.488–0.656），每个阈值都有出处，不是拍脑袋填的。
+- **经验属于人，不属于工具**：MCP 门面是第一公民，Codex / Grok / Gemini 等客户端共用一份经验库；轨迹入库前先脱敏（密钥、口令不进库），删除权与数据导出覆盖事实 / 偏好 / 经验 / 轨迹四类，全链路审计，自托管、数据不出自己的库。
+- 边界（主动说清）：不做知识图谱，实体关系推理请选 Zep；不是 agent 框架，不替你跑 agent；定位个人与小团队，没有托管云与 SDK 生态。
 
 ## v1 范围
 - 长期事实与偏好 + 会话摘要
@@ -42,6 +51,7 @@
 python -m venv .venv && . .venv/bin/activate
 pip install -e '.[dev]'
 pytest -q                       # SQLite 单测
+scripts/test-pg.sh              # 真 Postgres(+pgvector) 全套：需本机 docker，与 CI 的 Test on Postgres 阶段同口径
 uvicorn app.main:app --reload   # 默认 SQLite
 ```
 

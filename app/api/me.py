@@ -109,10 +109,17 @@ def clear_all(u: UserContext = Depends(user_from_query), db: Session = Depends(g
 
 @router.get("/memories/export")
 def export(u: UserContext = Depends(user_from_query), db: Session = Depends(get_db)):
-    """导出我的全部数据（个保法 可携带权）：含历史版本，不含向量。"""
+    """导出我的全部数据（个保法 可携带权）：含历史版本，不含向量。
+
+    第九轮补齐：经验（insights）与任务轨迹（episodes）也是用户数据——第七轮删除权
+    已覆盖它们，导出不能缺席，否则用户带得走事实却带不走经验。"""
     bind_user(db, u)
     facts = db.scalars(select(m.MemoryFact).where(*_mine(m.MemoryFact, u)).order_by(m.MemoryFact.valid_from))
     prefs = db.scalars(select(m.MemoryPreference).where(*_mine(m.MemoryPreference, u)))
+    insights = db.scalars(select(m.MemoryInsight).where(*_mine(m.MemoryInsight, u))
+                          .order_by(m.MemoryInsight.valid_from))
+    episodes = db.scalars(select(m.TaskEpisode).where(*_mine(m.TaskEpisode, u))
+                          .order_by(m.TaskEpisode.created_at))
     s = get_setting(db, u)
     _audit(db, u, "export", [])
     db.commit()
@@ -127,6 +134,12 @@ def export(u: UserContext = Depends(user_from_query), db: Session = Depends(get_
                    "source_session_id": f.source_session_id} for f in facts],
         "preferences": [{"id": p.id, "key": p.key, "value": p.value, "version": p.version,
                          "valid_from": iso(p.valid_from), "valid_to": iso(p.valid_to)} for p in prefs],
+        "insights": [{"id": i.id, "subject": i.subject, "content": i.content,
+                      "applies_when": i.applies_when, "version": i.version,
+                      "valid_from": iso(i.valid_from), "valid_to": iso(i.valid_to)} for i in insights],
+        "episodes": [{"id": e.id, "source": e.source, "title": e.title, "outcome": e.outcome,
+                      "steps": e.steps, "cost": e.cost, "distill_status": e.distill_status,
+                      "created_at": iso(e.created_at)} for e in episodes],
     }
 
 
