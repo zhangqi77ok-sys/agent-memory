@@ -85,6 +85,9 @@ def forget(item_id: str, u: UserContext = Depends(user_from_query), db: Session 
             m.MemoryFact.subject == fact.subject)).all()
         ids = [v.id for v in versions]
         db.execute(delete(m.MemoryFact).where(m.MemoryFact.id.in_(ids)))
+        # Core delete 不触发 ORM 事件：倒排行在这里显式清（探针是 JOIN 取数，
+        # 残留也命不中，但别让孤儿攒着）
+        db.execute(delete(m.MemoryFactToken).where(m.MemoryFactToken.fact_id.in_(ids)))
         for i in ids:
             db.merge(m.ForgottenId(id=i, kind="fact"))
         # TODO(v1): 受影响的 session_summary 重新生成、来源 session_message 删除（Worker 任务）
@@ -111,6 +114,7 @@ def forget(item_id: str, u: UserContext = Depends(user_from_query), db: Session 
             m.MemoryInsight.subject == insight.subject)).all()
         ids = [v.id for v in versions]
         db.execute(delete(m.MemoryInsight).where(m.MemoryInsight.id.in_(ids)))
+        db.execute(delete(m.MemoryInsightToken).where(m.MemoryInsightToken.insight_id.in_(ids)))
         for i in ids:
             db.merge(m.ForgottenId(id=i, kind="insight"))
         _audit(db, u, "forget", ids)

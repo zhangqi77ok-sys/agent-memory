@@ -20,10 +20,19 @@
    入选后仍在 Python 侧精确复核；
 3. 压不下来的情形（SQLite 带向量、PG 上查询向量维度与列对不上）保持全量打分，
    语义一个不少——SQLite 是小量级部署，全量可接受；规模在 Postgres 上才发生。
+
+第十四轮补完（倒排索引）：第一版关键词通道把命中计数下推成 SQL 的 LIKE 计数门，
+真机剖析发现地板在 ~60ms/5000 行——逐行 × 逐 token 的子串扫描，换 instr、
+先拼文本都压不下去（剖析数据见 docs/eval.md）。正解是倒排索引：每行的 token
+集合落表（memory_fact_token / memory_insight_token，models 里 ORM 事件同事务
+维护），探针按 token IN + GROUP BY 计数，只走索引探查。倒排存的正是打分文本
+的 token 集合，COUNT 出的命中数与 kw_score 的分子严格相等，探针行在 Python
+侧直接采用、不必重算；超长 token 查询等索引不成立的情形退全量精确打分。
 """
 import re
+from datetime import datetime, timezone
 
-from sqlalchemy import and_, case, or_, select, text, union
+from sqlalchemy import and_, func, null, or_, select, text, union_all
 from sqlalchemy.orm import Session
 
 from app import models as m
@@ -31,6 +40,8 @@ from app.auth import UserContext
 from app.config import settings
 from app.embeddings import cosine, vector_usable
 from app.schemas import FactOut
+from app.tokenize import CJK_HI, CJK_LO, MAX_TOKEN_LEN
+from app.tokenize import tokens_of as _tokens
 
 MIN_SCORE = 0.10  # 基于50条陪伴评测集校准的召回阈值，兼顾长Query召回率与防误召回
 VECTOR_WEIGHT = 0.7  # 融合时向量占权；关键词只作辅助，避免字面命中压过语义相关
@@ -39,19 +50,7 @@ VECTOR_WEIGHT = 0.7  # 融合时向量占权；关键词只作辅助，避免字
 COS_MIN = 0.66
 _COS_EPS = 1e-3  # 向量通道 SQL 阈值的浮点余量：宁可多捞一行，不能漏掉压线命中
 
-_CJK_LO, _CJK_HI = "一", "鿿"
-
-
-def _tokens(s: str) -> set[str]:
-    """英文按词；中文按相邻两字（bigram）切，避免「咖啡」和「咖喱」因为共享一个字而命中。
-
-    单个汉字的连续段（如查询只有一个字）退回按字。空白、标点不参与计分。
-    """
-    s = s.lower()
-    out = set(re.findall(r"[a-z0-9]+", s))
-    for run in re.findall(r"[一-鿿]+", s):
-        out |= {run} if len(run) == 1 else {run[i:i + 2] for i in range(len(run) - 1)}
-    return out
+_CJK_LO, _CJK_HI = CJK_LO, CJK_HI
 
 
 class _QueryPlan:
@@ -93,32 +92,43 @@ def _score(query: str, text: str) -> float:
     return _QueryPlan(query).kw_score(text)
 
 
-def _keyword_channel(cols, plan: "_QueryPlan", dialect: str):
-    """关键词通道：命中 token 数达到关键词门槛所需的最少数——在 SQL 里先把门槛筛掉。
-
-    计数口径是 kw_score 的超集：token 在分词集合中 ⇒ 原文必含该子串；反过来子串
-    命中可能多算（英文词嵌在长词里、孤字嵌在别人 bigram 里），多算只会多捞候选，
-    精筛仍由 kw_score 精确做。拼接列时用空格分隔，与打分时 f"{a} {b}" 的断段一致。
-    token 只含汉字或 [a-z0-9]，不含 LIKE 通配符，不用转义。
-    大小写：token 已小写化，匹配必须大小写不敏感。SQLite 的 LIKE 对 ASCII 天生
-    不敏感，直接用 LIKE（SQLAlchemy 的 ilike 会渲染成 lower(拼接列) LIKE，
-    每个 token 重算一遍 lower，是真机实测的性能毒药）；Postgres 的 LIKE 敏感，
-    用 ILIKE。
-    """
-    tokens = plan.tokens
-    if not tokens:
-        return None
+def _needed_count(plan: "_QueryPlan") -> int:
+    """关键词门槛换算成命中数下限：hits/|q| ≥ MIN_SCORE 的最小 hits。"""
     needed = 1
-    while needed / len(tokens) < MIN_SCORE:
+    while needed / len(plan.tokens) < MIN_SCORE:
         needed += 1
-    joined = cols[0]
-    for c in cols[1:]:
-        joined = joined + " " + c
-    if dialect == "sqlite":
-        hits = sum(case((joined.like(f"%{t}%"), 1), else_=0) for t in tokens)
-    else:
-        hits = sum(case((joined.ilike(f"%{t}%"), 1), else_=0) for t in tokens)
-    return hits >= needed
+    return needed
+
+
+_NULL_HITS = null().label("kw_hits")
+
+
+def _probe_arm(model, token_model, id_key: str, cols, scope, plan: "_QueryPlan"):
+    """关键词探针（倒排索引）：命中数在索引侧数完，只搬过门的行，并带回精确命中数。
+
+    倒排表存的是打分文本的 token 集合（models 里的 ORM 事件与父行同事务维护），
+    所以 COUNT 命中的 token 数与逐行 kw_score 的分子严格相等——探针给的是
+    精确计数而非超集近似，探针行在 Python 侧直接采用这个数、不必重算。
+    探针形状两方言一致（token IN + JOIN 父表 + GROUP BY 父 id +
+    HAVING COUNT ≥ 门槛），靠 (token, id) 索引探查，不扫父表。
+    查询里出现超长 token（> MAX_TOKEN_LEN，倒排不收）时探针不成立、返回
+    None，调用方退全量精确打分——那种 token 只可能来自粘贴的 base64 之类。
+    """
+    if not plan.tokens or any(len(t) > MAX_TOKEN_LEN for t in plan.tokens):
+        return None
+    fk = getattr(token_model, id_key)
+    # 两段式：先只在倒排表内按 (token, id) 索引数出过门 id，再按 id 回父表取列。
+    # 一段式 JOIN 的计划不可控——SQLite 实测会选「按用户扫父表 5000 行、逐行
+    # 回探倒排」，58ms；PG 规划器在统计不准时同样可能选错。两段式把贵的那段
+    # 锁死在索引里（典型查询只碰几千个 posting 行），父表只剩主键点查。
+    hits = (select(fk.label("pid"), func.count().label("kw_hits"))
+            .where(token_model.token.in_(plan.tokens))
+            .group_by(fk)
+            .having(func.count() >= _needed_count(plan))
+            .subquery())
+    return (select(*cols, hits.c.kw_hits)
+            .select_from(hits.join(model, model.id == hits.c.pid))
+            .where(*scope))
 
 
 _VECTOR_CANDIDATES = 200  # 向量分支的近邻上限：过线行数超过它时，更远的可能漏（见下）
@@ -146,7 +156,7 @@ def _vector_branch(model, cols, scope, qvec: list[float], embedder_model: str | 
     if embedder_model is not None:
         cond = and_(cond, or_(model.embed_model == embedder_model,
                               model.embed_model.is_(None)))
-    stmt = (select(*cols).where(*scope, cond)
+    stmt = (select(*cols, _NULL_HITS).where(*scope, cond)
             .order_by(text(dist)).limit(_VECTOR_CANDIDATES))
     vec_literal = "[" + ",".join(repr(float(x)) for x in qvec) + "]"
     return stmt, {"qvec_r14": vec_literal}
@@ -170,6 +180,122 @@ def _query_vector(embedder, query: str) -> list[float] | None:
     return list(vec) if vec else None
 
 
+def _candidates(db: Session, model, token_model, id_key: str, cols, scope,
+                plan: "_QueryPlan", qvec, embedder, with_pinned: bool):
+    """候选通道装配（事实/经验共用）：返回 (rows, channel_complete) 或 None。
+
+    通道完备（channel_complete=True）时 rows 就是候选全集：倒排探针（关键词
+    过门）∪ 置顶臂（仅经验）∪ 向量臂（仅 PG 且维度对得上，HNSW kNN 形态）。
+    通道不完备（SQLite 带向量、PG 维度对不上、超长 token）时返回全量行 +
+    False，调用方照旧逐行精确打分，语义命中一条不丢。
+    None = 通道完备但一条臂都没有（无 token 又无向量）：结果注定为空。
+    多臂重复的行按 id 去重，带精确命中数（kw_hits）的探针行优先。
+    """
+    probe = _probe_arm(model, token_model, id_key, cols, scope, plan)
+    # 向量通道只在 Postgres 且查询向量维度与列一致时才成立（HNSW 索引按列维度建）
+    indexed_vector = (db.get_bind().dialect.name == "postgresql" and qvec is not None
+                      and len(qvec) == settings.embedding_dim)
+    if (qvec is None or indexed_vector) and (probe is not None or not plan.tokens):
+        parts = []
+        if probe is not None:
+            parts.append(probe)
+        if with_pinned:
+            # 置顶必达：单独一臂——置顶行可能与查询零重叠，探针捞不到它
+            parts.append(select(*cols, _NULL_HITS).where(
+                *scope, model.pinned.is_(True)))
+        params: dict = {}
+        if indexed_vector:
+            # 向量分支单独成 UNION 一支：与探针混在同一条语句里时规划器用不上
+            # HNSW（其余分支无索引可用）；分开后距离分支自己走索引
+            branch, params = _vector_branch(model, cols, scope, qvec,
+                                            getattr(embedder, "model", None))
+            parts.append(branch)
+        if not parts:
+            return None
+        stmt = union_all(*parts) if len(parts) > 1 else parts[0]
+        by_id: dict = {}
+        for r in db.execute(stmt, params):
+            prev = by_id.get(r.id)
+            if prev is None or (prev.kw_hits is None and r.kw_hits is not None):
+                by_id[r.id] = r
+        return list(by_id.values()), True
+    stmt = select(*cols, _NULL_HITS).where(*scope)
+    return list(db.execute(stmt)), False
+
+
+def _score_rows(rows, plan: "_QueryPlan", qvec, embedder_model,
+                pinned_of, fields_of):
+    """候选统一打分（事实/经验共用）：返回 [(final, reason, gated)]，与 rows 同序。
+
+    门槛只看原始相关性（kw ≥ MIN_SCORE 或 cos ≥ COS_MIN），融合分 0.7·cos +
+    0.3·kw 只决定排序（reason=hybrid）——2026-10-23 真实向量校准的口径：
+    Gemini 余弦整体偏高，只看融合分会把不相关的条目大批放进来。
+    kw 优先用探针带回的精确命中数（kw_hits，与 kw_score 分子同口径）；
+    向量不可用（没存向量/模型或维度对不上，vector_usable 判）时退纯关键词。
+    pinned_of(row) 决定「垫底必达」资格（事实侧恒 False）；fields_of(row)
+    给 (subject, content[, applies]) 拼打分文本——仅 kw_hits 缺席时才拼。
+    """
+    out = []
+    for row in rows:
+        if row.kw_hits is not None:
+            kw = row.kw_hits / len(plan.tokens)
+        else:
+            kw = plan.kw_score(fields_of(row))
+        cos = None
+        if qvec is not None and vector_usable(row.embed_model, row.embedding, qvec,
+                                              embedder_model):
+            cos = cosine(qvec, list(row.embedding))
+        if cos is not None:
+            gated = kw < MIN_SCORE and cos < COS_MIN
+            final, reason = VECTOR_WEIGHT * cos + (1 - VECTOR_WEIGHT) * kw, "hybrid"
+        else:
+            gated = kw < MIN_SCORE
+            final, reason = kw, "keyword"
+        if gated and pinned_of(row):
+            # 置顶必达：分数垫底入选，reason 标明来历，不冒充相关性命中
+            final, reason = 0.0, "pinned"
+        out.append((final, reason, gated))
+    return out
+
+
+def _aware(dt: datetime) -> datetime:
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _rank_insights(rows, scored, now, project):
+    """经验排序乘子（第十/十一轮）：置信度 × 项目 × 新近性；置顶组恒在前。
+
+    返回 [(final, row, reason)]，已按「置顶组内序 + 其余降序」排好待预算裁剪。
+    乘子只影响排序不影响门槛（标定不被污染）；新近性按最后使用/生效时间算
+    闲置天数，乘子区间 0.85–1.0——老经验不该被埋没，但新鲜的排前面。
+    衰减按行首见顺序取整天数（与逐行现算同值），把逐行 datetime 相减
+    换成字典查表：全员同龄的大库里这一项曾是逐行打分的近半开销。
+    """
+    ages: dict = {}
+    ranked: list[tuple[float, object, str]] = []
+    pinned_ranked: list[tuple[float, object, str]] = []
+    for row, (final, reason, gated) in zip(rows, scored, strict=True):
+        if gated and not row.pinned:
+            continue
+        conf = row.confidence if row.confidence is not None else 0.5
+        final *= 0.7 + 0.6 * conf
+        if project:
+            if row.project == project:
+                final *= 1.15
+            elif row.project:
+                final *= 0.85
+        stamp = row.last_used_at or row.valid_from
+        mult = ages.get(stamp)
+        if mult is None:
+            age_days = max(0, (now - _aware(stamp)).days)
+            mult = ages[stamp] = 0.85 + 0.15 / (1 + age_days / 180)
+        final *= mult
+        (pinned_ranked if row.pinned else ranked).append((final, row, reason))
+    pinned_ranked.sort(key=lambda t: t[0], reverse=True)
+    ranked.sort(key=lambda t: t[0], reverse=True)
+    return pinned_ranked + ranked
+
+
 def recall_facts(db: Session, u: UserContext, query: str, k: int, token_budget: int, embedder=None) -> list[FactOut]:
     k = max(1, int(k))  # 服务层兜底：负数/0 的 k 会让切片语义出错（MCP 等入口不走 schemas 校验）
     plan = _QueryPlan(query)
@@ -181,46 +307,20 @@ def recall_facts(db: Session, u: UserContext, query: str, k: int, token_budget: 
     scope = (m.MemoryFact.app_id == u.app_id,
              m.MemoryFact.user_id == u.user_id,
              m.MemoryFact.valid_to.is_(None))
-    kw_chan = _keyword_channel((m.MemoryFact.subject, m.MemoryFact.content), plan,
-                               db.get_bind().dialect.name)
-    # 向量通道只在 Postgres 且查询向量维度与列一致时才成立（HNSW 索引按列维度建）
-    indexed_vector = (db.get_bind().dialect.name == "postgresql" and qvec is not None
-                      and len(qvec) == settings.embedding_dim)
-    params: dict = {}
-    if qvec is None or indexed_vector:
-        # 通道完备才过滤：无向量时关键词通道即候选全集；有向量时须向量通道在场，
-        # 否则纯语义命中（零字面重叠）会被关键词通道漏掉。
-        # 向量通道单独成一个 UNION 分支：与关键词条件 OR 在同一条语句里时，
-        # 规划器无法对距离条件用 HNSW 索引（其余分支无索引可用），只能全表扫；
-        # 分开后距离分支自己走索引，关键词分支扫表，结果按行合并去重。
-        parts = []
-        if kw_chan is not None:
-            parts.append(select(*cols).where(*scope, kw_chan))
-        if indexed_vector:
-            branch, params = _vector_branch(m.MemoryFact, cols, scope, qvec,
-                                            getattr(embedder, "model", None))
-            parts.append(branch)
-        if not parts:
-            return []  # 无 token 又无向量：旧实现下每条都会被门槛挡掉，结果为空
-        stmt = union(*parts) if len(parts) > 1 else parts[0]
-    else:
-        # SQLite 带向量 / PG 维度对不上：通道压不了候选，全量精确打分
-        stmt = select(*cols).where(*scope)
-    model_name = getattr(embedder, "model", None) if embedder is not None else None
-
-    def _final(r) -> tuple[float, str, bool]:
-        kw = plan.kw_score(f"{r.subject} {r.content}")
-        emb = r.embedding if qvec is not None else None  # 无向量时该列根本没查
-        if qvec is not None and vector_usable(r.embed_model, emb, qvec, model_name):
-            cos = cosine(qvec, list(emb))
-            blended = VECTOR_WEIGHT * cos + (1 - VECTOR_WEIGHT) * kw
-            return blended, "hybrid", kw >= MIN_SCORE or cos >= COS_MIN
-        return kw, "keyword", kw >= MIN_SCORE
-
-    scored = sorted(((*_final(r), r) for r in db.execute(stmt, params)), key=lambda x: x[0], reverse=True)
+    _ch = _candidates(db, m.MemoryFact, m.MemoryFactToken, "fact_id", cols, scope,
+                      plan, qvec, embedder, with_pinned=False)
+    if _ch is None:
+        return []  # 无 token 又无向量：每条都会被门槛挡掉，结果为空
+    rows, _ = _ch
+    scored = _score_rows(rows, plan, qvec, getattr(embedder, "model", None),
+                         pinned_of=lambda r: False,
+                         fields_of=lambda r: f"{r.subject} {r.content}")
+    ranked = sorted(((f, reason, gated, r)
+                     for (f, reason, gated), r in zip(scored, rows, strict=True)),
+                    key=lambda x: x[0], reverse=True)
     out, used = [], 0
-    for s, reason, ok, r in scored:
-        if not ok:
+    for s, reason, gated, r in ranked:
+        if gated:
             continue
         if len(out) >= k:
             break

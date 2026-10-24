@@ -2,12 +2,13 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, String, Text, UniqueConstraint, delete, event, insert, select, text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
 from app.config import settings
 from app.db import Base
+from app.tokenize import MAX_TOKEN_LEN, tokens_of
 
 
 def _id() -> str:
@@ -150,7 +151,91 @@ class MemoryInsight(UserScoped, Base):
     muted: Mapped[bool] = mapped_column(Boolean, default=False)
     __table_args__ = (
         Index("ix_insight_app_user_subject", "app_id", "user_id", "subject"),
+        # 置顶部分索引（第十四轮补完）：简报的置顶臂只捞 pinned 行，没有它要按
+        # 用户全量扫一遍才知道谁置顶；置顶行永远是少数，部分索引只收它们。
+        Index("ix_insight_pinned_scope", "app_id", "user_id",
+              sqlite_where=text("pinned = 1"), postgresql_where=text("pinned")),
     )
+
+
+class MemoryFactToken(Base):
+    """事实的关键词倒排索引（第十四轮补完）：一行一个 (事实, token)。
+
+    内容与父行同事务维护（下方 ORM 事件），token 集合 = tokens_of(打分文本
+    f"{subject} {content}")，所以召回探针在索引侧 COUNT 出的命中数与逐行
+    kw_score 的分子严格相等——索引给的是精确计数，不是近似预筛。
+    app_id/user_id 冗余存一份，让 PG 的 RLS 隔离策略与父表同形。
+    硬删除走 Core delete 的路径（forget / clear_all）不触发 ORM 事件，
+    在各自入口显式清本表；万一有残留，探针是 JOIN 父表取数，孤儿行
+    永远不会被召回命中，只是占空间（scripts/rebuild_postings.py 可重整）。
+    """
+
+    __tablename__ = "memory_fact_token"
+    fact_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    token: Mapped[str] = mapped_column(String(MAX_TOKEN_LEN), primary_key=True)
+    app_id: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped[str] = mapped_column(String(64))
+    __table_args__ = (
+        Index("ix_fact_token_token", "token", "fact_id"),
+    )
+
+
+class MemoryInsightToken(Base):
+    """经验的关键词倒排索引，与 MemoryFactToken 同构（打分文本多一段 applies_when）。"""
+
+    __tablename__ = "memory_insight_token"
+    insight_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    token: Mapped[str] = mapped_column(String(MAX_TOKEN_LEN), primary_key=True)
+    app_id: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped[str] = mapped_column(String(64))
+    __table_args__ = (
+        Index("ix_insight_token_token", "token", "insight_id"),
+    )
+
+
+def _posting_sync(connection, table, id_key: str, target, text_value: str) -> None:
+    """把某父行在倒排表里的 token 集合同步为 tokens_of(打分文本)。
+
+    更新路径先比对现存集合：没变（简报记账、反馈计数这类非文本更新占绝大多数）
+    只花一次索引查询，不写。超长 token 按 MAX_TOKEN_LEN 口径不入索引。
+    """
+    id_col = table.c[id_key]
+    tokens = {t for t in tokens_of(text_value) if len(t) <= MAX_TOKEN_LEN}
+    existing = {r[0] for r in connection.execute(select(table.c.token).where(id_col == target.id))}
+    if existing == tokens:
+        return
+    if existing:
+        connection.execute(delete(table).where(id_col == target.id))
+    if tokens:
+        connection.execute(insert(table), [
+            {id_key: target.id, "token": t, "app_id": target.app_id, "user_id": target.user_id}
+            for t in tokens])
+
+
+def _register_posting_events(model, table, id_key: str, text_of) -> None:
+    """父表 ORM 增删改 → 倒排同事务同步。全仓写路径都走 ORM（提炼、抽取、
+    面板编辑、Markdown 导回无一例外），事件这一层兜住全部入口；
+    Core delete 的硬删除路径在入口处显式清理（见 MemoryFactToken docstring）。"""
+
+    @event.listens_for(model, "after_insert")
+    def _ins(mapper, connection, target):
+        _posting_sync(connection, table, id_key, target, text_of(target))
+
+    @event.listens_for(model, "after_update")
+    def _upd(mapper, connection, target):
+        _posting_sync(connection, table, id_key, target, text_of(target))
+
+    @event.listens_for(model, "after_delete")
+    def _del(mapper, connection, target):
+        connection.execute(delete(table).where(table.c[id_key] == target.id))
+
+
+# 打分文本的拼法必须与召回侧逐字一致（recall_facts / brief_for_task 里的
+# f-string）：倒排存的是这个文本的 token 集合，拼法漂移一格计数就对不上。
+_register_posting_events(MemoryFact, MemoryFactToken.__table__, "fact_id",
+                         lambda t: f"{t.subject} {t.content}")
+_register_posting_events(MemoryInsight, MemoryInsightToken.__table__, "insight_id",
+                         lambda t: f"{t.subject} {t.content} {t.applies_when}")
 
 
 class MemoryJob(UserScoped, Base):

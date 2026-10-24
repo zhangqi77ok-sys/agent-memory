@@ -107,6 +107,11 @@ def clear_all(u: UserContext = Depends(user_from_query), db: Session = Depends(g
     for model in (m.MemoryFact, m.MemoryPreference, m.SessionSummary, m.SessionMessage, m.MemoryJob,
                   m.MemoryInsight, m.TaskEpisode):
         db.execute(delete(model).where(*_mine(model, u)))
+    # 倒排索引随父行清（Core delete 不触发 ORM 事件；按本用户的父 id 精确删）
+    if fact_ids:
+        db.execute(delete(m.MemoryFactToken).where(m.MemoryFactToken.fact_id.in_(fact_ids)))
+    if insight_ids:
+        db.execute(delete(m.MemoryInsightToken).where(m.MemoryInsightToken.insight_id.in_(insight_ids)))
     for i in fact_ids:
         db.merge(m.ForgottenId(id=i, kind="fact"))
     for i in pref_ids:
