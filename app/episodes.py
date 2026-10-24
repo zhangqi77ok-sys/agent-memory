@@ -334,7 +334,8 @@ def _embed_insight(embedder: GeminiEmbedder | None, row: MemoryInsight) -> None:
 
 def _apply_insight(db: Session, u: UserContext, cand, episode_id: str,
                    embedder: GeminiEmbedder | None,
-                   project: str | None = None) -> tuple[str, str | None]:
+                   project: str | None = None,
+                   agent: str | None = None) -> tuple[str, str | None]:
     """按 decide() 裁决写入一条经验，返回 (decision, insight_id)。"""
     matched = _matched_insights(db, u.app_id, u.user_id, cand.subject)
     same = next((r for r in matched if norm(r.content) == norm(cand.content)), None)
@@ -369,7 +370,9 @@ def _apply_insight(db: Session, u: UserContext, cand, episode_id: str,
                         feedback_pos=inh_pos, feedback_neg=inh_neg,
                         applied_count=inh_applied, auto_pos=inh_auto_pos,
                         auto_neg=inh_auto_neg,
-                        verified=bool(getattr(cand, "verified", True)))
+                        verified=bool(getattr(cand, "verified", True)),
+                        agent=agent,
+                        evidence_chained=bool(getattr(cand, "evidence_chained", False)))
     db.add(row)
     db.flush()
     _embed_insight(embedder, row)
@@ -420,16 +423,29 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
             dropped_gate += 1
             log.warning("insight dropped by injection gate episode=%s subject=%s", ep.id, subject[:40])
             continue
-        # 证据校验（第十六轮 verifier）：提炼声称的经验必须能在轨迹原文里指出处。
-        # 验不过不丢弃——标 verified=False 入库，简报排序打折、面板上看得见；
-        # 直接丢弃会把「引文摘抄不规范但经验是真的」一并误杀，降权更诚实。
-        verified = _evidence_ok(evidence, text)
+        # 证据校验（第十六轮 verifier + 第十九轮证据链）：提炼声称的经验必须
+        # 能在轨迹原文里指出处。报了步号的，逐字核对那一步——引文对但步号错
+        # （或步号对但引文不在这一步）就是假引用，verified 直接落 False，
+        # 不再靠全文子串蒙混过关；没报步号的退回全文校验（旧提炼器兼容），
+        # 只不给 evidence_chained 标记。验不过不丢弃——标 verified=False 入库，
+        # 简报排序打折、面板上看得见；直接丢弃会把「引文摘抄不规范但经验是真
+        # 的」一并误杀，降权更诚实。
+        step_no = getattr(cand, "evidence_step", None)
+        step_texts = [" ".join(str(s.get(k, "") or "") for k in ("action", "observation", "error")).strip()
+                      for s in (ep.steps or [])]
+        if isinstance(step_no, int) and 1 <= step_no <= len(step_texts):
+            chained = _evidence_ok(evidence, step_texts[step_no - 1])
+            verified = chained
+        else:
+            chained = False
+            verified = _evidence_ok(evidence, text)
         if not verified:
             unverified += 1
             log.warning("insight unverified episode=%s subject=%s", ep.id, subject[:40])
         decision, iid = _apply_insight(
-            db, u, _Cand(kind, subject, content, applies_when, verified=verified),
-            ep.id, embedder, project=ep.project)
+            db, u, _Cand(kind, subject, content, applies_when, verified=verified,
+                         evidence_chained=chained),
+            ep.id, embedder, project=ep.project, agent=ep.source)
         decisions.append(decision)
         if iid:
             insight_ids.append(iid)
@@ -454,12 +470,13 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
 
 class _Cand:
     """_apply_insight 只需要四个字段；用小对象承接清洗后的候选，避免依赖提炼器的具体类型。"""
-    __slots__ = ("kind", "subject", "content", "applies_when", "verified")
+    __slots__ = ("kind", "subject", "content", "applies_when", "verified", "evidence_chained")
 
     def __init__(self, kind: str, subject: str, content: str, applies_when: str,
-                 verified: bool = True):
+                 verified: bool = True, evidence_chained: bool = False):
         self.kind, self.subject, self.content, self.applies_when = kind, subject, content, applies_when
         self.verified = verified
+        self.evidence_chained = evidence_chained
 
 
 MIN_EVIDENCE_LEN = 8  # 引文太短（如「报错」二字）证明不了什么，按没证据处理
@@ -605,6 +622,7 @@ DECAY_GRACE_DAYS = 30      # 闲置宽限：最后活跃 30 天内置信度不�
 DECAY_FACTOR = 0.95        # 宽限后每满 30 天置信度乘一次
 CONFIDENCE_FLOOR = 0.1     # 衰减下限：再老也不归零（证据还在，只是久未验证）
 MERGE_COSINE = 0.95        # 向量近似到这个程度且同主题，视为同一条经验
+CROSS_SUBJECT_MERGE_COSINE = 0.98  # 第十九轮：主题不同时误合代价更大，门槛再高一档；无向量不猜
 MERGE_CONTENT_CAP = 4000   # 第十八轮：合并时败者内容附录进保留行，总长上限
 MERGE_APPLIES_CAP = 500    # 第十八轮：合并时适用情境拼接上限
 RETIRE_IDLE_DAYS = 180     # 真遗忘线（第十六轮）：闲置超半年、从未被应用、从未有过正面证据
@@ -635,6 +653,8 @@ def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
       record_feedback 按计数重算，等于用新证据覆盖衰减，这正是想要的语义。
     - 合并：同用户内 same_subject 且（内容规范化相同，或向量余弦 ≥ 0.95）的现行
       经验对，保留置信度高者（并列取更新的），另一行关行、计数并入保留行、留审计。
+      第十九轮：主题不同但内容向量 ≥ 0.98 的对也合并（换个词说同一件事的经验
+      不再并存）；无向量时跨主题不猜。
     - 矛盾：合并后仍同主题共存、内容不同的现行对只计数上报；有 contradicts 边
       （第十五轮织网）且证据悬殊的对在下方裁决环节处理。
     - 裁决（第十六轮）：被 contradicts 边连着的经验对，置信度差 ≥ 0.30 且胜方
@@ -676,10 +696,15 @@ def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
                 a, b = grows[i], grows[j]
                 if a.valid_to is not None or b.valid_to is not None:
                     continue
-                if not same_subject(a.subject, b.subject):
-                    continue
+                # 第十九轮：跨主题语义合并——此前合并只认 same_subject，换个词
+                # 说同一件事的经验永远并存。主题不同时只认向量（≥0.98），不认
+                # 词面相等（词面相等但主题不同，更可能是两回事）。
                 pc = _pair_cosine(a, b)
-                if norm(a.content) == norm(b.content) or (pc is not None and pc >= MERGE_COSINE):
+                if same_subject(a.subject, b.subject):
+                    merge = norm(a.content) == norm(b.content) or (pc is not None and pc >= MERGE_COSINE)
+                else:
+                    merge = pc is not None and pc >= CROSS_SUBJECT_MERGE_COSINE
+                if merge:
                     keeper, loser = (a, b) if ((a.confidence or 0.5), a.valid_from) >= \
                         ((b.confidence or 0.5), b.valid_from) else (b, a)
                     # 第十八轮：败者内容不再静默丢弃——以附录形式并入保留行，
@@ -779,7 +804,8 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
             MemoryInsight.confidence, MemoryInsight.project,
             MemoryInsight.pinned, MemoryInsight.valid_from,
             MemoryInsight.last_used_at, MemoryInsight.source_episode_id,
-            MemoryInsight.verified]
+            MemoryInsight.verified, MemoryInsight.agent,
+            MemoryInsight.evidence_chained]
     if qvec is not None:
         cols += [MemoryInsight.embedding, MemoryInsight.embed_model]
     scope = (MemoryInsight.app_id == u.app_id, MemoryInsight.user_id == u.user_id,
@@ -864,7 +890,9 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
                               project=row.project, source_episode_id=row.source_episode_id,
                               conflicts_with=conflicts.get(row.id, []),
                               linked_from=linked_from.get(row.id),
-                              verified=True if row.verified is None else bool(row.verified)))
+                              verified=True if row.verified is None else bool(row.verified),
+                              agent=row.agent,
+                              evidence_chained=bool(row.evidence_chained)))
     if winners:
         # 交付记录（第十六轮）：结果回流靠它把后续任务的成败结给这批经验
         db.add(BriefDelivery(app_id=u.app_id, user_id=u.user_id, project=project,

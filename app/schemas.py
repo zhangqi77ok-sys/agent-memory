@@ -204,6 +204,9 @@ class InsightOut(BaseModel):
     linked_from: str | None = None
     # 第十六轮 verifier：提炼时的轨迹证据引文核对通过与否；未通过的排序已打折
     verified: bool = True
+    # 第十九轮：经验来源 agent 与证据是否链到具体步骤
+    agent: str | None = None
+    evidence_chained: bool = False
 
 
 class ReminderOut(BaseModel):

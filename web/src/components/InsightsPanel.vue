@@ -29,6 +29,8 @@ const KIND_LABEL: Record<string, string> = {
         <span class="badge" data-testid="insight-confidence">置信 {{ Math.round(i.confidence * 100) }}%</span>
         <span v-if="i.verified" class="badge" data-testid="verified-badge">✓ 证据已验</span>
         <span v-else class="badge badge-pref" data-testid="unverified-badge">未验证 · 已降权</span>
+        <span v-if="i.evidence_chained" class="badge" data-testid="chained-badge">🔗 证据链到步骤</span>
+        <span v-if="i.agent" class="muted">来源：{{ i.agent }}</span>
         <span v-if="i.pinned" class="badge">置顶</span>
         <span v-if="i.muted" class="badge badge-pref">已禁用</span>
         <span class="spacer" />

@@ -55,13 +55,14 @@
 <div id="hud" class="panel">
   <h1>记忆星图 <span class="thin">MEMORY STARFIELD</span></h1>
   <div class="sub">每一颗星是一条记忆：事实与偏好是近处的亮星，经验按教训 / 策略 / 避坑 / 捷径着色，
-    轨迹是远处暗星。同主题的星以星座线相连；星越大用得越多，越亮置信度越高。</div>
+    轨迹是远处暗星。同主题的星以星座线相连；星越大用得越多，越亮置信度越高。点击一颗星，脉冲沿真实关联边传导——星群像神经网络一样被点亮。</div>
   <div class="stats">
     <span><b id="stTotal">–</b> 记忆</span>
     <span><b id="stInsight">–</b> 经验</span>
     <span><b id="stConf">–</b> 平均置信</span>
   </div>
-  <span id="modeBadge" class="badge">演示数据</span>
+  <span id="modeBadge" class="badge">加载中…</span>
+  <div id="loadError" style="display:none; margin-top:8px; padding:8px; border:1px solid rgba(251,113,133,.5); color:#fda4af; font-size:12px; line-height:1.5; max-width:420px;"></div>
 </div>
 
 <div id="controls" class="panel">
@@ -71,7 +72,7 @@
 
 <div id="detail" class="panel"></div>
 <div id="tip"></div>
-<div id="hint">拖动平移 · 滚轮缩放 · 点击星星查看详情</div>
+<div id="hint">拖动平移 · 滚轮缩放 · 点击星星查看详情并传导激活</div>
 
 <script>
 "use strict";
@@ -88,7 +89,8 @@ const KINDS = {
 const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const params = new URLSearchParams(location.search);
-const USER_ID = params.get("user_id") || "demo";
+const USER_ID = params.get("user_id") || "";
+const DEMO_MODE = params.get("demo") === "1";
 const API = (params.get("api") || "").replace(/\/$/, "");
 const KEY = params.get("key") || "";
 
@@ -125,11 +127,14 @@ const DEMO = [
 async function loadData() {
   const headers = KEY ? { "X-Service-Key": KEY } : {};
   const q = `user_id=${encodeURIComponent(USER_ID)}`;
+  const names = ["insights", "memories", "export"];
   const [ins, mem, exp] = await Promise.allSettled([
-    fetch(`${API}/v1/me/insights?${q}`, { headers }).then(r => { if (!r.ok) throw 0; return r.json(); }),
-    fetch(`${API}/v1/me/memories?${q}&limit=200`, { headers }).then(r => { if (!r.ok) throw 0; return r.json(); }),
-    fetch(`${API}/v1/me/memories/export?${q}`, { headers }).then(r => { if (!r.ok) throw 0; return r.json(); }),
+    fetch(`${API}/v1/me/insights?${q}`, { headers }).then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
+    fetch(`${API}/v1/me/memories?${q}&limit=200`, { headers }).then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
+    fetch(`${API}/v1/me/memories/export?${q}`, { headers }).then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
   ]);
+  const failed = [ins, mem, exp].map((r, i) => r.status === "rejected" ? names[i] : null).filter(Boolean);
+  if (failed.length) throw new Error("接口失败：" + failed.join("、"));
   const nodes = [];
   if (ins.status === "fulfilled" && Array.isArray(ins.value)) {
     for (const i of ins.value) nodes.push({ id:i.id, t:"insight", kind:i.kind, subject:i.subject,
@@ -160,6 +165,26 @@ const ctx = canvas.getContext("2d");
 let W = 0, H = 0, DPR = 1;
 let nodes = [], bgStars = [], nebulas = [], EDGES = [];
 let cam = { x: 0, y: 0, z: 1 }, mouse = { x: -999, y: -999 }, hover = null, selected = null;
+let pulses = [], shocks = [], litUntil = new Map();
+const REL_COLOR = { supports:"rgba(52,211,153,", contradicts:"rgba(251,113,133,",
+  refines:"rgba(56,189,248,", generalizes:"rgba(251,191,36,", related:"rgba(148,163,184," };
+
+function fireActivation(n) {
+  // 点击一颗星：脉冲沿它的每一条真实关联边传导（无向扩散，与简报的
+  // 沿边带出同构；边越强脉冲越亮，逐条错峰 70ms，像传导不像闪光）。
+  const now = performance.now() / 1000;
+  const byId = new Map(nodes.map(m => [m.id, m]));
+  const edges = EDGES.filter(e => e.src_id === n.id || e.dst_id === n.id);
+  edges.forEach((e, i) => {
+    const target = byId.get(e.src_id === n.id ? e.dst_id : e.src_id);
+    if (!target) return;
+    pulses.push({ from: n, to: target, t0: now + i * 0.07, dur: 0.7,
+                  strength: e.strength ?? 0.5, relation: e.relation });
+  });
+  shocks.push({ node: n, t0: now });
+  litUntil.set(n.id, now + 0.9);
+  return edges.length;
+}
 let drag = null, query = "", enabledKinds = new Set(Object.keys(KINDS));
 
 function resize() {
@@ -267,8 +292,6 @@ function frame(t) {
   // 真实关联边（memory_link）：线宽随强度，矛盾边红色最醒目
   if (EDGES.length) {
     const byId = new Map(nodes.map(n => [n.id, n]));
-    const REL_COLOR = { supports:"rgba(52,211,153,", contradicts:"rgba(251,113,133,",
-      refines:"rgba(56,189,248,", generalizes:"rgba(251,191,36,", related:"rgba(148,163,184," };
     for (const e of EDGES) {
       const a = byId.get(e.src_id), b = byId.get(e.dst_id);
       if (!a || !b || !visible(a) || !visible(b)) continue;
@@ -279,6 +302,32 @@ function frame(t) {
     }
     ctx.lineWidth = 1;
   }
+  // 神经传导：脉冲沿边走，落点亮起；源头扩一圈冲击环
+  const now = time;
+  for (const p of pulses) if (now >= p.t0 + p.dur) litUntil.set(p.to.id, now + 0.9);
+  pulses = pulses.filter(p => now < p.t0 + p.dur);
+  for (const p of pulses) {
+    if (now < p.t0 || !visible(p.from) || !visible(p.to)) continue;
+    const raw = (now - p.t0) / p.dur;
+    const e = raw < 0.5 ? 2 * raw * raw : 1 - Math.pow(-2 * raw + 2, 2) / 2;
+    const x = p.from.x + (p.to.x - p.from.x) * e;
+    const y = p.from.y + (p.to.y - p.from.y) * e;
+    const c = REL_COLOR[p.relation] || REL_COLOR.related;
+    ctx.globalAlpha = Math.sin(Math.PI * raw) * (0.45 + 0.55 * p.strength);
+    ctx.fillStyle = c + "1)";
+    ctx.beginPath(); ctx.arc(x, y, (2 + 3 * p.strength) * cam.z + 1, 0, 7); ctx.fill();
+    if (raw > 0.92) litUntil.set(p.to.id, now + 0.9);
+  }
+  ctx.globalAlpha = 1;
+  shocks = shocks.filter(k => now - k.t0 < 0.6);
+  for (const k of shocks) {
+    const age = now - k.t0;
+    ctx.globalAlpha = (1 - age / 0.6) * 0.8;
+    ctx.strokeStyle = "#e0f2fe";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(k.node.x, k.node.y, 8 + age * 70, 0, 7); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
   // 星体
   for (const n of nodes) {
     const vis = visible(n);
@@ -291,6 +340,19 @@ function frame(t) {
     ctx.fillStyle = "#fff";
     ctx.beginPath(); ctx.arc(n.x, n.y, Math.max(1.1, n.r * cam.z * 0.34), 0, 7); ctx.fill();
     if (n.pinned) { ctx.strokeStyle = "#fbbf24"; ctx.beginPath(); ctx.arc(n.x, n.y, n.r * cam.z + 5, 0, 7); ctx.stroke(); }
+    const litLeft = (litUntil.get(n.id) || 0) - time;
+    if (vis && litLeft > 0) {
+      ctx.globalAlpha = (litLeft / 0.9) * 0.9;
+      ctx.strokeStyle = "#fef08a";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r * cam.z + 8, 0, 7); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    if (vis && (n.applied || 0) > 0) {
+      ctx.globalAlpha = 0.10 + 0.07 * Math.sin(time * 1.5 + n.phase);
+      ctx.drawImage(sprite(color), n.x - R, n.y - R, R * 2, R * 2);
+      ctx.globalAlpha = 1;
+    }
   }
   ctx.globalAlpha = 1;
   requestAnimationFrame(frame);
@@ -330,6 +392,7 @@ canvas.addEventListener("click", e => {
   selected = n;
   const d = document.getElementById("detail");
   if (!n) { d.classList.remove("show"); return; }
+  const edgeCount = fireActivation(n);
   const k = KINDS[n.kind];
   const pct = Math.round((n.confidence ?? 0) * 100);
   d.innerHTML = `
@@ -337,6 +400,7 @@ canvas.addEventListener("click", e => {
     <h2>${esc(n.subject)}</h2>
     <div class="content">${esc(n.content)}</div>
     ${n.applies_when ? `<div class="when">适用情境：${esc(n.applies_when)}</div>` : ""}
+    <div class="when">神经传导：沿 ${edgeCount} 条关联边激活${edgeCount ? "（脉冲已发出）" : "（暂无关联边）"}</div>
     ${n.t === "insight" ? `<div class="meta">
       <span>置信度 <b>${pct}%</b><span class="bar"><i style="width:${pct}%"></i></span></span>
       <span>证据 <b>${n.verified === false ? "未验证 · 已降权" : "已验证"}</b></span>
@@ -368,14 +432,29 @@ document.getElementById("search").addEventListener("input", e => { query = e.tar
 
 /* ============ 启动 ============ */
 (async () => {
+  const badge = document.getElementById("modeBadge");
+  const errBox = document.getElementById("loadError");
+  const showError = (msg) => {
+    badge.textContent = "未连通";
+    errBox.textContent = msg;
+    errBox.style.display = "block";
+  };
+  if (DEMO_MODE) {
+    layout(DEMO);
+    badge.textContent = "演示数据（?demo=1 预览，非真实记忆）";
+    return;
+  }
+  if (!USER_ID) {
+    showError("缺少 user_id 参数：请用 ?user_id=你的 ID 打开，服务密钥用 &key=… 传入，接口地址用 &api=… 覆盖。");
+    return;
+  }
   try {
     const data = await loadData();
     layout(data);
-    const badge = document.getElementById("modeBadge");
     badge.textContent = "实时数据 · " + USER_ID;
     badge.classList.add("live");
-  } catch {
-    layout(DEMO);
+  } catch (e) {
+    showError("实时数据未连通：" + (e && e.message ? e.message : e) + "。请检查 api、user_id、key 是否正确，确认后端 /v1/me/* 可达；演示数据不再静默兜底。");
   }
 })();
 </script>

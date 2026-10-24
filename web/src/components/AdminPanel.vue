@@ -2,10 +2,12 @@
 import { onMounted, ref } from 'vue'
 import {
   ApiError,
+  adminAuditLog,
   adminOverview,
   adminUserMemories,
   getAdminKey,
   setAdminKey,
+  type AdminAuditEntry,
 } from '../api'
 import type { AdminUserMemories, AdminUserRow } from '../types'
 
@@ -14,8 +16,17 @@ import type { AdminUserMemories, AdminUserRow } from '../types'
 const keyDraft = ref(getAdminKey())
 const users = ref<AdminUserRow[]>([])
 const selected = ref<AdminUserMemories | null>(null)
+const audit = ref<AdminAuditEntry[]>([])
 const busy = ref(false)
 const error = ref('')
+
+async function loadAudit() {
+  try {
+    audit.value = await adminAuditLog(50)
+  } catch {
+    audit.value = []
+  }
+}
 
 async function loadOverview() {
   busy.value = true
@@ -25,6 +36,7 @@ async function loadOverview() {
     const data = await adminOverview()
     users.value = data.users
     selected.value = null
+    await loadAudit()
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : String(e)
     users.value = []
@@ -99,6 +111,13 @@ onMounted(() => {
         </tr>
       </tbody>
     </table>
+
+    <div v-if="audit.length" style="margin-top: 16px" data-testid="admin-audit">
+      <h3 style="margin: 0 0 8px">管理查看审计（最近 50 条 · 密钥只露哈希前 12 位）</h3>
+      <div v-for="(e, idx) in audit" :key="idx" class="muted" style="margin: 2px 0">
+        {{ e.at }} · {{ e.endpoint }} · {{ e.target_user || '—' }} · 密钥 {{ e.admin_key_hash }}
+      </div>
+    </div>
 
     <div v-if="selected" style="margin-top: 16px" data-testid="admin-user-detail">
       <h3 style="margin: 0 0 8px">{{ selected.user_id }} 的全部记忆</h3>

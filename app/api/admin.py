@@ -9,7 +9,11 @@ RLS 注意：迁移 0002 之后，应用账号（memsvc_app）不绑用户时一
 BYPASSRLS，绕过与否由账号决定、应用代码无法自行打开；接口层再用管理密钥
 把关，两套机制各司其职。PG 且 WORKER_DATABASE_URL 未配时（worker_engine
 回落到应用引擎）管理端直接 503，绝不静默返回空表；SQLite 没有 RLS，不拦。
+第十九轮：每次管理查看都写 admin_audit（密钥只存 SHA-256）——共享密钥
+本身没有身份，审计是事后唯一能回答“谁看过谁的记忆”的东西。
 """
+import hashlib
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -58,11 +62,29 @@ def _app_id() -> str:
     return settings.app_id
 
 
+def _audit(db: Session, x_admin_key: str | None, endpoint: str, target_user: str | None) -> None:
+    """管理查看留痕（第十九轮）：密钥原文绝不入库，只存 SHA-256——既能对应
+    到轮换中的哪一把，又推不出原文。审计写失败不拦正常查看（读操作不该
+    因为账本写不下而失败），但要 rollback 掉脏事务、记一条警告。"""
+    import logging
+
+    log = logging.getLogger(__name__)
+    try:
+        db.add(m.AdminAudit(
+            admin_key_hash=hashlib.sha256((x_admin_key or "").encode()).hexdigest(),
+            endpoint=endpoint, target_user=target_user))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        log.warning("admin audit write failed endpoint=%s: %s", endpoint, e)
+
+
 @router.get("/overview")
 def overview(db: Session = Depends(get_admin_db),
              x_admin_key: str | None = Header(default=None)):
     """用户清单 + 每人各类记忆计数：管理端首页一张表看全貌。"""
     _require_admin(x_admin_key)
+    _audit(db, x_admin_key, "overview", None)
     app_id = _app_id()
     user_ids = list(db.scalars(select(m.MemoryFact.user_id).where(
         m.MemoryFact.app_id == app_id).distinct()))
@@ -93,6 +115,7 @@ def user_memories(user_id: str, db: Session = Depends(get_admin_db),
                   limit: int = Query(200, ge=1, le=1000)):
     """某个用户的全部记忆（各类各取最近 limit 条）：事实/偏好/经验/轨迹/前瞻记忆。"""
     _require_admin(x_admin_key)
+    _audit(db, x_admin_key, "user_memories", user_id)
     app_id = _app_id()
 
     def rows(model, *extra):
@@ -127,3 +150,21 @@ def user_memories(user_id: str, db: Session = Depends(get_admin_db),
                        "status": r.status, "once": bool(r.once),
                        "fire_count": r.fire_count or 0} for r in reminders],
     }
+
+
+@router.get("/audit")
+def audit_log(db: Session = Depends(get_admin_db),
+              x_admin_key: str | None = Header(default=None),
+              limit: int = Query(100, ge=1, le=1000)):
+    """管理查看审计（第十九轮）：最近的管理端访问记录，密钥只露 SHA-256 前 12 位
+    （够对应到哪一把轮换密钥，不够反推原文）。查审计本身不记审计——否则
+    审计员每查一次账就给自己记一笔，账本自己膨胀。"""
+    _require_admin(x_admin_key)
+    rows = list(db.scalars(select(m.AdminAudit).order_by(
+        m.AdminAudit.created_at.desc()).limit(limit)))
+    return {"entries": [{
+        "at": r.created_at.isoformat() if r.created_at else None,
+        "admin_key_hash": (r.admin_key_hash or "")[:12],
+        "endpoint": r.endpoint,
+        "target_user": r.target_user,
+    } for r in rows]}

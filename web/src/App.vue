@@ -8,6 +8,7 @@ import {
   deleteMemory,
   dismissReminder,
   exportMemories,
+  getServiceKey,
   getSettings,
   listInsights,
   listJobs,
@@ -15,6 +16,7 @@ import {
   listReminders,
   needsConsent,
   patchInsight,
+  setServiceKey,
   updateSettings,
 } from './api'
 import { clearUserId, getUserId, setUserId } from './user'
@@ -38,6 +40,31 @@ const error = ref('')
 const notice = ref('')
 const showClearConfirm = ref(false)
 const filter = ref<'all' | 'fact' | 'preference'>('all')
+const query = ref('')
+const serviceKeyDraft = ref('')
+const serviceKeySaved = ref(false)
+
+const filteredItems = computed(() => {
+  const q = query.value.trim().toLowerCase()
+  if (!q) return items.value
+  return items.value.filter((i) => `${i.subject} ${i.content}`.toLowerCase().includes(q))
+})
+const filteredInsights = computed(() => {
+  const q = query.value.trim().toLowerCase()
+  if (!q) return insights.value
+  return insights.value.filter((i) => `${i.subject} ${i.content}`.toLowerCase().includes(q))
+})
+
+function saveServiceKey() {
+  setServiceKey(serviceKeyDraft.value.trim())
+  serviceKeySaved.value = !!serviceKeyDraft.value.trim()
+  if (serviceKeySaved.value) {
+    notice.value = '服务密钥已保存（仅存于本页会话，关页即失）'
+    void loadAll()
+  } else {
+    notice.value = '服务密钥已清除'
+  }
+}
 const view = ref<'memories' | 'insights' | 'reminders' | 'admin'>('memories')
 const insights = ref<InsightItem[]>([])
 const reminders = ref<Reminder[]>([])
@@ -231,7 +258,7 @@ async function onDismissReminder(item: Reminder) {
 function useUser() {
   const id = draft.value.trim()
   if (!id) {
-    error.value = '请填写 user_id（演示用；正式由天code 业务调用）'
+    error.value = '请填写 user_id'
     return
   }
   setUserId(id)
@@ -245,14 +272,16 @@ function switchUser() {
   settings.value = null
   items.value = []
   jobs.value = []
-  error.value = '请填写 user_id（演示用；正式由天code 业务调用）'
+  error.value = '请填写 user_id'
 }
 
 onMounted(async () => {
+  serviceKeySaved.value = !!getServiceKey()
+  serviceKeyDraft.value = ''
   userId.value = getUserId()
   draft.value = userId.value || ''
   if (userId.value) await loadAll()
-  else error.value = '请填写 user_id（演示用；正式由天code 业务调用）'
+  else error.value = '请填写 user_id'
 })
 </script>
 
@@ -321,9 +350,12 @@ onMounted(async () => {
         </button>
       </div>
 
-      <div v-if="!items.length" class="muted" data-testid="empty-list">暂无记忆</div>
+      <div v-if="busy" class="muted" data-testid="loading">加载中…</div>
+      <div v-else-if="!filteredItems.length" class="muted" data-testid="empty-list">
+        {{ query.trim() ? '没有匹配的记忆' : '暂无记忆' }}
+      </div>
       <MemoryRow
-        v-for="item in items"
+        v-for="item in filteredItems"
         :key="item.id"
         :item="item"
         :busy="busy"
@@ -331,6 +363,24 @@ onMounted(async () => {
         @remove="onDelete(item.id)"
       />
     </section>
+
+    <div class="row" style="gap: 8px; margin: 4px 0 12px">
+      <input
+        v-model="serviceKeyDraft"
+        type="password"
+        placeholder="服务密钥（X-Service-Key，关页即失）"
+        data-testid="service-key"
+        autocomplete="off"
+      />
+      <button type="button" class="btn" data-testid="save-service-key" @click="saveServiceKey">
+        {{ serviceKeySaved ? '密钥已保存' : '保存密钥' }}
+      </button>
+      <input
+        v-model="query"
+        placeholder="搜索主题或内容"
+        data-testid="search"
+      />
+    </div>
 
     <div class="row" style="gap: 8px; margin: 4px 0 12px" data-testid="view-tabs">
       <button type="button" class="btn" :class="{ 'btn-primary': view === 'memories' }" data-testid="tab-memories" @click="view = 'memories'">记忆</button>
@@ -341,7 +391,7 @@ onMounted(async () => {
 
     <InsightsPanel
       v-if="view === 'insights'"
-      :insights="insights"
+      :insights="filteredInsights"
       :busy="busy"
       @toggle-pin="onTogglePin"
       @toggle-mute="onToggleMute"

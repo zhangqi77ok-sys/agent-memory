@@ -262,7 +262,9 @@ def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
-def _rank_insights(rows, scored, now, project):
+def _rank_insights(rows, scored, now, project, conf_a: float = 0.7, conf_b: float = 0.6,
+                   proj_same: float = 1.15, proj_diff: float = 0.85,
+                   recency: bool = True, unverified_mult: float = 0.85):
     """经验排序乘子（第十/十一轮）：置信度 × 项目 × 新近性；置顶组恒在前。
 
     返回 [(final, row, reason)]，已按「置顶组内序 + 其余降序」排好待预算裁剪。
@@ -270,6 +272,9 @@ def _rank_insights(rows, scored, now, project):
     闲置天数，乘子区间 0.85–1.0——老经验不该被埋没，但新鲜的排前面。
     衰减按行首见顺序取整天数（与逐行现算同值），把逐行 datetime 相减
     换成字典查表：全员同龄的大库里这一项曾是逐行打分的近半开销。
+    第十九轮：乘子全部参数化（默认值 = 现行口径，生产行为不变），供
+    scripts/ranking_sensitivity.py 做敏感性分析——此前乘子是写死的，
+    没人知道哪个在裸奔。
     """
     ages: dict = {}
     ranked: list[tuple[float, object, str]] = []
@@ -278,19 +283,19 @@ def _rank_insights(rows, scored, now, project):
         if gated and not row.pinned:
             continue
         conf = row.confidence if row.confidence is not None else 0.5
-        final *= 0.7 + 0.6 * conf
+        final *= conf_a + conf_b * conf
         if getattr(row, "verified", True) is False:
-            final *= 0.85  # 未验证经验（第十六轮）：证据没对上轨迹原文，排序打折
+            final *= unverified_mult  # 未验证经验（第十六轮）：证据没对上轨迹原文，排序打折
         if project:
             if row.project == project:
-                final *= 1.15
+                final *= proj_same
             elif row.project:
-                final *= 0.85
+                final *= proj_diff
         stamp = row.last_used_at or row.valid_from
         mult = ages.get(stamp)
         if mult is None:
             age_days = max(0, (now - _aware(stamp)).days)
-            mult = ages[stamp] = 0.85 + 0.15 / (1 + age_days / 180)
+            mult = ages[stamp] = (0.85 + 0.15 / (1 + age_days / 180)) if recency else 1.0
         final *= mult
         (pinned_ranked if row.pinned else ranked).append((final, row, reason))
     pinned_ranked.sort(key=lambda t: t[0], reverse=True)

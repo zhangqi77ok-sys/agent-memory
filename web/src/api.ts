@@ -13,6 +13,18 @@ import { getUserId } from './user'
 
 export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) || '/memory'
 
+// ---------- 服务密钥（第十九轮落地）：面板不再裸奔 ----------
+const SERVICE_KEY_STORE = 'memsvc_service_key'
+
+export function getServiceKey(): string {
+  return sessionStorage.getItem(SERVICE_KEY_STORE) || ''
+}
+
+export function setServiceKey(k: string): void {
+  if (k) sessionStorage.setItem(SERVICE_KEY_STORE, k)
+  else sessionStorage.removeItem(SERVICE_KEY_STORE)
+}
+
 export class ApiError extends Error {
   status: number
   detail: unknown
@@ -35,6 +47,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     payload = JSON.stringify({ ...(payload ? JSON.parse(String(payload)) : {}), user_id: userId })
   }
   const headers = new Headers(init.headers)
+  const sk = getServiceKey()
+  if (sk && !headers.has('X-Service-Key')) headers.set('X-Service-Key', sk)
   if (payload && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
@@ -50,6 +64,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     }
   }
   if (!res.ok) {
+    if (res.status === 401) {
+      throw new ApiError(401, body, '服务密钥无效或未填写，请在右上角填写服务密钥')
+    }
     const msg =
       typeof body === 'object' && body && 'detail' in body
         ? JSON.stringify((body as { detail: unknown }).detail)
@@ -101,7 +118,10 @@ export function clearAllMemories(): Promise<void> {
 export async function exportMemories(): Promise<Blob> {
   const userId = getUserId()
   if (!userId) throw new ApiError(422, null, '请先填写 user_id')
-  const res = await fetch(`${API_BASE}/v1/me/memories/export?user_id=${encodeURIComponent(userId)}`)
+  const sk = getServiceKey()
+  const res = await fetch(`${API_BASE}/v1/me/memories/export?user_id=${encodeURIComponent(userId)}`, {
+    headers: sk ? { 'X-Service-Key': sk } : {},
+  })
   if (!res.ok) {
     throw new ApiError(res.status, null, `导出失败 ${res.status}`)
   }
@@ -130,9 +150,10 @@ export async function patchInsight(
   // 该端点的 user_id 走查询参数（与其它 /me 接口的约定不同），单独发请求
   const userId = getUserId()
   if (!userId) throw new ApiError(422, null, '请先填写 user_id')
+  const sk = getServiceKey()
   const res = await fetch(`${API_BASE}/v1/me/insights/${id}?user_id=${encodeURIComponent(userId)}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(sk ? { 'X-Service-Key': sk } : {}) },
     body: JSON.stringify(body),
   })
   if (!res.ok) throw new ApiError(res.status, null, `更新失败 ${res.status}`)
@@ -183,6 +204,17 @@ async function adminRequest<T>(path: string): Promise<T> {
 
 export function adminOverview(): Promise<{ users: AdminUserRow[] }> {
   return adminRequest<{ users: AdminUserRow[] }>('/v1/admin/overview')
+}
+
+export interface AdminAuditEntry {
+  at: string | null
+  admin_key_hash: string
+  endpoint: string
+  target_user: string | null
+}
+
+export function adminAuditLog(limit = 100): Promise<AdminAuditEntry[]> {
+  return adminRequest<{ entries: AdminAuditEntry[] }>(`/audit?limit=${limit}`).then((d) => d.entries)
 }
 
 export function adminUserMemories(userId: string): Promise<AdminUserMemories> {

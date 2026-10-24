@@ -45,3 +45,18 @@ it('sends user_id as query on GET and in body on PUT, never Authorization', asyn
   expect(new Headers(calls[0][1].headers).has('Authorization')).toBe(false)
   expect(JSON.parse(String(calls[1][1].body))).toMatchObject({ user_id: 'alice', memory_enabled: false })
 })
+
+it('sends X-Service-Key when saved, and reports 401 in plain words', async () => {
+  const { setServiceKey, getServiceKey } = await import('../api')
+  setServiceKey('k-123')
+  expect(getServiceKey()).toBe('k-123')
+  const calls: [string, RequestInit][] = []
+  vi.stubGlobal('fetch', vi.fn(async (u: string, i: RequestInit) => {
+    calls.push([u, i])
+    return new Response(JSON.stringify({ detail: 'Unauthorized' }), { status: 401 })
+  }))
+  await expect(getSettings()).rejects.toThrow('服务密钥无效或未填写')
+  expect(new Headers(calls[0][1].headers).get('X-Service-Key')).toBe('k-123')
+  setServiceKey('')
+  expect(getServiceKey()).toBe('')
+})

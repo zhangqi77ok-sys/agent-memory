@@ -59,6 +59,8 @@ export interface InsightItem {
   auto_pos: number
   auto_neg: number
   verified: boolean // 提炼证据校验（第十六轮）
+  agent?: string | null // 来源 agent（第十九轮）
+  evidence_chained?: boolean // 证据是否链到具体步骤（第十九轮）
   pinned: boolean
   muted: boolean
   version: number

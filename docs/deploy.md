@@ -2,6 +2,33 @@
 
 > 公开仓库：这里不写真实 IP、密码、Token。部署机地址只配在 Jenkins 全局环境变量 `DEPLOY_HOST` 里。
 
+## 当前状态（第十九轮，2026-10-24）
+
+- main 含第十八、十九轮；迁移 HEAD 为 `0019_agent_evidence_audit`（0018 给偏好补向量列；
+  0019 给经验加 `agent` / `evidence_chained` 列、新建 `admin_audit` 表）。
+- 部署后验证（在旧 §6 基础上补三项）：
+  - `alembic current` 应为 `0019_agent_evidence_audit`；
+  - `curl -H "X-Admin-Key: <key>" /v1/admin/audit` 应返回管理查看记录（第十九轮前没有这个端点）；
+  - 面板右上角有服务密钥输入框（第十九轮前没有——此前面板不带 `X-Service-Key`，
+    后端配了 `SERVICE_KEYS` 时面板会全 401，看着像“前端是 Demo”）。
+- `WORKER_DATABASE_URL` 未配时的管理端 503 只发生在 PG 上（SQLite 没有 RLS，不拦）；
+  旧一页纸里“不配就全部 503”的说法按此修正。
+- 星图页不再静默画演示数据：不带 `user_id` 或接口不通时显示报错条，不画假星；
+  演示数据只认显式 `?demo=1`（截图/演示用）。
+- 部署窗口 `/memory/` 502 约 1–2 分钟是已知现象（迁移+重启），别回滚。
+- `EMBEDDING_DIM` 生产固定 1536，千万别设 2（2 是测试假嵌入器用的）。
+
+## 备份与恢复（第十九轮新增）
+
+- 备份：`scripts/backup.sh`（pg_dump，表级一致性快照；不含密钥，只备数据）。
+  部署机上跑：`BACKUP_DIR=/opt/agent-memory/backups ./scripts/backup.sh`，
+  产物 `agent-memory-<日期>.dump`；恢复：`pg_restore -d memory <文件>` 后
+  `alembic upgrade head`（dump 本身不含 `alembic_version` 的话需先核对版本）。
+- 恢复演练每季度做一次：恢复到临时库、跑 `curl /readyz` 与一条简报查询，
+  只备不练等于没备。
+- 回滚镜像不回滚数据库（先扩后缩）；只有回滚到 0006 之前历史版本时才需先
+  `alembic downgrade 0005_app_id`（见下方“回滚”一节）。
+
 ## 拓扑
 ```
 浏览器 ──:80──> nginx-gw（宿主机网络）

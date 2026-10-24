@@ -63,19 +63,34 @@ def dismiss_reminder(db: Session, u: UserContext, reminder_id: str) -> MemoryRem
     return row
 
 
-def _triggered(row: MemoryReminder, task: str, task_tokens: set[str],
-               qvec: list[float] | None, embedder_model: str | None) -> bool:
-    """触发判定：关键词路（条件 token 被任务覆盖 ≥50%，按条件集合计——条件是短句，
-    分母用它才不会被长任务描述稀释）或向量路（余弦 ≥ COS_MIN，与召回同一标定线）。"""
+def _trigger_score(row: MemoryReminder, task_tokens: set[str],
+                   qvec: list[float] | None, embedder_model: str | None) -> float | None:
+    """触发分数（第十九轮）：返回命中时的强度，未命中返回 None。
+
+    关键词路分数 = 条件 token 被任务覆盖的比例；向量路分数 = 余弦。两路都
+    命中取高者。此前 check_triggers 只返回布尔——命中多条时既无先后也无
+    去重，同一动作换个说法武装两次就会在简报里出现两次。"""
     cond_tokens = tokens_of(row.condition_text)
-    if cond_tokens and len(cond_tokens & task_tokens) / len(cond_tokens) >= TRIGGER_OVERLAP_MIN:
-        return True
+    best = None
+    if cond_tokens:
+        overlap = len(cond_tokens & task_tokens) / len(cond_tokens)
+        if overlap >= TRIGGER_OVERLAP_MIN:
+            best = overlap
     if (qvec is not None and row.embedding is not None
             and row.embed_model == embedder_model):
         vec = [float(x) for x in row.embedding]
         if len(vec) == len(qvec):
-            return cosine(qvec, vec) >= COS_MIN
-    return False
+            cos = cosine(qvec, vec)
+            if cos >= COS_MIN and (best is None or cos > best):
+                best = cos
+    return best
+
+
+def _triggered(row: MemoryReminder, task: str, task_tokens: set[str],
+               qvec: list[float] | None, embedder_model: str | None) -> bool:
+    """触发判定：关键词路（条件 token 被任务覆盖 ≥50%，按条件集合计——条件是短句，
+    分母用它才不会被长任务描述稀释）或向量路（余弦 ≥ COS_MIN，与召回同一标定线）。"""
+    return _trigger_score(row, task_tokens, qvec, embedder_model) is not None
 
 
 def check_triggers(db: Session, u: UserContext, task: str,
@@ -97,12 +112,25 @@ def check_triggers(db: Session, u: UserContext, task: str,
             log.warning("trigger query embed failed: %s", e)
             qvec = None
     now = _now()
-    fired: list[MemoryReminder] = []
+    # 第十九轮：命中按分数降序、同一动作去重（动作规范化后相同只留分数最高者）。
+    # 记账只对最终返回的做——被去重掉的那条不记 fire_count，否则简报里没出现
+    # 的提醒也在账上“触发过”，误触发率就永远量不准。
+    scored: list[tuple[float, MemoryReminder]] = []
     for row in rows:
         if row.project and project and row.project != project:
             continue
-        if not _triggered(row, task, task_tokens, qvec, getattr(embedder, "model", None)):
+        score = _trigger_score(row, task_tokens, qvec, getattr(embedder, "model", None))
+        if score is None:
             continue
+        scored.append((score, row))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    seen_actions: set[str] = set()
+    fired: list[MemoryReminder] = []
+    for _score, row in scored:
+        action_key = " ".join((row.action_text or "").split()).lower()
+        if action_key in seen_actions:
+            continue
+        seen_actions.add(action_key)
         row.fire_count = (row.fire_count or 0) + 1
         row.last_fired_at = now
         if row.once:

@@ -172,6 +172,12 @@ class MemoryInsight(UserScoped, Base):
     # 验不过的经验不删，但简报排序打折、面板可见——假经验进不了门还不至于，
     # 先让它带标上岗、排在后面。
     verified: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 第十九轮：经验从哪个 agent 的轨迹提炼而来（episode.source，如 codex/mcp/api）。
+    # 跨 agent 的视角差异不是矛盾——裁决与复查时靠这列区分“真矛盾”与“不同做法”。
+    agent: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 第十九轮证据链：引文是否链到了具体步骤（见 _evidence_chain_ok）。False
+    # 只表示“只过了全文子串校验”，不等于假——旧行与未报步号的提炼都落在这里。
+    evidence_chained: Mapped[bool] = mapped_column(Boolean, default=False)
     # 用户策展（第十一轮）：置顶=简报必达（仍受条数与 token 预算约束），禁用=永不召回。
     # 记忆越自动越要给人留开关——这两列就是经验库对用户的「可见可编辑」承诺的落点。
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -223,6 +229,22 @@ class BriefDelivery(UserScoped, Base):
     insight_ids: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AdminAudit(Base):
+    """管理端审计（第十九轮）：每次跨用户查看留痕。
+
+    管理端是共享密钥、无用户身份——此前谁看过谁的记忆事后无从查起。
+    密钥只存 SHA-256（可对应到轮换中的哪一把、但推不出原文），查谁、查
+    什么端点、什么时候。只由管理端写，应用侧不读它。
+    """
+
+    __tablename__ = "admin_audit"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    admin_key_hash: Mapped[str] = mapped_column(String(64))
+    endpoint: Mapped[str] = mapped_column(String(128))
+    target_user: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
 class MemoryLink(UserScoped, Base):
