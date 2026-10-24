@@ -8,16 +8,26 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_, select, text
+from sqlalchemy import or_, select, text, union
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import UserContext
+from app.config import settings
 from app.distill import KINDS
 from app.embeddings import GeminiEmbedder, cosine, vector_usable
 from app.extract import MAX_SUBJECT_LEN, InvalidExtraction, decide, is_injection, norm, same_subject, strip_injection
 from app.models import AuditLog, MemoryInsight, TaskEpisode, _now
-from app.recall import COS_MIN, MIN_SCORE, VECTOR_WEIGHT, _est_tokens, _query_vector, _score
+from app.recall import (
+    COS_MIN,
+    MIN_SCORE,
+    VECTOR_WEIGHT,
+    _est_tokens,
+    _keyword_channel,
+    _query_vector,
+    _QueryPlan,
+    _vector_branch,
+)
 from app.redact import redact
 from app.schemas import InsightOut
 
@@ -473,24 +483,58 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
     递出的经验记 use_count/last_used_at（曝光计数；「真用了且有效」由反馈闭环回流）。
     第十一轮补：排序三要素齐了——相关性（门槛+基础分）× 置信度 × 新近性；
     用户置顶的经验必达（垫底分入选、reason='pinned'），禁用的永不召回。
+    第十四轮补：候选改走索引化召回（与事实侧同口径，见 app/recall.py）——
+    查询只分词一次、逐行改存在性打分、轻量列加载；通道完备时（无向量，或 PG
+    向量通道在场）先在 SQL 侧压候选：关键词门槛计数 ∪ 置顶一个分支，向量距离
+    单独一个 UNION 分支（混在 OR 里 HNSW 索引用不上），压不了的情形保全量。
+    门槛、乘子、排序与记账语义不变，赢家再回表取 ORM 行记账。
     """
     k = max(1, int(k))  # 服务层兜底：负数 k 会让切片变成「除最后 N 条外全返回」
     if not token_budget or token_budget <= 0:
         token_budget = 1500
-    rows = list(db.scalars(select(MemoryInsight).where(
-        MemoryInsight.app_id == u.app_id, MemoryInsight.user_id == u.user_id,
-        MemoryInsight.valid_to.is_(None),
-        # 第十一轮：用户禁用的经验永不召回（第十轮前建的存量行 muted 可能为 NULL，一并兼容）
-        or_(MemoryInsight.muted.is_(False), MemoryInsight.muted.is_(None)))))
-    if not rows:
-        return []
+    plan = _QueryPlan(task)
     qvec = _query_vector(embedder, task)
+    # 无查询向量时不搬 embedding 列：SQLite 上它是 JSON，每行都要解码，纯属浪费
+    cols = [MemoryInsight.id, MemoryInsight.kind, MemoryInsight.subject,
+            MemoryInsight.content, MemoryInsight.applies_when,
+            MemoryInsight.confidence, MemoryInsight.project,
+            MemoryInsight.pinned, MemoryInsight.valid_from,
+            MemoryInsight.last_used_at, MemoryInsight.source_episode_id]
+    if qvec is not None:
+        cols += [MemoryInsight.embedding, MemoryInsight.embed_model]
+    scope = (MemoryInsight.app_id == u.app_id, MemoryInsight.user_id == u.user_id,
+             MemoryInsight.valid_to.is_(None),
+             # 第十一轮：用户禁用的经验永不召回（第十轮前建的存量行 muted 可能为 NULL，一并兼容）
+             or_(MemoryInsight.muted.is_(False), MemoryInsight.muted.is_(None)))
+    kw_chan = _keyword_channel(
+        (MemoryInsight.subject, MemoryInsight.content, MemoryInsight.applies_when), plan,
+        db.get_bind().dialect.name)
+    indexed_vector = (db.get_bind().dialect.name == "postgresql" and qvec is not None
+                      and len(qvec) == settings.embedding_dim)
+    params: dict = {}
+    if qvec is None or indexed_vector:
+        # 置顶必达：无论相关性都进关键词分支的候选集
+        kw_or_pin = or_(MemoryInsight.pinned.is_(True), kw_chan) \
+            if kw_chan is not None else MemoryInsight.pinned.is_(True)
+        parts = [select(*cols).where(*scope, kw_or_pin)]
+        if indexed_vector:
+            # 向量分支单独成 UNION 一支，理由见 recall._vector_branch
+            branch, params = _vector_branch(MemoryInsight, cols, scope, qvec,
+                                            getattr(embedder, "model", None))
+            parts.append(branch)
+        stmt = union(*parts) if len(parts) > 1 else parts[0]
+    else:
+        stmt = select(*cols).where(*scope)
+    rows = list(db.execute(stmt, params))
+    if not rows:
+        db.commit()  # 与旧行为对齐：简报顺带结清会话（见下方曝光计数注释）
+        return []
     now = _now()
-    scored: list[tuple[float, MemoryInsight, str]] = []
-    pinned_scored: list[tuple[float, MemoryInsight, str]] = []
+    scored: list[tuple[float, object, str]] = []
+    pinned_scored: list[tuple[float, object, str]] = []
     for row in rows:
         text = f"{row.subject} {row.content} {row.applies_when}"
-        kw = _score(task, text)
+        kw = plan.kw_score(text)
         cos = None
         if qvec is not None and vector_usable(row.embed_model, row.embedding, qvec,
                                               getattr(embedder, "model", None)):
@@ -521,17 +565,27 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
     pinned_scored.sort(key=lambda t: t[0], reverse=True)
     scored.sort(key=lambda t: t[0], reverse=True)
     scored = pinned_scored + scored
-    out: list[InsightOut] = []
+    winners: list[tuple[float, object, str]] = []
     used = 0
     for score, row, reason in scored:
-        if len(out) >= k:
+        if len(winners) >= k:
             break
         cost = _est_tokens(row.content)
         if used + cost > token_budget:
             break
         used += cost
-        row.use_count = (row.use_count or 0) + 1
-        row.last_used_at = _now()
+        winners.append((score, row, reason))
+    # 记账要 ORM 行：候选阶段只搬了轻量列，赢家（≤k 条）再按 id 回表取行
+    orm_by_id = {}
+    if winners:
+        orm_by_id = {r.id: r for r in db.scalars(select(MemoryInsight).where(
+            MemoryInsight.id.in_([row.id for _, row, _ in winners])))}
+    out: list[InsightOut] = []
+    for score, row, reason in winners:
+        orm = orm_by_id.get(row.id)
+        if orm is not None:
+            orm.use_count = (orm.use_count or 0) + 1
+            orm.last_used_at = _now()
         out.append(InsightOut(insight_id=row.id, kind=row.kind, subject=row.subject,
                               content=row.content, applies_when=row.applies_when,
                               score=round(score, 4), reason=reason,
