@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app import models as m
 from app.api.memories import _audit, get_db
 from app.auth import UserContext, bind_user, user_ctx, user_from_query
+from app.graph_stats import compute_graph_stats
 from app.links import neighbors_of
 from app.schemas import (
     CONSENT_VERSION,
@@ -285,6 +286,18 @@ def insight_links(insight_id: str, u: UserContext = Depends(user_from_query),
                 "active": node.valid_to is None},
         })
     return {"insight_id": insight_id, "links": out}
+
+
+@router.get("/graph/stats")
+def graph_stats(u: UserContext = Depends(user_from_query),
+                db: Session = Depends(get_db)):
+    """网结构统计（第二十轮）：节点/边/密度/孤点/枢纽/社群/桥/矛盾张力。
+
+    只读快照。千万级下这是一次全量扫描，不承诺 50ms——50ms 只约束
+    简报路径，网结构统计走离线快照口径。
+    """
+    bind_user(db, u)
+    return compute_graph_stats(db, u.app_id, u.user_id)
 
 
 @router.patch("/insights/{insight_id}", response_model=InsightListItem)

@@ -57,10 +57,17 @@ def brief(req: BriefRequest, db: Session = Depends(get_db)):
     db.add(m.AuditLog(app_id=u.app_id, user_id=u.user_id, action="brief",
                       fact_ids=[i.insight_id for i in insights]))
     db.commit()
+    # 第二十轮「织网简报」：胜出集的诱导子图——胜出经验之间怎么连着，一并递出。
+    from app.links import induced_edges
+
+    graph = {"nodes": [{"id": i.insight_id, "subject": i.subject} for i in insights],
+             "edges": induced_edges(db, u.app_id, u.user_id,
+                                    [i.insight_id for i in insights])}
     return BriefResponse(insights=insights,
                          reminders=[reminder_out(r) for r in fired],
                          degraded=bool(meta.get("degraded")),
-                         degraded_reason=meta.get("degraded_reason"))
+                         degraded_reason=meta.get("degraded_reason"),
+                         graph=graph)
 
 
 @router.post("/insights/feedback", response_model=FeedbackOut)

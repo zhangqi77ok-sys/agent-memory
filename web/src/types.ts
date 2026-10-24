@@ -69,6 +69,27 @@ export interface InsightItem {
   last_used_at: string | null
 }
 
+export interface GraphNode {
+  kind: string
+  id: string
+  subject: string
+}
+
+export interface GraphStats {
+  node_count: number
+  edge_count: number
+  contradicts_count: number
+  density: number
+  orphan_count: number
+  orphan_rate: number
+  orphans: GraphNode[]
+  hubs: (GraphNode & { degree: number })[]
+  communities: { size: number; members: GraphNode[] }[]
+  bridges_skipped: boolean
+  bridges: { link_id: string; src: GraphNode; dst: GraphNode; relation: string; strength: number }[]
+  tensions: { link_id: string; src: GraphNode; dst: GraphNode; same_community: boolean }[]
+}
+
 /** 前瞻记忆（第十七轮）：当 condition 发生时提醒做 action */
 export interface Reminder {
   reminder_id: string

@@ -28,11 +28,23 @@
 维护），探针按 token IN + GROUP BY 计数，只走索引探查。倒排存的正是打分文本
 的 token 集合，COUNT 出的命中数与 kw_score 的分子严格相等，探针行在 Python
 侧直接采用、不必重算；超长 token 查询等索引不成立的情形退全量精确打分。
+
+第二十轮（锚点探针，只走 Postgres）：倒排探针在 1M 行下现了原形——
+耗时 ∝ 命中桶（top 查询桶 342150 → p50 7.9s），加 2000-cap 也只压到
+1065ms（stage-1 聚合本身占主导：1M posting 扫描 + 24 万组 hash 聚合落盘）。
+锚点探针（_anchor_probe）把成本压到 O(CAP)：按查询词序逐个取锚，
+每锚取前 CAP 条 posting，LATERAL 按主键索引逐行验跨全部 token 的精确
+命中数，累计 ≥ CAP 即停；找不够 CAP 时回落精确探针（正确优先）。
+配套修补：置顶臂裸 pinned 以命中部分索引（IS TRUE 认不出谓词，
+1M 行下 210ms 全表扫描 → 0.014ms 索引扫描）、赢家 use_count 一条批量
+UPDATE、非文本更新跳过倒排同步。1M 行实测简报 p50 top 39.6ms /
+mid 44.6ms（k=5），胜出分数与精确版逐字相同；千万级外推见 docs/eval.md。
 """
 import re
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
-from sqlalchemy import and_, func, null, or_, select, text, union_all
+from sqlalchemy import and_, bindparam, func, null, or_, select, text, union_all
 from sqlalchemy.orm import Session
 
 from app import models as m
@@ -40,7 +52,7 @@ from app.auth import UserContext
 from app.config import settings
 from app.embeddings import cosine, vector_usable
 from app.schemas import FactOut
-from app.tokenize import CJK_HI, CJK_LO, MAX_TOKEN_LEN
+from app.tokenize import CJK_HI, CJK_LO, MAX_TOKEN_LEN, ordered_tokens
 from app.tokenize import tokens_of as _tokens
 
 MIN_SCORE = 0.10  # 基于50条陪伴评测集校准的召回阈值，兼顾长Query召回率与防误召回
@@ -63,9 +75,10 @@ class _QueryPlan:
     - 英文/数字词：必须是文本里的完整词——前后挨着 [a-z0-9] 时只是长词的一部分。
     """
 
-    __slots__ = ("tokens", "_subs", "_patterns")
+    __slots__ = ("query", "tokens", "_subs", "_patterns")
 
     def __init__(self, query: str):
+        self.query = query  # 锚点探针用查询词序选锚（ordered_tokens）
         self.tokens = _tokens(query)
         self._subs: list[str] = []
         self._patterns: list[re.Pattern] = []
@@ -121,14 +134,98 @@ def _probe_arm(model, token_model, id_key: str, cols, scope, plan: "_QueryPlan")
     # 一段式 JOIN 的计划不可控——SQLite 实测会选「按用户扫父表 5000 行、逐行
     # 回探倒排」，58ms；PG 规划器在统计不准时同样可能选错。两段式把贵的那段
     # 锁死在索引里（典型查询只碰几千个 posting 行），父表只剩主键点查。
+    # 候选上限：过门行按命中数倒序只取前 _PROBE_CAP 条（见 _PROBE_CAP 注释）。
+    # 没有上限时简报耗时与命中桶成正比：1M 行实测 top 查询桶 342150 → p50 7.9s、
+    # mid 桶 164030 → p50 2.4s，离 50ms 上限差两个量级；k ≤ 20 时 2000 是 100 倍余量。
     hits = (select(fk.label("pid"), func.count().label("kw_hits"))
             .where(token_model.token.in_(plan.tokens))
             .group_by(fk)
             .having(func.count() >= _needed_count(plan))
+            .order_by(func.count().desc())
+            .limit(_PROBE_CAP)
             .subquery())
     return (select(*cols, hits.c.kw_hits)
             .select_from(hits.join(model, model.id == hits.c.pid))
             .where(*scope))
+
+
+_PROBE_CAP = 2000  # 关键词探针的候选上限：过门行按命中数倒序截断。
+# 与向量分支 200-cap 同类近似：过线行超过上限时，命中数更低的可能漏；
+# 但简报 k ≤ 20，2000 是 100 倍余量，且截掉的是命中数最低的尾巴，
+# 排序主因子（命中数）靠前的行不受影响。SQLite/PG 两方言都走这条探针。
+
+
+_ANCHOR_CAP = 100  # PG 锚点探针：每锚采样数 = 累计到此即停的候选数。
+# 20× 简报默认 k=5；简报只取 k 个胜出者，100 已是充分余量（全平分数据里
+# 任取 100 个平分行与任取 500 个的胜出分数相同），且 stage-2 取行、验数、
+# 打分都随 CAP 线性涨——CAP=200 时简报 p50 约 65ms，500 时约 103ms，
+# 50ms 预算只容得下 100（找不够时回落精确探针，正确性不受 CAP 影响）。
+# 锚点采样把探针成本从 O(命中桶) 压到 O(CAP)：1M 行实测，精确探针 top 查询
+# 桶 342150 → p50 7.9s（加 2000-cap 后仍 1065ms，全花在 1M posting 扫描 +
+# 24 万组 hash 聚合落盘上）。
+
+
+def _anchor_probe(db, model, token_model, id_key: str, cols, scope, plan: "_QueryPlan"):
+    """PG 锚点探针：返回 stage-2 行（带 kw_hits）；找不够 CAP 时返回 None（回落精确探针）。
+
+    流程（全部有界，与命中桶大小无关）：
+    1. 按查询词序逐个取锚：SELECT id FROM token表 WHERE token = 锚 LIMIT CAP
+       ——(token, id) 索引上的纯索引扫描，暖时 <1ms；scope 不在这里过滤，
+       留给 stage-2（与精确探针的 stage-2 同口径）；
+    2. LATERAL 逐行验数：unnest(候选 id) × LATERAL(PK 索引按 id 切片数 token 命中)，
+       命中数是跨全部查询 token 的精确计数（与 kw_score 分子同口径），
+       HAVING 过门槛；规划器无法把它重写成全 token 扫描——ANY/JOIN 形会，
+       1M 行实测 300ms+，LATERAL 形 500 行约 10ms；
+    3. 累计过门行 ≥ CAP 即停；stage-2 按 id 回父表取列 + scope 过滤；
+       stage-2 行 < CAP 说明采样没找够（针尖查询、跨 scope 稀释），返回 None
+       让调用方回落精确探针——正确优先，慢只慢在罕见情形。
+    近似性（与向量分支 200-cap 同类）：采样只取每锚前 CAP 条 posting
+    （UUID 序≈随机样本），不含任一锚前 CAP 条的罕见高命中行可能漏；
+    但锚点按查询词序全试一遍，且找不够时有精确回落兜底。
+    SQLite 不走这里（小量级，精确探针足够快）；超长 token 时也不走（索引不成立）。
+    """
+    table = token_model.__tablename__
+    ordered = ordered_tokens(plan.query)
+    if not ordered or any(len(t) > MAX_TOKEN_LEN for t in ordered):
+        return None
+    needed = _needed_count(plan)
+    verified: dict = {}
+    for anchor in ordered:
+        if len(verified) >= _ANCHOR_CAP:
+            break
+        ids = [r[0] for r in db.execute(
+            text(f"SELECT {id_key} FROM {table} WHERE token = :a LIMIT :lim"),
+            {"a": anchor, "lim": _ANCHOR_CAP}).fetchall()]
+        fresh = [i for i in ids if i not in verified]
+        if not fresh:
+            continue
+        # unnest 必须显式 CAST：psycopg3 传 list 时元素类型是 unknown，
+        # PG 解不出 unnest(unknown)（AmbiguousFunction）；事实/经验 id 都是 String(32)，
+        # 故统一 CAST AS text[]（若将来有整型 id 的 token 表，这里要跟着改）。
+        rows = db.execute(
+            text(f"SELECT c.id, s.hits FROM unnest(CAST(:ids AS text[])) AS c(id), LATERAL ("
+                 f" SELECT COUNT(*) AS hits FROM {table}"
+                 f" WHERE {id_key} = c.id AND token IN :toks) s"
+                 f" WHERE s.hits >= :needed").bindparams(
+                     bindparam("toks", expanding=True)),
+            {"ids": fresh, "toks": tuple(plan.tokens), "needed": needed}).fetchall()
+        for r in rows:
+            verified[r[0]] = r[1]
+    if len(verified) < _ANCHOR_CAP:
+        return None
+    top = sorted(verified.items(), key=lambda kv: kv[1], reverse=True)[:_ANCHOR_CAP]
+    hits_by_id = dict(top)
+    # stage-2 不用 VALUES 子查询拼 kw_hits 列：500 行 VALUES 的 SQLAlchemy
+    # 编译要 76ms 且每次都重新编译（结构随数据变，缓存命中不了）。
+    # 改用 id IN（postcompile 模板可缓存）+ Python 侧把精确命中数挂到
+    # SimpleNamespace 上：下游只用属性访问（_score_rows/_rank/InsightOut），
+    # 与精确探针的 Row 在消费口径上一致。
+    stmt = select(*cols).where(model.id.in_([i for i, _ in top]), *scope)
+    rows = [SimpleNamespace(**r._mapping, kw_hits=hits_by_id[r.id])
+            for r in db.execute(stmt)]
+    if len(rows) < _ANCHOR_CAP:
+        return None
+    return rows
 
 
 _VECTOR_CANDIDATES = 200  # 向量分支的近邻上限：过线行数超过它时，更远的可能漏（见下）
@@ -191,18 +288,46 @@ def _candidates(db: Session, model, token_model, id_key: str, cols, scope,
     None = 通道完备但一条臂都没有（无 token 又无向量）：结果注定为空。
     多臂重复的行按 id 去重，带精确命中数（kw_hits）的探针行优先。
     """
-    probe = _probe_arm(model, token_model, id_key, cols, scope, plan)
+    dialect = db.get_bind().dialect.name
     # 向量通道只在 Postgres 且查询向量维度与列一致时才成立（HNSW 索引按列维度建）
-    indexed_vector = (db.get_bind().dialect.name == "postgresql" and qvec is not None
+    indexed_vector = (dialect == "postgresql" and qvec is not None
                       and len(qvec) == settings.embedding_dim)
+    if (qvec is None or indexed_vector) and dialect == "postgresql" and plan.tokens:
+        # PG 锚点快路径：有界采样 + LATERAL 验数；找不够 CAP 时 _anchor_probe
+        # 返回 None，本函数继续走精确探针（不改变原有语义分支）。
+        anchor_rows = _anchor_probe(db, model, token_model, id_key, cols, scope, plan)
+        if anchor_rows is not None:
+            by_id: dict = {}
+            for r in anchor_rows:
+                by_id[r.id] = r
+            anchor_parts = []
+            if with_pinned:
+                # 裸 pinned（不用 is_(True)）：部分索引 ix_insight_pinned_scope
+                # 的谓词就是裸 pinned，PG 的谓词证明认不出 IS TRUE，导致
+                # 1M 行实测从索引扫描 0.014ms 退化成并行全表扫描 210ms。
+                anchor_parts.append(select(*cols, _NULL_HITS).where(
+                    *scope, model.pinned))
+            anchor_params: dict = {}
+            if indexed_vector:
+                branch, anchor_params = _vector_branch(
+                    model, cols, scope, qvec, getattr(embedder, "model", None))
+                anchor_parts.append(branch)
+            for stmt in anchor_parts:
+                for r in db.execute(stmt, anchor_params):
+                    prev = by_id.get(r.id)
+                    if prev is None or (prev.kw_hits is None and r.kw_hits is not None):
+                        by_id[r.id] = r
+            return list(by_id.values()), True
+    probe = _probe_arm(model, token_model, id_key, cols, scope, plan)
     if (qvec is None or indexed_vector) and (probe is not None or not plan.tokens):
         parts = []
         if probe is not None:
             parts.append(probe)
         if with_pinned:
             # 置顶必达：单独一臂——置顶行可能与查询零重叠，探针捞不到它
+            # 裸 pinned 而不用 is_(True)：同上，部分索引谓词匹配原因。
             parts.append(select(*cols, _NULL_HITS).where(
-                *scope, model.pinned.is_(True)))
+                *scope, model.pinned))
         params: dict = {}
         if indexed_vector:
             # 向量分支单独成 UNION 一支：与探针混在同一条语句里时规划器用不上

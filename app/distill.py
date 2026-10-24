@@ -14,13 +14,14 @@ from dataclasses import dataclass
 from app.config import Settings, settings
 from app.extract import MAX_SUBJECT_LEN, ExtractionError, InvalidExtraction
 
-DISTILL_PROMPT_VERSION = "distill-2026-10-v3"
-KINDS = ("lesson", "strategy", "pitfall", "cost_saver")
+DISTILL_PROMPT_VERSION = "distill-2026-10-v4"
+KINDS = ("lesson", "strategy", "pitfall", "cost_saver", "principle")
 
 _SYSTEM = f"""你是任务复盘提炼器。给你一次已完成任务的全过程（目标、步骤、报错、结果、成本），
 提炼出对以后同类任务有复用价值的经验。只提炼可迁移的经验：
 一次性细节、具体数值、人名与这次任务的专有信息不要记。
-每条经验必须有：kind（lesson 教训 / strategy 打法 / pitfall 避坑 / cost_saver 省钱招）、
+每条经验必须有：kind（lesson 教训 / strategy 打法 / pitfall 避坑 / cost_saver 省钱招 /
+principle 原则——跨任务的通用判断，多个任务共同指向的规律，不是单次任务的打法）、
 subject（稳定的短主题）、content（一到两句可直接照着做的指导）、
 applies_when（什么情境下适用，给出触发这次经验的任务特征）、
 evidence（证据：从上面轨迹原文里逐字摘录的一小段，不超过 80 字，证明这条经验

@@ -245,3 +245,7 @@ class BriefResponse(BaseModel):
     # 第十八轮：元记忆——简报是否降级（纯关键词），以及降级原因
     degraded: bool = False
     degraded_reason: str | None = None
+    # 第二十轮：织网简报——胜出集的诱导子图 {nodes: [{id, subject}],
+    # edges: [{link_id, src, dst, relation, strength}]}；每条经验的
+    # linked_from 路径已在 InsightOut 上，不在这里重复。
+    graph: dict | None = None

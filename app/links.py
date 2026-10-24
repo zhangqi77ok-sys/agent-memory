@@ -215,6 +215,24 @@ def spread_from(db: Session, app_id: str, user_id: str,
     return best
 
 
+def induced_edges(db: Session, app_id: str, user_id: str,
+                  ids: list[str], kind: str = "insight") -> list[dict]:
+    """胜出集的诱导子图边（第二十轮「织网简报」）：两端都在给定节点集里的
+    现行边。简报不再只递一张散列表——胜出经验之间怎么连着，一并递出；
+    每条胜出经验的 linked_from 路径已在 InsightOut 上（见 brief_for_task）。
+    """
+    if len(ids) < 2:
+        return []
+    idset = set(ids)
+    rows = db.scalars(select(MemoryLink).where(
+        MemoryLink.app_id == app_id, MemoryLink.user_id == user_id,
+        MemoryLink.valid_to.is_(None),
+        MemoryLink.src_kind == kind, MemoryLink.dst_kind == kind,
+        MemoryLink.src_id.in_(idset), MemoryLink.dst_id.in_(idset)))
+    return [{"link_id": r.id, "src": r.src_id, "dst": r.dst_id,
+             "relation": r.relation, "strength": r.strength} for r in rows]
+
+
 def contradiction_pairs(db: Session, app_id: str, user_id: str,
                         ids: list[str], kind: str = "insight") -> dict[str, list[str]]:
     """给定一组节点 id，查其中现行 contradicts 边的配对：{id: [与之矛盾的 id]}。"""
@@ -441,7 +459,8 @@ def weave_links(db: Session, linker=None) -> dict:
     from app.auth import UserContext
     from app.episodes import _apply_insight, _Cand  # 局部导入避免循环（episodes 也 import 本模块）
 
-    stats = {"pruned": _close_dead_links(db), "linked": 0, "contradicts": 0, "generalized": 0}
+    stats = {"pruned": _close_dead_links(db), "linked": 0, "contradicts": 0,
+             "generalized": 0, "decayed_edges": 0}
     judge = linker.judge if linker is not None else None
     users = db.execute(select(MemoryInsight.app_id, MemoryInsight.user_id).distinct()).all()
     users += [u for u in db.execute(select(MemoryFact.app_id, MemoryFact.user_id).distinct()).all()
@@ -505,12 +524,17 @@ def weave_links(db: Session, linker=None) -> dict:
             if not content:
                 continue
             u = UserContext(app_id, user_id)
-            _, gid = _apply_insight(db, u, _Cand("strategy", subject, content, applies_when),
+            _, gid = _apply_insight(db, u, _Cand("principle", subject, content, applies_when),
                                     None, None, project=None)
             if gid:
                 stats["generalized"] += 1
                 for r in cluster:
                     create_link(db, app_id, user_id, ("insight", gid), ("insight", r.id),
                                 "generalizes", 0.8, "llm")
+    # 第二十轮「边学习」：闲置衰减结清。每月节拍但顺带调用安全——不足整月
+    # 的边直接跳过，锚点保证同一段闲置只扣一次（见 decay_idle_edges）。
+    # 局部导入：edge_learning 反向 import 本模块的 SPREAD_RELATIONS。
+    from app.edge_learning import decay_idle_edges
+    stats["decayed_edges"] = decay_idle_edges(db)
     db.commit()
     return stats

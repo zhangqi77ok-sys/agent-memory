@@ -1,6 +1,7 @@
 import type {
   AdminUserMemories,
   AdminUserRow,
+  GraphStats,
   InsightItem,
   Job,
   MemoryItem,
@@ -141,6 +142,11 @@ export function needsConsent(s: Settings): boolean {
 
 export function listInsights(): Promise<InsightItem[]> {
   return request<InsightItem[]>('/v1/me/insights')
+}
+
+/** 网结构统计（第二十轮）：节点/边/密度/孤点/枢纽/社群/桥/矛盾张力 */
+export function graphStats(): Promise<GraphStats> {
+  return request<GraphStats>('/v1/me/graph/stats')
 }
 
 export async function patchInsight(

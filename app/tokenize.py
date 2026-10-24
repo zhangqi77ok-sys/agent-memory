@@ -24,3 +24,23 @@ def tokens_of(s: str) -> set[str]:
     for run in re.findall(r"[一-鿿]+", s):
         out |= {run} if len(run) == 1 else {run[i:i + 2] for i in range(len(run) - 1)}
     return out
+
+
+def ordered_tokens(s: str) -> list[str]:
+    """与 tokens_of 同口径（同一集合），但按查询中首次出现顺序返回（去重）。
+
+    锚点探针用查询词序选锚：查询前部的词通常就是主题词，先试它们最容易
+    一次攒够候选；顺序本身不影响正确性（锚点只决定采样顺序，命中数仍精确验算）。
+    """
+    s = s.lower()
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in re.finditer(r"[a-z0-9]+|[一-鿿]+", s):
+        run = m.group(0)
+        toks = [run] if run.isascii() else (
+            [run] if len(run) == 1 else [run[i:i + 2] for i in range(len(run) - 1)])
+        for t in toks:
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+    return out

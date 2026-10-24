@@ -259,8 +259,15 @@ def memory_brief(task: str, k: int = 5, project: str = "") -> dict:
         db.add(m.AuditLog(app_id=u.app_id, user_id=u.user_id, action="brief",
                           fact_ids=[i.insight_id for i in insights]))
         db.commit()
+        # 第二十轮「织网简报」：胜出集的诱导子图（与 REST 简报同口径）。
+        from app.links import induced_edges
+
+        graph = {"nodes": [{"id": i.insight_id, "subject": i.subject} for i in insights],
+                 "edges": induced_edges(db, u.app_id, u.user_id,
+                                        [i.insight_id for i in insights])}
         return {"insights": [i.model_dump() for i in insights],
                 "reminders": [reminder_out(r).model_dump() for r in fired],
+                "graph": graph,
                 "degraded": bool(meta.get("degraded")),
                 "degraded_reason": meta.get("degraded_reason")}
 
@@ -358,6 +365,21 @@ def memory_links(insight_id: str) -> dict:
                         "subject": node.subject, "content": node.content,
                         "active": node.valid_to is None})
         return {"insight_id": insight_id, "links": out}
+
+
+@mcp.tool()
+def memory_graph_stats() -> dict:
+    """看自己记忆网的形状：节点/边/密度、孤点率、枢纽、社群、桥、矛盾张力。
+
+    只读快照，不承诺毫秒级——简报才走 50ms 快路径。网越织越密、孤点越
+    少，说明经验之间真的连成了结构，而不是一堆散点。
+    """
+    with _session() as (db, u):
+        if not memory_enabled(db, u):
+            return {"error": "memory_disabled", "note": "该用户未同意开启记忆，经验库为空"}
+        from app.graph_stats import compute_graph_stats
+
+        return compute_graph_stats(db, u.app_id, u.user_id)
 
 
 @mcp.tool()

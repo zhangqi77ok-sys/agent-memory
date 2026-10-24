@@ -8,18 +8,30 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_, select, text
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import UserContext
 from app.distill import KINDS
+from app.edge_learning import (
+    find_spread_edge,
+    strength_on_applied,
+    strength_on_rejected,
+)
 from app.embeddings import GeminiEmbedder, cosine
 from app.extract import MAX_SUBJECT_LEN, InvalidExtraction, decide, is_injection, norm, same_subject, strip_injection
-from app.links import contradiction_pairs, migrate_links, spread_from, weave_on_write
+from app.links import (
+    contradiction_pairs,
+    create_link,
+    migrate_links,
+    spread_from,
+    weave_on_write,
+)
 from app.models import (
     AuditLog,
     BriefDelivery,
+    BriefDeliveryEdge,
     MemoryInsight,
     MemoryInsightToken,
     MemoryLink,
@@ -187,7 +199,7 @@ def backflow_for_episode(db: Session, ep: TaskEpisode) -> dict:
         BriefDelivery.consumed_at.is_(None),
         BriefDelivery.created_at >= ep_created - timedelta(days=BACKFLOW_WINDOW_DAYS),
         BriefDelivery.created_at <= ep_created + timedelta(hours=1))))
-    stats = {"deliveries": 0, "credited": 0}
+    stats = {"deliveries": 0, "credited": 0, "edges_updated": 0}
     now = _now()
     for d in deliveries:
         if d.project and ep.project and d.project != ep.project:
@@ -211,6 +223,24 @@ def backflow_for_episode(db: Session, ep: TaskEpisode) -> dict:
             row.confidence = _confidence(row.feedback_pos or 0, row.feedback_neg or 0,
                                           row.auto_pos or 0, row.auto_neg or 0)
             stats["credited"] += 1
+            # 第二十轮「边学习」：这条经验若是经某条边扩散进简报的，顺着
+            # 交付边找到那条边，按任务成败改边权。partial 只记 applied、
+            # 不改强度：用上了但成败未分，边权不背这个锅。边已关闭
+            # （版本滚动迁边）时只记账，不改旧边。
+            for erow in db.scalars(select(BriefDeliveryEdge).where(
+                    BriefDeliveryEdge.delivery_id == d.id,
+                    BriefDeliveryEdge.insight_id == iid,
+                    BriefDeliveryEdge.applied.is_(False))):
+                erow.applied = True
+                link = db.get(MemoryLink, erow.link_id)
+                if link is None or link.valid_to is not None:
+                    continue
+                if ep.outcome == "success":
+                    link.strength = strength_on_applied(link.strength or 0.5)
+                    stats["edges_updated"] += 1
+                elif ep.outcome == "failure":
+                    link.strength = strength_on_rejected(link.strength or 0.5)
+                    stats["edges_updated"] += 1
     if stats["deliveries"]:
         db.add(AuditLog(app_id=ep.app_id, user_id=ep.user_id, action="backflow",
                         fact_ids=[ep.id], decision=f"credited={stats['credited']}"))
@@ -612,6 +642,21 @@ def record_feedback(db: Session, u: UserContext, insight_id: str, *,
     row.last_used_at = _now()
     row.confidence = _confidence(row.feedback_pos or 0, row.feedback_neg or 0,
                                   row.auto_pos or 0, row.auto_neg or 0)
+    # 第二十轮「边学习」：人工反馈同样归因到边——取这条经验最近一次未结账的
+    # 扩散交付（即最近一次简报经边带出它），按 helpful 改边权。直达/直写
+    # 的经验没有交付边，边权不动（反馈只动经验置信度，如上）。归因是近似：
+    # 反馈本身不带交付 id，最近一次未结账交付是最可能的“这次使用”。
+    erow = db.scalar(select(BriefDeliveryEdge).where(
+        BriefDeliveryEdge.app_id == u.app_id, BriefDeliveryEdge.user_id == u.user_id,
+        BriefDeliveryEdge.insight_id == insight_id,
+        BriefDeliveryEdge.applied.is_(False))
+        .order_by(BriefDeliveryEdge.created_at.desc()))
+    if erow is not None:
+        erow.applied = True
+        link = db.get(MemoryLink, erow.link_id)
+        if link is not None and link.valid_to is None:
+            link.strength = (strength_on_applied(link.strength or 0.5) if helpful
+                             else strength_on_rejected(link.strength or 0.5))
     db.add(AuditLog(app_id=u.app_id, user_id=u.user_id, action="feedback",
                     fact_ids=[row.id]))
     db.flush()
@@ -732,7 +777,12 @@ def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
                     conflict_pairs += 1
     # 矛盾裁决（第十六轮）：只认织网留下的 contradicts 边——那是判定器/规则
     # 明确表过态的矛盾；同主题共存但没有边的（见上方 conflicts 计数）仍只上报。
+    # 第二十轮「条件分化」：裁决前先看输家——有与胜家不同的适用情境、且
+    # 自己攒过证据（被用过/被反馈过）的，不退役：它不是错的，只是在不同
+    # 条件下成立。关掉 contradicts 边（不再是对立），改连一条 related 边
+    # 标注这次分化；只有同条件且证据更弱时才退役。
     adjudicated = 0
+    differentiated = 0
     by_id = {r.id: r for r in rows}
     links = list(db.scalars(select(MemoryLink).where(
         MemoryLink.relation == "contradicts", MemoryLink.valid_to.is_(None),
@@ -747,6 +797,18 @@ def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
                     + (winner.auto_pos or 0) + (winner.auto_neg or 0))
         if gap < ADJUDICATE_GAP or evidence < ADJUDICATE_MIN_EVIDENCE or loser.pinned:
             continue
+        loser_evidence = ((loser.feedback_pos or 0) + (loser.feedback_neg or 0)
+                          + (loser.auto_pos or 0) + (loser.auto_neg or 0))
+        if (loser_evidence >= 1 and (loser.applies_when or "").strip()
+                and norm(loser.applies_when or "") != norm(winner.applies_when or "")):
+            link.valid_to = now
+            create_link(db, loser.app_id, loser.user_id,
+                        ("insight", winner.id), ("insight", loser.id),
+                        "related", 0.5, "rule")
+            differentiated += 1
+            db.add(AuditLog(app_id=loser.app_id, user_id=loser.user_id, action="consolidate",
+                            fact_ids=[winner.id, loser.id], decision="differentiate"))
+            continue
         loser.valid_to = now
         link.valid_to = now
         adjudicated += 1
@@ -754,7 +816,7 @@ def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
                         fact_ids=[winner.id, loser.id], decision="adjudicate"))
     db.commit()
     return {"decayed": decayed, "merged": merged, "conflicts": conflict_pairs,
-            "adjudicated": adjudicated, "retired": retired}
+            "adjudicated": adjudicated, "differentiated": differentiated, "retired": retired}
 
 
 def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
@@ -869,19 +931,18 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
     # 不再像从前那样两条相反指导一声不吭地并排递给 agent。
     conflicts = contradiction_pairs(db, u.app_id, u.user_id,
                                     [row.id for _, row, _ in winners])
-    # 记账要 ORM 行：候选阶段只搬了轻量列，赢家（≤k 条）再按 id 回表取行
-    orm_by_id = {}
+    # 曝光记账一条批量 UPDATE（不用逐行取 ORM 行再 +1 再 flush）：
+    # 候选阶段只搬了轻量列，k 次逐行 UPDATE + k 次 after_update 事件是简报尾巴
+    # 的主要零碎开销；Core UPDATE 不触发 after_update，正好配合 models 层
+    # “非文本更新跳过倒排同步”（即使触发，use_count 也不是文本属性）。
+    # 语义与旧代码一致：NULL 按 0 计（旧代码 orm.use_count or 0），
+    # last_used_at 照旧不刷新（第十六轮口径）。
     if winners:
-        orm_by_id = {r.id: r for r in db.scalars(select(MemoryInsight).where(
-            MemoryInsight.id.in_([row.id for _, row, _ in winners])))}
+        db.execute(update(MemoryInsight).where(
+            MemoryInsight.id.in_([row.id for _, row, _ in winners])).values(
+                use_count=func.coalesce(MemoryInsight.use_count, 0) + 1))
     out: list[InsightOut] = []
     for score, row, reason in winners:
-        orm = orm_by_id.get(row.id)
-        if orm is not None:
-            # 第十六轮起曝光只记 use_count（曝光数），不再刷新 last_used_at：
-            # 递出去 ≠ 用上了，反复曝光反复续命正是审查点名的马太效应回路；
-            # last_used_at 只由应用回流与人工反馈刷新，衰减/遗忘才量得到真闲置。
-            orm.use_count = (orm.use_count or 0) + 1
         out.append(InsightOut(insight_id=row.id, kind=row.kind, subject=row.subject,
                               content=row.content, applies_when=row.applies_when,
                               score=round(score, 4), reason=reason,
@@ -893,11 +954,73 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
                               verified=True if row.verified is None else bool(row.verified),
                               agent=row.agent,
                               evidence_chained=bool(row.evidence_chained)))
+    # 第二十轮「抽象阶梯」：胜出的原则（kind=principle）把它的泛化支撑
+    # 经验一并带上——原则是顶，支撑是底，简报自顶向下递出一小段阶梯。
+    # 支撑不占 k 名额（它是原则的脚注，不是 competing 候选），但受 token
+    # 预算约束；不进交付记录（回流只给胜出的原则结账，不给脚注），
+    # 也不记交付边（避免未结账的交付边污染人工反馈的归因）。
+    seen_ids = {row.id for _, row, _ in winners}
+    for pscore, prow, _ in winners:
+        if prow.kind != "principle":
+            continue
+        sup_links = list(db.scalars(select(MemoryLink).where(
+            MemoryLink.app_id == u.app_id, MemoryLink.user_id == u.user_id,
+            MemoryLink.valid_to.is_(None), MemoryLink.relation == "generalizes",
+            MemoryLink.src_kind == "insight", MemoryLink.src_id == prow.id,
+            MemoryLink.dst_kind == "insight")))
+        if not sup_links:
+            continue
+        sup_rows = list(db.scalars(select(MemoryInsight).where(
+            MemoryInsight.id.in_([lnk.dst_id for lnk in sup_links]),
+            MemoryInsight.valid_to.is_(None),
+            or_(MemoryInsight.muted.is_(False), MemoryInsight.muted.is_(None)))))
+        by_id = {r.id: r for r in sup_rows}
+        cands = [(lnk, by_id[lnk.dst_id]) for lnk in sup_links
+                 if lnk.dst_id in by_id and lnk.dst_id not in seen_ids]
+        # 同项目支撑优先，其次置信度；每原则最多 2 条
+        cands.sort(key=lambda t: ((t[1].project == project) if project else False,
+                                  t[1].confidence or 0.5), reverse=True)
+        for link, srow in cands[:2]:
+            cost = _est_tokens(srow.content)
+            if used + cost > token_budget:
+                continue
+            used += cost
+            seen_ids.add(srow.id)
+            srow.use_count = (srow.use_count or 0) + 1
+            out.append(InsightOut(
+                insight_id=srow.id, kind=srow.kind, subject=srow.subject,
+                content=srow.content, applies_when=srow.applies_when,
+                score=round(pscore * (link.strength or 0.5), 4),
+                reason="principle_support",
+                confidence=round(srow.confidence, 4)
+                if srow.confidence is not None else 0.5,
+                project=srow.project, source_episode_id=srow.source_episode_id,
+                conflicts_with=[], linked_from=prow.id,
+                verified=True if srow.verified is None else bool(srow.verified),
+                agent=srow.agent,
+                evidence_chained=bool(srow.evidence_chained)))
     if winners:
         # 交付记录（第十六轮）：结果回流靠它把后续任务的成败结给这批经验
-        db.add(BriefDelivery(app_id=u.app_id, user_id=u.user_id, project=project,
-                             task=task[:500],
-                             insight_ids=[row.id for _, row, _ in winners]))
+        delivery = BriefDelivery(app_id=u.app_id, user_id=u.user_id, project=project,
+                                 task=task[:500],
+                                 insight_ids=[row.id for _, row, _ in winners])
+        db.add(delivery)
+        # 第二十轮「边学习」的记账：扩散带出的赢家，记下它经哪条边进来。
+        # 直达的赢家没有边；只有 reason == "linked" 的才有 linked_from。
+        # flush 先把 _id 默认值落到 delivery.id 上，后面结账时按 delivery_id 找边。
+        db.flush()
+        for _, row, reason in winners:
+            if reason != "linked":
+                continue
+            via = linked_from.get(row.id)
+            if via is None:
+                continue
+            edge = find_spread_edge(db, u.app_id, u.user_id, via, row.id)
+            if edge is None:
+                continue
+            db.add(BriefDeliveryEdge(app_id=u.app_id, user_id=u.user_id,
+                                     delivery_id=delivery.id, link_id=edge.id,
+                                     insight_id=row.id))
     # 曝光计数当场提交：brief 从第十轮起是「读 + 记账」，若只 flush 不 commit，
     # 调用方会话会一直攥着写事务——REST 与直调在同一进程交替出现时能把库锁死
     # （SQLite 实测 database is locked；PG 上则是行锁干等）。简报的账自己结清，

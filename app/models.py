@@ -2,7 +2,23 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, String, Text, UniqueConstraint, delete, event, insert, select, text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    delete,
+    event,
+    insert,
+    inspect,
+    select,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
@@ -231,6 +247,23 @@ class BriefDelivery(UserScoped, Base):
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class BriefDeliveryEdge(UserScoped, Base):
+    """简报扩散交付边（第二十轮「边学习」）：简报经哪条边带出了哪条经验。
+
+    回流/反馈结账时顺着它找到边、改边权。applied 表示这条交付后来被证实
+    或否决过（边级只结一次账）；边若已关闭（版本滚动迁边），只记 applied，
+    不再改已关闭边的强度。
+    """
+
+    __tablename__ = "brief_delivery_edge"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
+    delivery_id: Mapped[str] = mapped_column(String(32), index=True)
+    link_id: Mapped[str] = mapped_column(String(32), index=True)
+    insight_id: Mapped[str] = mapped_column(String(32), index=True)
+    applied: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class AdminAudit(Base):
     """管理端审计（第十九轮）：每次跨用户查看留痕。
 
@@ -270,6 +303,10 @@ class MemoryLink(UserScoped, Base):
     origin: Mapped[str] = mapped_column(String(16), default="rule")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 第二十轮：闲置衰减的结清锚点（上次衰减结清的时间）。巡检按「自上次被
+    # 扩散交付或上次结清以来」的整月数衰减，锚点保证同一段闲置只扣一次。
+    decayed_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
     __table_args__ = (
         Index("ix_link_src", "src_kind", "src_id"),
         Index("ix_link_dst", "dst_kind", "dst_id"),
@@ -341,6 +378,20 @@ def _register_posting_events(model, table, id_key: str, text_of) -> None:
 
     @event.listens_for(model, "after_update")
     def _upd(mapper, connection, target):
+        # 非文本更新跳过倒排同步：简报 use_count、反馈计数这类更新占绝大多数，
+        # 文本属性一个没动时 token 集必然没变，现行“先查一次现存集合比对”
+        # 的 SELECT 纯属浪费——简报每递 k 条就要为 k 次 use_count 各付一次。
+        # 判定失败时回落同步（宁可多查，不可漏同步）；同值重设仍算 changed，
+        # 走同步（与现行行为一致，只是没省下那次查询）。
+        try:
+            state = inspect(target)
+            text_attrs = [a for a in ("subject", "content", "applies_when")
+                          if a in mapper.attrs.keys()]
+            if text_attrs and not any(
+                    state.attrs[a].history.has_changes() for a in text_attrs):
+                return
+        except Exception:
+            pass
         _posting_sync(connection, table, id_key, target, text_of(target))
 
     @event.listens_for(model, "after_delete")
