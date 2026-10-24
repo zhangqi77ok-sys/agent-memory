@@ -383,6 +383,28 @@ def memory_graph_stats() -> dict:
 
 
 @mcp.tool()
+def memory_consolidation_report() -> dict:
+    """看最近一次睡眠巩固的结果：合并了哪些重复记忆、剪了哪些死边、
+    强化了哪些一起被想起的连接、从共用经验里抽象出了哪些原则。
+
+    睡眠巩固是空闲巡检，不进简报路径；报告按用户记，上一轮是何时跑的、
+    做了什么，这里一并返回。还没有跑过时 report 为 None。
+    """
+    with _session() as (db, u):
+        if not memory_enabled(db, u):
+            return {"error": "memory_disabled", "note": "该用户未同意开启记忆，经验库为空"}
+        from sqlalchemy import select as _select
+
+        from app.sleep import report_to_dict
+
+        row = db.scalar(_select(m.ConsolidationReport).where(
+            m.ConsolidationReport.app_id == u.app_id,
+            m.ConsolidationReport.user_id == u.user_id,
+        ).order_by(m.ConsolidationReport.run_at.desc()))
+        return {"report": report_to_dict(row)}
+
+
+@mcp.tool()
 def memory_skills_export(project: str = "", min_confidence: float = 0.5) -> dict:
     """把经验库里高置信的经验编译成 Skills 文件（SKILL.md / AGENTS.md）。
 

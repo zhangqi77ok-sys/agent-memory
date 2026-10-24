@@ -454,6 +454,13 @@ def main() -> None:  # pragma: no cover
                     wstats = weave_links(db, linker=linker)
                     if wstats["linked"] or wstats["generalized"] or wstats["pruned"]:
                         log.info("weave_links: %s", wstats)
+                    # 睡眠巩固（第二十一轮）：从使用证据重组——共用强化/建边、
+                    # 死边剪除、事实合并、共用簇抽象；各项自带门限，每小时跑安全
+                    from app.sleep import sleep_consolidate
+                    sstats = sleep_consolidate(db, linker=linker)
+                    if any(sstats[k] for k in ("merged", "pruned", "strengthened",
+                                               "linked", "generalized")):
+                        log.info("sleep_consolidate: %s", sstats)
                     # 轨迹骨架化（第十七轮）：提炼完的旧轨迹只留骨架，与巡检同节拍
                     from app.episodes import skeletonize_episodes
                     sk = skeletonize_episodes(db, retention_days=settings.episode_skeleton_days)

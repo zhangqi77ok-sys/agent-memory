@@ -90,6 +90,21 @@ export interface GraphStats {
   tensions: { link_id: string; src: GraphNode; dst: GraphNode; same_community: boolean }[]
 }
 
+/** 睡眠巩固报告（第二十一轮）：最新一轮巩固做了什么 */
+export interface ConsolidationReport {
+  run_at: string | null
+  merged: number
+  merged_pairs: { keeper_id: string; loser_id: string; keeper_subject: string; loser_subject: string }[]
+  pruned: number
+  pruned_links: string[]
+  strengthened: number
+  strengthened_links: string[]
+  linked: number
+  linked_ids: string[]
+  generalized: number
+  generalized_ids: { id: string; subject: string }[]
+}
+
 /** 前瞻记忆（第十七轮）：当 condition 发生时提醒做 action */
 export interface Reminder {
   reminder_id: string

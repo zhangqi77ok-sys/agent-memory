@@ -264,6 +264,30 @@ class BriefDeliveryEdge(UserScoped, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class ConsolidationReport(UserScoped, Base):
+    """睡眠巩固报告（第二十一轮）：每用户每轮一行（含全零行）。
+
+    全零行不是废数据——它是共用强化的水位：下一轮只看本行 run_at 之后
+    新产生的简报交付，同一段共用历史不重复加权。merged_pairs 记保留者与
+    败者的 id 与主题、generalized 记新原则的 id 与主题，供面板直接展示；
+    其余三类只记 id 清单（边无主题可展示，只报数量）。
+    """
+
+    __tablename__ = "consolidation_report"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
+    run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    merged: Mapped[int] = mapped_column(Integer, default=0)
+    merged_pairs: Mapped[list] = mapped_column(JSON, default=list)
+    pruned: Mapped[int] = mapped_column(Integer, default=0)
+    pruned_links: Mapped[list] = mapped_column(JSON, default=list)
+    strengthened: Mapped[int] = mapped_column(Integer, default=0)
+    strengthened_links: Mapped[list] = mapped_column(JSON, default=list)
+    linked: Mapped[int] = mapped_column(Integer, default=0)
+    linked_ids: Mapped[list] = mapped_column(JSON, default=list)
+    generalized: Mapped[int] = mapped_column(Integer, default=0)
+    generalized_ids: Mapped[list] = mapped_column(JSON, default=list)
+
+
 class AdminAudit(Base):
     """管理端审计（第十九轮）：每次跨用户查看留痕。
 

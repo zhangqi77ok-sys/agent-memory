@@ -24,6 +24,7 @@ import type { InsightItem, Job, MemoryItem, Reminder, Settings } from './types'
 import AdminPanel from './components/AdminPanel.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import ConsentPage from './components/ConsentPage.vue'
+import ConsolidationPanel from './components/ConsolidationPanel.vue'
 import GraphStatsPanel from './components/GraphStatsPanel.vue'
 import InsightsPanel from './components/InsightsPanel.vue'
 import JobsList from './components/JobsList.vue'
@@ -66,7 +67,7 @@ function saveServiceKey() {
     notice.value = '服务密钥已清除'
   }
 }
-const view = ref<'memories' | 'insights' | 'reminders' | 'graph' | 'admin'>('memories')
+const view = ref<'memories' | 'insights' | 'reminders' | 'graph' | 'sleep' | 'admin'>('memories')
 const insights = ref<InsightItem[]>([])
 const reminders = ref<Reminder[]>([])
 
@@ -388,6 +389,7 @@ onMounted(async () => {
       <button type="button" class="btn" :class="{ 'btn-primary': view === 'insights' }" data-testid="tab-insights" @click="view = 'insights'">经验</button>
       <button type="button" class="btn" :class="{ 'btn-primary': view === 'reminders' }" data-testid="tab-reminders" @click="view = 'reminders'">前瞻记忆</button>
       <button type="button" class="btn" :class="{ 'btn-primary': view === 'graph' }" data-testid="tab-graph" @click="view = 'graph'">网结构</button>
+      <button type="button" class="btn" :class="{ 'btn-primary': view === 'sleep' }" data-testid="tab-sleep" @click="view = 'sleep'">睡眠巩固</button>
       <button type="button" class="btn" :class="{ 'btn-primary': view === 'admin' }" data-testid="tab-admin" @click="view = 'admin'">管理端</button>
     </div>
 
@@ -406,6 +408,7 @@ onMounted(async () => {
       @dismiss="onDismissReminder"
     />
     <GraphStatsPanel v-if="view === 'graph'" />
+    <ConsolidationPanel v-if="view === 'sleep'" />
     <AdminPanel v-if="view === 'admin'" />
 
     <JobsList v-if="view === 'memories'" :jobs="jobs" />

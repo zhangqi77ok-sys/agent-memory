@@ -300,6 +300,23 @@ def graph_stats(u: UserContext = Depends(user_from_query),
     return compute_graph_stats(db, u.app_id, u.user_id)
 
 
+@router.get("/consolidation/latest")
+def consolidation_latest(u: UserContext = Depends(user_from_query),
+                         db: Session = Depends(get_db)):
+    """最新一次睡眠巩固报告（第二十一轮）：本轮合并了哪些、剪了哪些边、
+    强化了哪些连接、起草了哪些原则。无报告时 report 为 None——面板显示
+    “尚未巩固过”，而不是编一条空报告。
+    """
+    from app.sleep import report_to_dict
+
+    bind_user(db, u)
+    row = db.scalar(select(m.ConsolidationReport).where(
+        m.ConsolidationReport.app_id == u.app_id,
+        m.ConsolidationReport.user_id == u.user_id,
+    ).order_by(m.ConsolidationReport.run_at.desc()))
+    return {"report": report_to_dict(row)}
+
+
 @router.patch("/insights/{insight_id}", response_model=InsightListItem)
 def patch_insight(insight_id: str, req: InsightPatch,
                   u: UserContext = Depends(user_from_query), db: Session = Depends(get_db)):

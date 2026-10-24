@@ -1,6 +1,7 @@
 import type {
   AdminUserMemories,
   AdminUserRow,
+  ConsolidationReport,
   GraphStats,
   InsightItem,
   Job,
@@ -147,6 +148,11 @@ export function listInsights(): Promise<InsightItem[]> {
 /** 网结构统计（第二十轮）：节点/边/密度/孤点/枢纽/社群/桥/矛盾张力 */
 export function graphStats(): Promise<GraphStats> {
   return request<GraphStats>('/v1/me/graph/stats')
+}
+
+/** 最新睡眠巩固报告（第二十一轮）：合并/剪边/强化/建边/抽象各做了多少 */
+export function consolidationReport(): Promise<{ report: ConsolidationReport | null }> {
+  return request<{ report: ConsolidationReport | null }>('/v1/me/consolidation/latest')
 }
 
 export async function patchInsight(
