@@ -302,9 +302,10 @@ def classify_pair(a: NodeView, b: NodeView, cos: float | None,
 
 
 class LlmLinker:
-    """关联判定器：与提炼器共用 OpenAI 兼容端点。只做两件事——判一对记忆的
-    关系、在巡检抽象时把一组同构经验起草成一条通用原则。输出一律 JSON、
-    解析失败按「无判定」处理，绝不让判定器故障污染写路径。"""
+    """关联判定器：与提炼器共用 OpenAI 兼容端点。只做三件事——判一对记忆的
+    关系、在巡检抽象时把一组同构经验起草成一条通用原则、在矛盾分化时把
+    一对条件分流的经验综合成一条原则。输出一律 JSON、解析失败按「无判定」
+    处理，绝不让判定器故障污染写路径。"""
 
     _JUDGE_SYSTEM = """你是记忆关联判定器。给你两条记忆（主题/内容/适用情境），判断它们的关系：
 supports（互相佐证同一做法）/ contradicts（做法正面对立，不能同时成立）/
@@ -368,6 +369,34 @@ relation 仍按 A 相对 B 的关系填（A refines B 就填 refines）。
         if not out or not str(out.get("subject") or "").strip():
             return None
         return (str(out["subject"]).strip(), str(out.get("content") or "").strip(),
+                str(out.get("applies_when") or "").strip())
+
+    _SYNTHESIZE_SYSTEM = """你是经验综合器。给你一对曾经被判定为矛盾、但后来发现
+各在不同情境下成立的经验（胜家与输家：主题/内容/适用情境/证据条数），起草
+一条陈述条件分流的原则：明确说明哪条在什么情境下成立、另一条在什么情境
+下成立，让后人不用再从两条经验里自己推条件。
+只输出 JSON：{"subject":"稳定短主题","content":"一到两句，写清条件分流",
+"applies_when":"两者情境的并集或上位情境"}。content 例如“A 在 X 情境成立、
+B 在 Y 情境成立”。若两条经验其实是同一条件下的真矛盾（没有可分流的
+情境差），输出 {"subject":""}。"""
+
+    def synthesize_condition(self, winner: NodeView, loser: NodeView,
+                             winner_evidence: int = 0, loser_evidence: int = 0,
+                             ) -> tuple[str, str, str] | None:
+        """分化即综合：胜家/输家各在不同情境下成立时，起草一条条件分流原则。
+        空 subject 或空 content 都视为「综合不成」返回 None（调用方分化照常，
+        不硬编自然语言）；调用失败同样返回 None（见 _call）。"""
+        text = (f"胜家：主题={winner.subject}；内容={winner.content}；"
+                f"情境={winner.applies_when}；证据={winner_evidence} 条\n"
+                f"输家：主题={loser.subject}；内容={loser.content}；"
+                f"情境={loser.applies_when}；证据={loser_evidence} 条")
+        out = self._call(self._SYNTHESIZE_SYSTEM, text)
+        if not out or not str(out.get("subject") or "").strip():
+            return None
+        content = str(out.get("content") or "").strip()
+        if not content:
+            return None
+        return (str(out["subject"]).strip(), content,
                 str(out.get("applies_when") or "").strip())
 
 

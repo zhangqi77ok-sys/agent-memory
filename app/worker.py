@@ -460,8 +460,9 @@ def main() -> None:  # pragma: no cover
                         expire_memories(db, settings.memory_ttl_days)
                     # 经验生命周期巡检与 TTL 同一个小时节拍（第十一轮）：衰减/合并/矛盾计数
                     from app.episodes import consolidate_insights
-                    stats = consolidate_insights(db)
-                    if stats["decayed"] or stats["merged"] or stats["conflicts"]:
+                    stats = consolidate_insights(db, linker=linker)
+                    if stats["decayed"] or stats["merged"] or stats["conflicts"] \
+                            or stats["synthesized"]:
                         log.info("consolidate_insights: %s", stats)
                     # 织网巡检（第十五轮）：补边、矛盾落边、跨项目抽象，与生命周期同节拍
                     from app.links import weave_links

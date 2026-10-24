@@ -26,6 +26,7 @@ from app.links import (
     create_link,
     migrate_links,
     spread_from,
+    view_of,
     weave_on_write,
 )
 from app.models import (
@@ -748,7 +749,7 @@ def _pair_cosine(a: MemoryInsight, b: MemoryInsight) -> float | None:
     return cosine(va, vb)
 
 
-def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
+def consolidate_insights(db: Session, now: datetime | None = None, linker=None) -> dict:
     """经验生命周期巡检（第十一轮）：衰减、合并、矛盾标记。Worker 每小时跑一轮。
 
     - 衰减（第二十二轮遗忘曲线）：基线 = max(最后使用, 衰减锚点 decayed_until)；
@@ -769,8 +770,8 @@ def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
     - 真遗忘（第十六轮）：闲置超 180 天、从未被应用（applied_count=0）、从未有
       正面证据（人工好评与自动成功皆无）的经验关行退出召回——衰减下限 0.1 还留
       约 58% 排序权重，那不叫遗忘，叫赖着不走。关行不真删，面板与导出仍可见。
-    返回 {"decayed": n, "merged": n, "conflicts": n, "adjudicated": n, "retired": n}，
-    自己 commit。"""
+    返回 {"decayed": n, "merged": n, "conflicts": n, "adjudicated": n, "retired": n,
+    "differentiated": n, "synthesized": n}，自己 commit。"""
     now = now or _now()
     rows = list(db.scalars(select(MemoryInsight).where(MemoryInsight.valid_to.is_(None))))
     decayed = 0
@@ -858,6 +859,7 @@ def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
     # 标注这次分化；只有同条件且证据更弱时才退役。
     adjudicated = 0
     differentiated = 0
+    synthesized = 0
     by_id = {r.id: r for r in rows}
     links = list(db.scalars(select(MemoryLink).where(
         MemoryLink.relation == "contradicts", MemoryLink.valid_to.is_(None),
@@ -883,6 +885,37 @@ def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
             differentiated += 1
             db.add(AuditLog(app_id=loser.app_id, user_id=loser.user_id, action="consolidate",
                             fact_ids=[winner.id, loser.id], decision="differentiate"))
+            # 第二十四轮「分化即综合」：分化到此为止还不够——“什么条件下用
+            # 哪边”要落成一条可复用的原则，挂在两边之上。无 linker 或起草
+            # 失败/返回空时分化照常（related 边已建）；判定器抛异常绝不回滚
+            # 分化、不拖垮巡检（与 weave 的 judge 失败处理同哲学）。
+            if linker is not None:
+                try:
+                    drafted = linker.synthesize_condition(
+                        view_of(winner), view_of(loser), evidence, loser_evidence)
+                except Exception as e:
+                    log.warning("synthesize_condition failed: %s", e)
+                    drafted = None
+                if drafted is not None:
+                    subject, content, applies_when = drafted
+                    u = UserContext(winner.app_id, winner.user_id)
+                    decision, gid = _apply_insight(
+                        db, u, _Cand("principle", subject, content, applies_when),
+                        None, None, project=None)
+                    # NOOP 表示同主题同内容已有一行：不再重复挂边，免得把
+                    # 一条非原则行当成原则挂到两边之上。
+                    if gid and decision != "noop":
+                        create_link(db, winner.app_id, winner.user_id,
+                                    ("insight", gid), ("insight", winner.id),
+                                    "generalizes", 0.8, "llm")
+                        create_link(db, winner.app_id, winner.user_id,
+                                    ("insight", gid), ("insight", loser.id),
+                                    "generalizes", 0.8, "llm")
+                        synthesized += 1
+                        db.add(AuditLog(app_id=winner.app_id, user_id=winner.user_id,
+                                        action="consolidate",
+                                        fact_ids=[winner.id, loser.id, gid],
+                                        decision="synthesize"))
             continue
         loser.valid_to = now
         link.valid_to = now
@@ -891,7 +924,8 @@ def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
                         fact_ids=[winner.id, loser.id], decision="adjudicate"))
     db.commit()
     return {"decayed": decayed, "merged": merged, "conflicts": conflict_pairs,
-            "adjudicated": adjudicated, "differentiated": differentiated, "retired": retired}
+            "adjudicated": adjudicated, "differentiated": differentiated, "retired": retired,
+            "synthesized": synthesized}
 
 
 def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
