@@ -279,6 +279,8 @@ def _rank_insights(rows, scored, now, project):
             continue
         conf = row.confidence if row.confidence is not None else 0.5
         final *= 0.7 + 0.6 * conf
+        if getattr(row, "verified", True) is False:
+            final *= 0.85  # 未验证经验（第十六轮）：证据没对上轨迹原文，排序打折
         if project:
             if row.project == project:
                 final *= 1.15

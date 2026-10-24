@@ -129,7 +129,9 @@ def test_brief_counts_exposure(db):
     out = brief_for_task(db, U, "部署新服务，需要绑定端口", 5)
     db.commit()
     assert len(out) == 1 and out[0].source_episode_id is not None
-    assert row.use_count == 1 and row.last_used_at is not None
+    assert row.use_count == 1  # 曝光计数照旧
+    # 第十六轮起曝光不再刷新 last_used_at（断马太效应回路）：只有应用回流/人工反馈才算用过
+    assert row.last_used_at is None
 
 
 def test_rest_feedback_roundtrip(client, db):

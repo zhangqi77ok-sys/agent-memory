@@ -172,7 +172,10 @@ def _insight_item(i: m.MemoryInsight) -> InsightListItem:
         feedback_pos=i.feedback_pos or 0, feedback_neg=i.feedback_neg or 0,
         pinned=bool(i.pinned), muted=bool(i.muted), version=i.version,
         source_episode_id=i.source_episode_id, valid_from=i.valid_from,
-        last_used_at=i.last_used_at)
+        last_used_at=i.last_used_at,
+        verified=True if i.verified is None else bool(i.verified),
+        applied_count=i.applied_count or 0, auto_pos=i.auto_pos or 0,
+        auto_neg=i.auto_neg or 0)
 
 
 @router.get("/skills")

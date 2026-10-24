@@ -166,6 +166,11 @@ class InsightListItem(BaseModel):
     source_episode_id: str | None = None
     valid_from: datetime
     last_used_at: datetime | None = None
+    # 第十六轮：证据校验标记与应用/自动信号计数（面板上分得清曝光与真应用）
+    verified: bool = True
+    applied_count: int = 0
+    auto_pos: int = 0
+    auto_neg: int = 0
 
 
 class InsightPatch(BaseModel):
@@ -192,6 +197,8 @@ class InsightOut(BaseModel):
     # linked_from 是把它连带想起的那条经验 id（直接命中为空）
     conflicts_with: list[str] = []
     linked_from: str | None = None
+    # 第十六轮 verifier：提炼时的轨迹证据引文核对通过与否；未通过的排序已打折
+    verified: bool = True
 
 
 class BriefResponse(BaseModel):

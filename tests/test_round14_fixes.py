@@ -125,7 +125,9 @@ def test_brief_bookkeeping_still_applies(db):
     assert [o.insight_id for o in out] == [row.id]
     db.expire_all()
     again = db.get(m.MemoryInsight, row.id)
-    assert again.use_count == 1 and again.last_used_at is not None
+    assert again.use_count == 1  # 曝光记账仍当场落库（本例的原始目的）
+    # 第十六轮口径变更：曝光不再刷新 last_used_at，只有应用/反馈才刷（见第十六轮测试）
+    assert again.last_used_at is None
 
 
 # ---------- Postgres 专属：向量索引 + 向量通道 ----------

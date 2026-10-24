@@ -19,7 +19,9 @@ U = UserContext(app_id=settings.app_id, user_id="alice")
 PITFALL = InsightCandidate(
     kind="pitfall", subject="部署端口选择",
     content="部署前先探测端口占用，8080、8081 常被占用，不要逐个试错",
-    applies_when="部署或启动本地服务、需要绑定端口时")
+    applies_when="部署或启动本地服务、需要绑定端口时",
+    # 第十六轮：提炼须带轨迹原文引文过证据校验，否则标未验证、简报分打 0.85 折
+    evidence="在 8080 启动")
 
 
 class FakeDistiller:

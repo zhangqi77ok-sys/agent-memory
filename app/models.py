@@ -145,6 +145,17 @@ class MemoryInsight(UserScoped, Base):
     feedback_pos: Mapped[int] = mapped_column(Integer, default=0)
     feedback_neg: Mapped[int] = mapped_column(Integer, default=0)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 信任三件套（第十六轮）：use_count 是「曝光」（简报递出），applied_count 才是
+    # 「真被后续任务用上」（结果回流时记）——两者分开，马太效应才断得开：曝光不再
+    # 刷新 last_used_at，只有应用与人工反馈才算「用过」。auto_pos/auto_neg 是回流
+    # 产生的系统信号，进置信度时按半权计（任务成败不全是经验的功劳/过错）。
+    applied_count: Mapped[int] = mapped_column(Integer, default=0)
+    auto_pos: Mapped[int] = mapped_column(Integer, default=0)
+    auto_neg: Mapped[int] = mapped_column(Integer, default=0)
+    # 提炼证据校验（第十六轮 verifier）：提炼时附的轨迹原文引文验得过才为 True；
+    # 验不过的经验不删，但简报排序打折、面板可见——假经验进不了门还不至于，
+    # 先让它带标上岗、排在后面。
+    verified: Mapped[bool] = mapped_column(Boolean, default=True)
     # 用户策展（第十一轮）：置顶=简报必达（仍受条数与 token 预算约束），禁用=永不召回。
     # 记忆越自动越要给人留开关——这两列就是经验库对用户的「可见可编辑」承诺的落点。
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -156,6 +167,23 @@ class MemoryInsight(UserScoped, Base):
         Index("ix_insight_pinned_scope", "app_id", "user_id",
               sqlite_where=text("pinned = 1"), postgresql_where=text("pinned")),
     )
+
+
+class BriefDelivery(UserScoped, Base):
+    """简报交付记录（第十六轮）：每次 brief 递出了哪些经验，落一条。
+
+    结果回流的挂钩点：后续 episode 提交时，按用户+项目+时间窗找到未消费的
+    交付，把任务成败记回这些经验（applied/auto 信号）。consumed_at 非空表示
+    已回流过一次——一份简报只结一次账，防重复记功。
+    """
+
+    __tablename__ = "brief_delivery"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
+    project: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    task: Mapped[str] = mapped_column(Text, default="")  # 任务描述（截断存），仅作溯源
+    insight_ids: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class MemoryLink(UserScoped, Base):

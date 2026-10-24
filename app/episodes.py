@@ -17,7 +17,15 @@ from app.distill import KINDS
 from app.embeddings import GeminiEmbedder, cosine
 from app.extract import MAX_SUBJECT_LEN, InvalidExtraction, decide, is_injection, norm, same_subject, strip_injection
 from app.links import contradiction_pairs, migrate_links, spread_from, weave_on_write
-from app.models import AuditLog, MemoryInsight, MemoryInsightToken, TaskEpisode, _now
+from app.models import (
+    AuditLog,
+    BriefDelivery,
+    MemoryInsight,
+    MemoryInsightToken,
+    MemoryLink,
+    TaskEpisode,
+    _now,
+)
 from app.recall import (
     _candidates,
     _est_tokens,
@@ -89,7 +97,71 @@ def submit_episode(db: Session, u: UserContext, *, source: str, title: str,
                 return existing
         raise
     db.refresh(ep)
+    # 结果回流（第十六轮）：这次任务的成败，结给开工前简报递出的那批经验。
+    # 回流失败不能拖垮提交本身——episode 已经落库，账记不上只是少一次信号。
+    try:
+        backflow_for_episode(db, ep)
+    except Exception as e:
+        db.rollback()
+        log.warning("outcome backflow failed episode=%s: %s", ep.id, e)
     return ep
+
+
+BACKFLOW_WINDOW_DAYS = 7  # 简报→任务→提交的合理间隔；超窗的交付视为没赶上这次任务
+
+
+def _successor_of(db: Session, row: MemoryInsight) -> MemoryInsight | None:
+    """已关行的经验找它的现行版本：同用户同主题、版本号更高的现行行（取最新）。
+    回流时交付里记的可能是旧版本 id，功过要记到活着的那一行头上。"""
+    return db.scalars(select(MemoryInsight).where(
+        MemoryInsight.app_id == row.app_id, MemoryInsight.user_id == row.user_id,
+        MemoryInsight.subject == row.subject, MemoryInsight.version > row.version,
+        MemoryInsight.valid_to.is_(None)).order_by(MemoryInsight.valid_from.desc())).first()
+
+
+def backflow_for_episode(db: Session, ep: TaskEpisode) -> dict:
+    """自动结果回流（第十六轮）：把 episode 的成败记回此前简报递出的经验。
+
+    挂钩是 brief_delivery：同用户、项目相容（相等或任一为空）、交付在任务提交前
+    BACKFLOW_WINDOW_DAYS 内、尚未消费。每份交付只结一次账（consumed_at）。
+    记账口径：applied_count +1（这才叫「用上了」，与曝光 use_count 分开）、
+    last_used_at 刷新（闲置衰减从此重算）；成败进 auto_pos/auto_neg，
+    置信度按半权并入（任务成败不全赖经验）。自己 commit，返回统计。"""
+    ep_created = _aware(ep.created_at)
+    deliveries = list(db.scalars(select(BriefDelivery).where(
+        BriefDelivery.app_id == ep.app_id, BriefDelivery.user_id == ep.user_id,
+        BriefDelivery.consumed_at.is_(None),
+        BriefDelivery.created_at >= ep_created - timedelta(days=BACKFLOW_WINDOW_DAYS),
+        BriefDelivery.created_at <= ep_created + timedelta(hours=1))))
+    stats = {"deliveries": 0, "credited": 0}
+    now = _now()
+    for d in deliveries:
+        if d.project and ep.project and d.project != ep.project:
+            continue  # 项目明确不同：这份简报不是为这个任务递的（交付留待别的任务结账）
+        d.consumed_at = now
+        stats["deliveries"] += 1
+        for iid in d.insight_ids or []:
+            row = db.get(MemoryInsight, iid)
+            if row is None or row.app_id != ep.app_id or row.user_id != ep.user_id:
+                continue
+            if row.valid_to is not None:
+                row = _successor_of(db, row)
+                if row is None:
+                    continue
+            row.applied_count = (row.applied_count or 0) + 1
+            row.last_used_at = now
+            if ep.outcome == "success":
+                row.auto_pos = (row.auto_pos or 0) + 1
+            elif ep.outcome == "failure":
+                row.auto_neg = (row.auto_neg or 0) + 1
+            row.confidence = _confidence(row.feedback_pos or 0, row.feedback_neg or 0,
+                                          row.auto_pos or 0, row.auto_neg or 0)
+            stats["credited"] += 1
+    if stats["deliveries"]:
+        db.add(AuditLog(app_id=ep.app_id, user_id=ep.user_id, action="backflow",
+                        fact_ids=[ep.id], decision=f"credited={stats['credited']}"))
+    db.commit()
+    return stats
 
 
 # 提炼输入上限（第九轮）：steps 入口允许 200 步 × 每步约 4.5K 字符，整份渲染可达 90 万字符，
@@ -223,6 +295,10 @@ def _apply_insight(db: Session, u: UserContext, cand, episode_id: str,
     inh_neg = sum(r.feedback_neg or 0 for r in matched)
     inh_use = sum(r.use_count or 0 for r in matched)
     inh_succ = sum(r.success_count or 0 for r in matched)
+    # 第十六轮：自动回流信号与应用计数同属血统，一并继承
+    inh_applied = sum(r.applied_count or 0 for r in matched)
+    inh_auto_pos = sum(r.auto_pos or 0 for r in matched)
+    inh_auto_neg = sum(r.auto_neg or 0 for r in matched)
     if project is None and matched:
         project = matched[0].project
     closed_ids = []
@@ -234,9 +310,12 @@ def _apply_insight(db: Session, u: UserContext, cand, episode_id: str,
                         subject=cand.subject, content=cand.content,
                         applies_when=cand.applies_when, version=now_version,
                         source_episode_id=episode_id, project=project,
-                        confidence=_confidence(inh_pos, inh_neg),
+                        confidence=_confidence(inh_pos, inh_neg, inh_auto_pos, inh_auto_neg),
                         use_count=inh_use, success_count=inh_succ,
-                        feedback_pos=inh_pos, feedback_neg=inh_neg)
+                        feedback_pos=inh_pos, feedback_neg=inh_neg,
+                        applied_count=inh_applied, auto_pos=inh_auto_pos,
+                        auto_neg=inh_auto_neg,
+                        verified=bool(getattr(cand, "verified", True)))
     db.add(row)
     db.flush()
     _embed_insight(embedder, row)
@@ -272,11 +351,13 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
     decisions: list[str] = []
     insight_ids: list[str] = []
     dropped_gate = 0
+    unverified = 0
     for cand in candidates:
         kind = getattr(cand, "kind", "")
         subject = redact(str(getattr(cand, "subject", "") or "")).strip()
         content = redact(str(getattr(cand, "content", "") or "")).strip()
         applies_when = redact(str(getattr(cand, "applies_when", "") or "")).strip()
+        evidence = redact(str(getattr(cand, "evidence", "") or "")).strip()
         if kind not in KINDS or not subject or not content:
             continue
         if len(subject) > MAX_SUBJECT_LEN:
@@ -285,8 +366,16 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
             dropped_gate += 1
             log.warning("insight dropped by injection gate episode=%s subject=%s", ep.id, subject[:40])
             continue
-        decision, iid = _apply_insight(db, u, _Cand(kind, subject, content, applies_when), ep.id,
-                                       embedder, project=ep.project)
+        # 证据校验（第十六轮 verifier）：提炼声称的经验必须能在轨迹原文里指出处。
+        # 验不过不丢弃——标 verified=False 入库，简报排序打折、面板上看得见；
+        # 直接丢弃会把「引文摘抄不规范但经验是真的」一并误杀，降权更诚实。
+        verified = _evidence_ok(evidence, text)
+        if not verified:
+            unverified += 1
+            log.warning("insight unverified episode=%s subject=%s", ep.id, subject[:40])
+        decision, iid = _apply_insight(
+            db, u, _Cand(kind, subject, content, applies_when, verified=verified),
+            ep.id, embedder, project=ep.project)
         decisions.append(decision)
         if iid:
             insight_ids.append(iid)
@@ -311,10 +400,28 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
 
 class _Cand:
     """_apply_insight 只需要四个字段；用小对象承接清洗后的候选，避免依赖提炼器的具体类型。"""
-    __slots__ = ("kind", "subject", "content", "applies_when")
+    __slots__ = ("kind", "subject", "content", "applies_when", "verified")
 
-    def __init__(self, kind: str, subject: str, content: str, applies_when: str):
+    def __init__(self, kind: str, subject: str, content: str, applies_when: str,
+                 verified: bool = True):
         self.kind, self.subject, self.content, self.applies_when = kind, subject, content, applies_when
+        self.verified = verified
+
+
+MIN_EVIDENCE_LEN = 8  # 引文太短（如「报错」二字）证明不了什么，按没证据处理
+
+
+def _evidence_ok(evidence: str, rendered: str) -> bool:
+    """证据校验：引文规范化（折叠空白、忽略大小写）后必须是轨迹原文的子串。
+
+    核对对象就是提炼器实际看到的那份渲染文本——它声称摘自原文，
+    就必须在原文里找得到；模型把经验改写成自己的话再当引文，验不过。"""
+    if not evidence:
+        return False
+    ev = norm(evidence)
+    if len(ev) < MIN_EVIDENCE_LEN:
+        return False
+    return ev in norm(rendered)
 
 
 def claim_episode(db: Session) -> TaskEpisode | None:
@@ -367,10 +474,13 @@ def run_episode_once(db: Session, distiller, embedder: GeminiEmbedder | None = N
     return db.get(TaskEpisode, ep.id)
 
 
-def _confidence(pos: int, neg: int) -> float:
+def _confidence(pos: int, neg: int, auto_pos: int = 0, auto_neg: int = 0) -> float:
     """置信度 = 反馈的拉普拉斯平滑胜率 (1+pos)/(2+pos+neg)：无反馈 0.5（中性先验），
-    证据越多越往两端走。第十一轮的衰减在此值上做，不改计数本身。"""
-    return (1 + pos) / (2 + pos + neg)
+    证据越多越往两端走。第十一轮的衰减在此值上做，不改计数本身。
+    第十六轮：自动回流信号（auto_*）按半权并入——任务成败受很多因素影响，
+    系统推断的功过只值人工反馈的一半。"""
+    ap, an = 0.5 * auto_pos, 0.5 * auto_neg
+    return (1 + pos + ap) / (2 + pos + neg + ap + an)
 
 
 def record_feedback(db: Session, u: UserContext, insight_id: str, *,
@@ -391,7 +501,11 @@ def record_feedback(db: Session, u: UserContext, insight_id: str, *,
         row.feedback_neg = (row.feedback_neg or 0) + 1
     if task_outcome == "success":
         row.success_count = (row.success_count or 0) + 1
-    row.confidence = _confidence(row.feedback_pos or 0, row.feedback_neg or 0)
+    # 第十六轮：人工反馈意味着这条经验真被用过——刷新 last_used_at（简报曝光不再刷，
+    # 见 brief_for_task），置信度重算时把自动回流信号按半权一并计入。
+    row.last_used_at = _now()
+    row.confidence = _confidence(row.feedback_pos or 0, row.feedback_neg or 0,
+                                  row.auto_pos or 0, row.auto_neg or 0)
     db.add(AuditLog(app_id=u.app_id, user_id=u.user_id, action="feedback",
                     fact_ids=[row.id]))
     db.flush()
@@ -402,6 +516,9 @@ DECAY_GRACE_DAYS = 30      # 闲置宽限：最后活跃 30 天内置信度不�
 DECAY_FACTOR = 0.95        # 宽限后每满 30 天置信度乘一次
 CONFIDENCE_FLOOR = 0.1     # 衰减下限：再老也不归零（证据还在，只是久未验证）
 MERGE_COSINE = 0.95        # 向量近似到这个程度且同主题，视为同一条经验
+RETIRE_IDLE_DAYS = 180     # 真遗忘线（第十六轮）：闲置超半年、从未被应用、从未有过正面证据
+ADJUDICATE_GAP = 0.30      # 矛盾裁决门槛：置信度差距至少这么大才动手
+ADJUDICATE_MIN_EVIDENCE = 2  # 且胜方至少攒了这么多条证据（人工+自动），防先验互相残杀
 
 
 def _aware(dt):
@@ -427,12 +544,20 @@ def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
       record_feedback 按计数重算，等于用新证据覆盖衰减，这正是想要的语义。
     - 合并：同用户内 same_subject 且（内容规范化相同，或向量余弦 ≥ 0.95）的现行
       经验对，保留置信度高者（并列取更新的），另一行关行、计数并入保留行、留审计。
-    - 矛盾：合并后仍同主题共存、内容不同的现行对只计数上报，不自动裁决——哪条对
-      是判断题，留给用户在面板里看（GET /v1/me/insights）。
-    返回 {"decayed": n, "merged": n, "conflicts": n}，自己 commit。"""
+    - 矛盾：合并后仍同主题共存、内容不同的现行对只计数上报；有 contradicts 边
+      （第十五轮织网）且证据悬殊的对在下方裁决环节处理。
+    - 裁决（第十六轮）：被 contradicts 边连着的经验对，置信度差 ≥ 0.30 且胜方
+      证据（人工+自动）≥ 2 条时，负方关行、边关行——矛盾不再无限期并存。
+      置顶的经验是用户亲手策展的，永不自动裁掉。
+    - 真遗忘（第十六轮）：闲置超 180 天、从未被应用（applied_count=0）、从未有
+      正面证据（人工好评与自动成功皆无）的经验关行退出召回——衰减下限 0.1 还留
+      约 58% 排序权重，那不叫遗忘，叫赖着不走。关行不真删，面板与导出仍可见。
+    返回 {"decayed": n, "merged": n, "conflicts": n, "adjudicated": n, "retired": n}，
+    自己 commit。"""
     now = now or _now()
     rows = list(db.scalars(select(MemoryInsight).where(MemoryInsight.valid_to.is_(None))))
     decayed = 0
+    retired = 0
     for row in rows:
         conf = row.confidence if row.confidence is not None else 0.5
         idle = (now - _aware(row.last_used_at or row.valid_from)).days
@@ -442,6 +567,13 @@ def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
             if new_conf < conf - 1e-9:
                 row.confidence = round(new_conf, 4)
                 decayed += 1
+        if (idle > RETIRE_IDLE_DAYS and not row.pinned
+                and not (row.applied_count or 0) and not (row.success_count or 0)
+                and not (row.feedback_pos or 0) and not (row.auto_pos or 0)):
+            row.valid_to = now
+            retired += 1
+            db.add(AuditLog(app_id=row.app_id, user_id=row.user_id, action="consolidate",
+                            fact_ids=[row.id], decision="retire"))
     groups: dict[tuple[str, str], list[MemoryInsight]] = {}
     for row in rows:
         groups.setdefault((row.app_id, row.user_id), []).append(row)
@@ -464,14 +596,41 @@ def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
                     keeper.success_count = (keeper.success_count or 0) + (loser.success_count or 0)
                     keeper.feedback_pos = (keeper.feedback_pos or 0) + (loser.feedback_pos or 0)
                     keeper.feedback_neg = (keeper.feedback_neg or 0) + (loser.feedback_neg or 0)
-                    keeper.confidence = _confidence(keeper.feedback_pos, keeper.feedback_neg)
+                    keeper.applied_count = (keeper.applied_count or 0) + (loser.applied_count or 0)
+                    keeper.auto_pos = (keeper.auto_pos or 0) + (loser.auto_pos or 0)
+                    keeper.auto_neg = (keeper.auto_neg or 0) + (loser.auto_neg or 0)
+                    keeper.confidence = _confidence(keeper.feedback_pos, keeper.feedback_neg,
+                                                    keeper.auto_pos, keeper.auto_neg)
                     db.add(AuditLog(app_id=app_id, user_id=user_id, action="consolidate",
                                     fact_ids=[keeper.id, loser.id], decision="merge"))
                     merged += 1
                 else:
                     conflict_pairs += 1
+    # 矛盾裁决（第十六轮）：只认织网留下的 contradicts 边——那是判定器/规则
+    # 明确表过态的矛盾；同主题共存但没有边的（见上方 conflicts 计数）仍只上报。
+    adjudicated = 0
+    by_id = {r.id: r for r in rows}
+    links = list(db.scalars(select(MemoryLink).where(
+        MemoryLink.relation == "contradicts", MemoryLink.valid_to.is_(None),
+        MemoryLink.src_kind == "insight", MemoryLink.dst_kind == "insight")))
+    for link in links:
+        a, b = by_id.get(link.src_id), by_id.get(link.dst_id)
+        if a is None or b is None or a.valid_to is not None or b.valid_to is not None:
+            continue
+        winner, loser = (a, b) if (a.confidence or 0.5) >= (b.confidence or 0.5) else (b, a)
+        gap = abs((a.confidence or 0.5) - (b.confidence or 0.5))
+        evidence = ((winner.feedback_pos or 0) + (winner.feedback_neg or 0)
+                    + (winner.auto_pos or 0) + (winner.auto_neg or 0))
+        if gap < ADJUDICATE_GAP or evidence < ADJUDICATE_MIN_EVIDENCE or loser.pinned:
+            continue
+        loser.valid_to = now
+        link.valid_to = now
+        adjudicated += 1
+        db.add(AuditLog(app_id=loser.app_id, user_id=loser.user_id, action="consolidate",
+                        fact_ids=[winner.id, loser.id], decision="adjudicate"))
     db.commit()
-    return {"decayed": decayed, "merged": merged, "conflicts": conflict_pairs}
+    return {"decayed": decayed, "merged": merged, "conflicts": conflict_pairs,
+            "adjudicated": adjudicated, "retired": retired}
 
 
 def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
@@ -490,7 +649,8 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
     第十轮补：门槛仍只看原始相关性（标定不被污染），排序分再乘两个乘子——
     置信度乘子 0.7+0.6×confidence（反馈攒出的信任，0.7–1.3），项目乘子
     （同项目 1.15、跨项目 0.85、通用经验 1.0；跨项目只是降权不排除，通用经验不该被埋没）。
-    递出的经验记 use_count/last_used_at（曝光计数；「真用了且有效」由反馈闭环回流）。
+    递出的经验记 use_count（曝光计数；第十六轮起不再刷新 last_used_at），
+    并落一条 brief_delivery 供结果回流结账；「真用了且有效」由回流与反馈闭环记。
     第十一轮补：排序三要素齐了——相关性（门槛+基础分）× 置信度 × 新近性；
     用户置顶的经验必达（垫底分入选、reason='pinned'），禁用的永不召回。
     第十四轮补：候选改走索引化召回（与事实侧同口径，见 app/recall.py）——
@@ -509,7 +669,8 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
             MemoryInsight.content, MemoryInsight.applies_when,
             MemoryInsight.confidence, MemoryInsight.project,
             MemoryInsight.pinned, MemoryInsight.valid_from,
-            MemoryInsight.last_used_at, MemoryInsight.source_episode_id]
+            MemoryInsight.last_used_at, MemoryInsight.source_episode_id,
+            MemoryInsight.verified]
     if qvec is not None:
         cols += [MemoryInsight.embedding, MemoryInsight.embed_model]
     scope = (MemoryInsight.app_id == u.app_id, MemoryInsight.user_id == u.user_id,
@@ -580,8 +741,10 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
     for score, row, reason in winners:
         orm = orm_by_id.get(row.id)
         if orm is not None:
+            # 第十六轮起曝光只记 use_count（曝光数），不再刷新 last_used_at：
+            # 递出去 ≠ 用上了，反复曝光反复续命正是审查点名的马太效应回路；
+            # last_used_at 只由应用回流与人工反馈刷新，衰减/遗忘才量得到真闲置。
             orm.use_count = (orm.use_count or 0) + 1
-            orm.last_used_at = _now()
         out.append(InsightOut(insight_id=row.id, kind=row.kind, subject=row.subject,
                               content=row.content, applies_when=row.applies_when,
                               score=round(score, 4), reason=reason,
@@ -589,7 +752,13 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
                               if row.confidence is not None else 0.5,
                               project=row.project, source_episode_id=row.source_episode_id,
                               conflicts_with=conflicts.get(row.id, []),
-                              linked_from=linked_from.get(row.id)))
+                              linked_from=linked_from.get(row.id),
+                              verified=True if row.verified is None else bool(row.verified)))
+    if winners:
+        # 交付记录（第十六轮）：结果回流靠它把后续任务的成败结给这批经验
+        db.add(BriefDelivery(app_id=u.app_id, user_id=u.user_id, project=project,
+                             task=task[:500],
+                             insight_ids=[row.id for _, row, _ in winners]))
     # 曝光计数当场提交：brief 从第十轮起是「读 + 记账」，若只 flush 不 commit，
     # 调用方会话会一直攥着写事务——REST 与直调在同一进程交替出现时能把库锁死
     # （SQLite 实测 database is locked；PG 上则是行锁干等）。简报的账自己结清，
