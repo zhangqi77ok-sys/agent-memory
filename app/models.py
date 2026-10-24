@@ -158,6 +158,35 @@ class MemoryInsight(UserScoped, Base):
     )
 
 
+class MemoryLink(UserScoped, Base):
+    """记忆之间的关联边（第十五轮「织网」）：信息是点，这张表存线。
+
+    只连记忆↔记忆（fact/insight 两类节点），不做世界实体图谱。relation：
+    supports 佐证 / contradicts 矛盾 / refines 细化 / generalizes 泛化 /
+    related 相关；前三者中的 supports、contradicts、related 语义对称，
+    服务层按端点 id 序规范化存储，避免同一条边存两行。origin 标注边的
+    出身：rule=确定性规则推出（结构提示）、llm=判定器语义判断、
+    manual=用户手动连。边跟随端点生死：端点关行（版本滚动）时由
+    migrate_links 迁移或关边，端点硬删时入口显式清边。
+    """
+
+    __tablename__ = "memory_link"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
+    src_kind: Mapped[str] = mapped_column(String(16))  # fact|insight
+    src_id: Mapped[str] = mapped_column(String(32))
+    dst_kind: Mapped[str] = mapped_column(String(16))
+    dst_id: Mapped[str] = mapped_column(String(32))
+    relation: Mapped[str] = mapped_column(String(16))
+    strength: Mapped[float] = mapped_column(Float, default=0.5)  # 0..1，扩散激活按它打折
+    origin: Mapped[str] = mapped_column(String(16), default="rule")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    __table_args__ = (
+        Index("ix_link_src", "src_kind", "src_id"),
+        Index("ix_link_dst", "dst_kind", "dst_id"),
+    )
+
+
 class MemoryFactToken(Base):
     """事实的关键词倒排索引（第十四轮补完）：一行一个 (事实, token)。
 

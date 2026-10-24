@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app import models as m
 from app.api.memories import _audit, get_db
 from app.auth import UserContext, bind_user, user_ctx, user_from_query
+from app.links import neighbors_of
 from app.schemas import (
     CONSENT_VERSION,
     CorrectRequest,
@@ -112,6 +113,8 @@ def clear_all(u: UserContext = Depends(user_from_query), db: Session = Depends(g
         db.execute(delete(m.MemoryFactToken).where(m.MemoryFactToken.fact_id.in_(fact_ids)))
     if insight_ids:
         db.execute(delete(m.MemoryInsightToken).where(m.MemoryInsightToken.insight_id.in_(insight_ids)))
+    # 关联边（第十五轮）全清：节点都没了，网自然不留
+    db.execute(delete(m.MemoryLink).where(*_mine(m.MemoryLink, u)))
     for i in fact_ids:
         db.merge(m.ForgottenId(id=i, kind="fact"))
     for i in pref_ids:
@@ -231,6 +234,29 @@ def list_insights(u: UserContext = Depends(user_from_query), db: Session = Depen
         *_mine(m.MemoryInsight, u), m.MemoryInsight.valid_to.is_(None))
         .order_by(m.MemoryInsight.valid_from.desc()))
     return [_insight_item(i) for i in rows]
+
+
+@router.get("/insights/{insight_id}/links")
+def insight_links(insight_id: str, u: UserContext = Depends(user_from_query),
+                  db: Session = Depends(get_db)):
+    """一条经验的邻里（第十五轮「织网」）：它和哪些记忆连着、什么关系、边的出身。
+    记忆不再是孤行——用户能看见网长什么样。不存在或不是本人的 → 404（同 patch 口径）。"""
+    bind_user(db, u)
+    row = db.scalar(select(m.MemoryInsight).where(
+        *_mine(m.MemoryInsight, u), m.MemoryInsight.id == insight_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="insight not found")
+    out = []
+    for link, okind, oid in neighbors_of(db, u.app_id, u.user_id, "insight", insight_id):
+        node = db.get(m.MemoryInsight if okind == "insight" else m.MemoryFact, oid)
+        out.append({
+            "link_id": link.id, "relation": link.relation, "strength": link.strength,
+            "origin": link.origin,
+            "node": None if node is None else {
+                "kind": okind, "id": oid, "subject": node.subject, "content": node.content,
+                "active": node.valid_to is None},
+        })
+    return {"insight_id": insight_id, "links": out}
 
 
 @router.patch("/insights/{insight_id}", response_model=InsightListItem)

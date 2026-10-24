@@ -41,6 +41,8 @@ class FactOut(BaseModel):
     content: str
     score: float
     reason: str
+    # 第十五轮：沿关联边扩散带出时，标明是被哪条事实连带想起的（直接命中为空）
+    linked_from: str | None = None
 
 
 class RecallResponse(BaseModel):
@@ -186,6 +188,10 @@ class InsightOut(BaseModel):
     confidence: float = 0.5
     project: str | None = None
     source_episode_id: str | None = None
+    # 第十五轮「织网」：与同份简报里其它经验的矛盾边（对方 id 列表）；沿边扩散带出时
+    # linked_from 是把它连带想起的那条经验 id（直接命中为空）
+    conflicts_with: list[str] = []
+    linked_from: str | None = None
 
 
 class BriefResponse(BaseModel):

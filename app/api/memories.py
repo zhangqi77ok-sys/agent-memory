@@ -8,6 +8,7 @@ from app.auth import UserContext, bind_user, user_ctx, user_from_query
 from app.config import settings
 from app.db import SessionLocal
 from app.embeddings import build_embedder
+from app.links import delete_links_touching
 from app.recall import recall_facts
 from app.schemas import RecallRequest, RecallResponse, WriteAccepted, WriteRequest
 
@@ -88,6 +89,9 @@ def forget(item_id: str, u: UserContext = Depends(user_from_query), db: Session 
         # Core delete 不触发 ORM 事件：倒排行在这里显式清（探针是 JOIN 取数，
         # 残留也命不中，但别让孤儿攒着）
         db.execute(delete(m.MemoryFactToken).where(m.MemoryFactToken.fact_id.in_(ids)))
+        # 关联边（第十五轮）同理显式清：节点硬删，边不能留
+        for i in ids:
+            delete_links_touching(db, u.app_id, u.user_id, "fact", i)
         for i in ids:
             db.merge(m.ForgottenId(id=i, kind="fact"))
         # TODO(v1): 受影响的 session_summary 重新生成、来源 session_message 删除（Worker 任务）
@@ -115,6 +119,8 @@ def forget(item_id: str, u: UserContext = Depends(user_from_query), db: Session 
         ids = [v.id for v in versions]
         db.execute(delete(m.MemoryInsight).where(m.MemoryInsight.id.in_(ids)))
         db.execute(delete(m.MemoryInsightToken).where(m.MemoryInsightToken.insight_id.in_(ids)))
+        for i in ids:
+            delete_links_touching(db, u.app_id, u.user_id, "insight", i)
         for i in ids:
             db.merge(m.ForgottenId(id=i, kind="insight"))
         _audit(db, u, "forget", ids)

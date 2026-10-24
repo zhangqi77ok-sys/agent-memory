@@ -195,8 +195,10 @@ def _apply_fact(db: Session, job: m.MemoryJob, subject: str, content: str, propo
     if decision == "NOOP":
         return "noop", None
     now = datetime.now(timezone.utc)
+    closed_ids = []
     for row in active:
         row.valid_to = now
+        closed_ids.append(row.id)
     version = max((row.version for row in active), default=0) + 1
     created = m.MemoryFact(
         app_id=job.app_id, user_id=job.user_id, subject=subject, content=content,
@@ -206,6 +208,11 @@ def _apply_fact(db: Session, job: m.MemoryJob, subject: str, content: str, propo
     db.flush()
     if embedder is not None:
         _embed_fact(embedder, created)
+    # 织网（第十五轮）：旧版本的关联边迁到新版本（矛盾边在迁移里关掉）
+    from app.links import migrate_links
+
+    for old_id in closed_ids:
+        migrate_links(db, job.app_id, job.user_id, "fact", old_id, created.id)
     return decision.lower(), created.id
 
 
@@ -255,7 +262,8 @@ def _lock_user(db: Session, job: m.MemoryJob) -> None:
                    {"k": f"{job.app_id}:{job.user_id}"})
 
 
-def _extract_and_write(db: Session, job: m.MemoryJob, extractor, embedder=None) -> tuple[str, list[str]]:
+def _extract_and_write(db: Session, job: m.MemoryJob, extractor, embedder=None,
+                       linker=None) -> tuple[str, list[str]]:
     if not _memory_on(db, job):
         return "skip", []
     _lock_user(db, job)
@@ -272,10 +280,17 @@ def _extract_and_write(db: Session, job: m.MemoryJob, extractor, embedder=None) 
         decisions.append(decision)
         if new_id:
             ids.append(new_id)
+            if decision in ("add", "update") and candidate.kind != "preference":
+                # 织网（第十五轮）：新事实落库即连边
+                from app.links import weave_on_write
+
+                fact_row = db.get(m.MemoryFact, new_id)
+                if fact_row is not None:
+                    weave_on_write(db, job.app_id, job.user_id, fact_row, linker=linker)
     return _summarize(decisions), ids
 
 
-def process_job(db: Session, job: m.MemoryJob, extractor, embedder=None) -> str:
+def process_job(db: Session, job: m.MemoryJob, extractor, embedder=None, linker=None) -> str:
     """处理一条已领取的任务。成功、跳过、丢弃非法输出都把 status 置为 done。可重试错误向外抛。"""
     job_id = job.id
     current = db.scalar(select(m.MemoryJob).where(m.MemoryJob.id == job_id).with_for_update())
@@ -285,7 +300,8 @@ def process_job(db: Session, job: m.MemoryJob, extractor, embedder=None) -> str:
         db.commit()
         return "done"
     try:
-        decision, fact_ids = _extract_and_write(db, current, extractor, embedder=embedder)
+        decision, fact_ids = _extract_and_write(db, current, extractor, embedder=embedder,
+                                                linker=linker)
     except InvalidExtraction:
         db.rollback()
         current = db.scalar(select(m.MemoryJob).where(m.MemoryJob.id == job_id).with_for_update())
@@ -297,14 +313,14 @@ def process_job(db: Session, job: m.MemoryJob, extractor, embedder=None) -> str:
     return _finish(db, current, decision, fact_ids)
 
 
-def run_once(db: Session, extractor, embedder=None) -> m.MemoryJob | None:
+def run_once(db: Session, extractor, embedder=None, linker=None) -> m.MemoryJob | None:
     """领一条并处理。没有待处理任务时返回 None。失败写入 last_error，超限后 status=dead。"""
     job = claim_job(db)
     if not job:
         return None
     job_id = job.id
     try:
-        process_job(db, job, extractor, embedder=embedder)
+        process_job(db, job, extractor, embedder=embedder, linker=linker)
     except Exception as e:
         db.rollback()
         failed = db.get(m.MemoryJob, job_id)
@@ -337,8 +353,12 @@ def main() -> None:  # pragma: no cover
     extractor = build_extractor()
     distiller = build_distiller()
     embedder = build_embedder()
-    log.info("worker started prompt=%s embedding=%s", PROMPT_VERSION,
-             embedder.model if embedder is not None else "off")
+    from app.links import build_linker
+
+    linker = build_linker()  # 未配 LLM 时为 None：规则织网照常，语义判定缺席
+    log.info("worker started prompt=%s embedding=%s linker=%s", PROMPT_VERSION,
+             embedder.model if embedder is not None else "off",
+             "llm" if linker is not None else "rule")
     last_cleanup = 0.0
     while True:
         with WorkerSession() as db:
@@ -351,13 +371,18 @@ def main() -> None:  # pragma: no cover
                     stats = consolidate_insights(db)
                     if stats["decayed"] or stats["merged"] or stats["conflicts"]:
                         log.info("consolidate_insights: %s", stats)
+                    # 织网巡检（第十五轮）：补边、矛盾落边、跨项目抽象，与生命周期同节拍
+                    from app.links import weave_links
+                    wstats = weave_links(db, linker=linker)
+                    if wstats["linked"] or wstats["generalized"] or wstats["pruned"]:
+                        log.info("weave_links: %s", wstats)
                     last_cleanup = time.time()
                 except Exception as e:
                     log.warning("cleanup error: %s", e)
-            job = run_once(db, extractor, embedder=embedder)
+            job = run_once(db, extractor, embedder=embedder, linker=linker)
             ep = None
             for _ in range(5):  # 一轮最多连提 5 条：历史回放批量导入时不至于一条一轮慢慢磨（第八轮补）
-                ep = run_episode_once(db, distiller, embedder=embedder)
+                ep = run_episode_once(db, distiller, embedder=embedder, linker=linker)
                 if ep is None:
                     break
         time.sleep(_post_run_wait(job, ep))

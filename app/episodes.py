@@ -16,6 +16,7 @@ from app.auth import UserContext
 from app.distill import KINDS
 from app.embeddings import GeminiEmbedder, cosine
 from app.extract import MAX_SUBJECT_LEN, InvalidExtraction, decide, is_injection, norm, same_subject, strip_injection
+from app.links import contradiction_pairs, migrate_links, spread_from, weave_on_write
 from app.models import AuditLog, MemoryInsight, MemoryInsightToken, TaskEpisode, _now
 from app.recall import (
     _candidates,
@@ -224,9 +225,11 @@ def _apply_insight(db: Session, u: UserContext, cand, episode_id: str,
     inh_succ = sum(r.success_count or 0 for r in matched)
     if project is None and matched:
         project = matched[0].project
+    closed_ids = []
     for row in matched:
         if row is not same:
             row.valid_to = _now()
+            closed_ids.append(row.id)
     row = MemoryInsight(app_id=u.app_id, user_id=u.user_id, kind=cand.kind,
                         subject=cand.subject, content=cand.content,
                         applies_when=cand.applies_when, version=now_version,
@@ -237,6 +240,9 @@ def _apply_insight(db: Session, u: UserContext, cand, episode_id: str,
     db.add(row)
     db.flush()
     _embed_insight(embedder, row)
+    # 织网（第十五轮）：被关旧版本的关联边迁到新版本（矛盾边在迁移里关掉）
+    for old_id in closed_ids:
+        migrate_links(db, u.app_id, u.user_id, "insight", old_id, row.id)
     return decision.lower(), row.id
 
 
@@ -250,7 +256,8 @@ def _lock_user(db: Session, app_id: str, user_id: str) -> None:
                    {"k": f"{app_id}:{user_id}"})
 
 
-def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmbedder | None = None) -> str:
+def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmbedder | None = None,
+                    linker=None) -> str:
     """对一个 episode 做复盘提炼并入库，返回聚合裁决 update > add > noop（无产出为 empty）。
 
     提炼器可以是对象（.distill(text)）或可调用；单条经验被注入闸门拦下只丢弃该条，
@@ -283,6 +290,11 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
         decisions.append(decision)
         if iid:
             insight_ids.append(iid)
+            if decision in ("add", "update"):
+                # 织网（第十五轮）：新经验落库即连边，与已有经验建立关联
+                new_row = db.get(MemoryInsight, iid)
+                if new_row is not None:
+                    weave_on_write(db, u.app_id, u.user_id, new_row, linker=linker)
     ep.distill_status = "done"
     ep.locked_until = None
     ep.last_error = None
@@ -327,14 +339,15 @@ def claim_episode(db: Session) -> TaskEpisode | None:
     return ep
 
 
-def run_episode_once(db: Session, distiller, embedder: GeminiEmbedder | None = None) -> TaskEpisode | None:
+def run_episode_once(db: Session, distiller, embedder: GeminiEmbedder | None = None,
+                     linker=None) -> TaskEpisode | None:
     """worker 的一轮经验提炼。与 run_once 同构：坏输出整批丢弃并记 distill=discard；
     瞬时故障退回 pending 重试，超过上限标 failed 并留错误，不无限循环。"""
     ep = claim_episode(db)
     if ep is None:
         return None
     try:
-        distill_episode(db, ep, distiller, embedder)
+        distill_episode(db, ep, distiller, embedder, linker=linker)
     except InvalidExtraction:
         db.rollback()
         ep = db.get(TaskEpisode, ep.id)
@@ -525,6 +538,39 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
             break
         used += cost
         winners.append((score, row, reason))
+    # 扩散激活（第十五轮「织网」）：直接命中没占满名额时，沿关联边一跳把强相关
+    # 经验带出来（reason='linked'、linked_from 标明来历，分数按边强度打折）——
+    # 捞 A 时带出与 A 相连的 B，哪怕 B 与查询字面不像。矛盾边不扩散，只在下方标记。
+    linked_from: dict[str, str] = {}
+    if len(winners) < k:
+        have = {row.id for _, row, _ in winners}
+        spread = spread_from(db, u.app_id, u.user_id,
+                             [("insight", row.id, score) for score, row, _ in winners],
+                             "insight")
+        cand_ids = [i for i in spread if i not in have]
+        if cand_ids:
+            extra = {r.id: r for r in db.scalars(select(MemoryInsight).where(
+                MemoryInsight.id.in_(cand_ids),
+                MemoryInsight.app_id == u.app_id, MemoryInsight.user_id == u.user_id,
+                MemoryInsight.valid_to.is_(None),
+                or_(MemoryInsight.muted.is_(False), MemoryInsight.muted.is_(None))))}
+            for nid, (dscore, via) in sorted(spread.items(), key=lambda kv: kv[1][0],
+                                             reverse=True):
+                if len(winners) >= k:
+                    break
+                r = extra.get(nid)
+                if r is None:
+                    continue
+                cost = _est_tokens(r.content)
+                if used + cost > token_budget:
+                    continue
+                used += cost
+                winners.append((dscore, r, "linked"))
+                linked_from[nid] = via
+    # 矛盾标记（第十五轮）：同份简报里若有经验对被 contradicts 边连着，双方都标出来，
+    # 不再像从前那样两条相反指导一声不吭地并排递给 agent。
+    conflicts = contradiction_pairs(db, u.app_id, u.user_id,
+                                    [row.id for _, row, _ in winners])
     # 记账要 ORM 行：候选阶段只搬了轻量列，赢家（≤k 条）再按 id 回表取行
     orm_by_id = {}
     if winners:
@@ -541,7 +587,9 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
                               score=round(score, 4), reason=reason,
                               confidence=round(row.confidence, 4)
                               if row.confidence is not None else 0.5,
-                              project=row.project, source_episode_id=row.source_episode_id))
+                              project=row.project, source_episode_id=row.source_episode_id,
+                              conflicts_with=conflicts.get(row.id, []),
+                              linked_from=linked_from.get(row.id)))
     # 曝光计数当场提交：brief 从第十轮起是「读 + 记账」，若只 flush 不 commit，
     # 调用方会话会一直攥着写事务——REST 与直调在同一进程交替出现时能把库锁死
     # （SQLite 实测 database is locked；PG 上则是行锁干等）。简报的账自己结清，

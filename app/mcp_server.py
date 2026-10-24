@@ -281,6 +281,36 @@ def memory_feedback(insight_id: str, helpful: bool, task_outcome: str = "") -> d
 
 
 @mcp.tool()
+def memory_links(insight_id: str) -> dict:
+    """查看一条经验在记忆网里的邻里：它和哪些记忆连着、是什么关系、边有多强、出自规则还是语义判定。
+
+    记忆不是孤行：supports 是互相佐证的经验，contradicts 是与它正面对立的经验
+    （两者不能同时照做，需要裁决），refines/generalizes 是细化与泛化关系，
+    related 是相关但未定性的关联。insight_id 来自 memory_brief / memory_list。
+    """
+    with _session() as (db, u):
+        if not memory_enabled(db, u):
+            return {"links": [], "note": "该用户未同意开启记忆，经验库为空"}
+        row = db.scalar(select(m.MemoryInsight).where(
+            m.MemoryInsight.id == insight_id, m.MemoryInsight.app_id == u.app_id,
+            m.MemoryInsight.user_id == u.user_id))
+        if row is None:
+            return {"links": [], "error": "not_found", "note": "该 insight 不存在或不属于当前用户"}
+        from app.links import neighbors_of
+
+        out = []
+        for link, okind, oid in neighbors_of(db, u.app_id, u.user_id, "insight", insight_id):
+            node = db.get(m.MemoryInsight if okind == "insight" else m.MemoryFact, oid)
+            if node is None:
+                continue
+            out.append({"relation": link.relation, "strength": link.strength,
+                        "origin": link.origin, "kind": okind, "id": oid,
+                        "subject": node.subject, "content": node.content,
+                        "active": node.valid_to is None})
+        return {"insight_id": insight_id, "links": out}
+
+
+@mcp.tool()
 def memory_skills_export(project: str = "", min_confidence: float = 0.5) -> dict:
     """把经验库里高置信的经验编译成 Skills 文件（SKILL.md / AGENTS.md）。
 

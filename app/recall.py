@@ -330,4 +330,31 @@ def recall_facts(db: Session, u: UserContext, query: str, k: int, token_budget: 
         used += cost
         out.append(FactOut(fact_id=r.id, subject=r.subject, content=r.content, score=round(s, 4),
                            reason=reason))
+    # 扩散激活（第十五轮「织网」，与简报同口径）：名额没满时沿关联边带出相连事实，
+    # reason='linked' 且 linked_from 标明来历，分数按边强度打折，不冒充直接命中。
+    if len(out) < k:
+        from app.links import spread_from
+
+        have = {o.fact_id for o in out}
+        spread = spread_from(db, u.app_id, u.user_id,
+                             [("fact", o.fact_id, o.score) for o in out], "fact")
+        cand_ids = [i for i in spread if i not in have]
+        if cand_ids:
+            extra = {r.id: r for r in db.scalars(select(m.MemoryFact).where(
+                m.MemoryFact.id.in_(cand_ids),
+                m.MemoryFact.app_id == u.app_id, m.MemoryFact.user_id == u.user_id,
+                m.MemoryFact.valid_to.is_(None)))}
+            for nid, (dscore, via) in sorted(spread.items(), key=lambda kv: kv[1][0],
+                                             reverse=True):
+                if len(out) >= k:
+                    break
+                r = extra.get(nid)
+                if r is None:
+                    continue
+                cost = _est_tokens(r.content)
+                if used + cost > token_budget:
+                    continue
+                used += cost
+                out.append(FactOut(fact_id=r.id, subject=r.subject, content=r.content,
+                                   score=round(dscore, 4), reason="linked", linked_from=via))
     return out
