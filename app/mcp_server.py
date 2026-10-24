@@ -37,7 +37,14 @@ from app.auth import UserContext, bind_user
 from app.config import settings
 from app.db import SessionLocal
 from app.embeddings import build_embedder
-from app.episodes import brief_for_task, find_episode_by_key, record_feedback, submit_episode
+from app.episodes import (
+    brief_for_task,
+    find_episode_by_key,
+    record_fact_feedback,
+    record_feedback,
+    record_preference_feedback,
+    submit_episode,
+)
 from app.recall import recall_facts
 from app.schemas import CONSENT_VERSION, Message, WriteRequest
 
@@ -295,6 +302,48 @@ def memory_feedback(insight_id: str, helpful: bool, task_outcome: str = "") -> d
         return {"ok": True, "insight_id": row.id, "confidence": round(row.confidence, 4),
                 "feedback_pos": row.feedback_pos or 0, "feedback_neg": row.feedback_neg or 0,
                 "success_count": row.success_count or 0}
+
+
+@mcp.tool()
+def memory_fact_feedback(fact_id: str, helpful: bool) -> dict:
+    """回报一条事实到底准不准，让事实库越用越准（第二十三轮：事实级反馈）。
+
+    fact_id 来自 memory_search 的返回；helpful 表示这条事实这次核对下来
+    是不是真的。好评如一次新佐证、置信度上升，差评把置信度压下去；不回报，
+    事实置信度就只靠写入时佐证计数，错的事实永远 0.5 起步赖在库里。
+    """
+    with _session() as (db, u):
+        if not memory_enabled(db, u):
+            return {"ok": False, "error": "memory_disabled", "note": "该用户未同意开启记忆"}
+        try:
+            row = record_fact_feedback(db, u, fact_id, helpful=bool(helpful))
+        except ValueError:
+            db.rollback()
+            return {"ok": False, "error": "not_found", "note": "该事实不存在或不属于当前用户"}
+        db.commit()
+        return {"ok": True, "fact_id": row.id, "confidence": round(row.confidence, 4),
+                "support_count": row.support_count or 1,
+                "feedback_pos": row.feedback_pos or 0, "feedback_neg": row.feedback_neg or 0}
+
+
+@mcp.tool()
+def memory_preference_feedback(preference_id: str, helpful: bool) -> dict:
+    """回报一条偏好到底准不准（第二十三轮：偏好级反馈，与事实反馈同形）。
+
+    preference_id 来自 memory_search 的返回；helpful 表示这条偏好这次
+    是不是真的管用。"""
+    with _session() as (db, u):
+        if not memory_enabled(db, u):
+            return {"ok": False, "error": "memory_disabled", "note": "该用户未同意开启记忆"}
+        try:
+            row = record_preference_feedback(db, u, preference_id, helpful=bool(helpful))
+        except ValueError:
+            db.rollback()
+            return {"ok": False, "error": "not_found", "note": "该偏好不存在或不属于当前用户"}
+        db.commit()
+        return {"ok": True, "preference_id": row.id, "confidence": round(row.confidence, 4),
+                "support_count": row.support_count or 1,
+                "feedback_pos": row.feedback_pos or 0, "feedback_neg": row.feedback_neg or 0}
 
 
 @mcp.tool()

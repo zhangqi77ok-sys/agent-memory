@@ -113,6 +113,21 @@ export function deleteMemory(id: string): Promise<void> {
   return request<void>(`/v1/me/memories/${id}`, { method: 'DELETE' })
 }
 
+// 第二十三轮：事实/偏好级反馈（好评如一次新佐证，差评拉低置信度）
+export function feedbackFact(id: string, helpful: boolean): Promise<unknown> {
+  return request<unknown>('/v1/facts/feedback', {
+    method: 'POST',
+    body: JSON.stringify({ fact_id: id, helpful }),
+  })
+}
+
+export function feedbackPreference(id: string, helpful: boolean): Promise<unknown> {
+  return request<unknown>('/v1/preferences/feedback', {
+    method: 'POST',
+    body: JSON.stringify({ preference_id: id, helpful }),
+  })
+}
+
 export function clearAllMemories(): Promise<void> {
   return request<void>('/v1/me/memories', { method: 'DELETE' })
 }

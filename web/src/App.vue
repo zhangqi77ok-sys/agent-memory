@@ -8,6 +8,8 @@ import {
   deleteMemory,
   dismissReminder,
   exportMemories,
+  feedbackFact,
+  feedbackPreference,
   getServiceKey,
   getSettings,
   listInsights,
@@ -158,6 +160,24 @@ async function onDelete(id: string) {
     await deleteMemory(id)
     await loadAll()
     notice.value = '已删除' 
+  } catch (e) {
+    error.value = e instanceof ApiError ? e.message : String(e)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function onFeedback(item: { id: string; kind: string }, helpful: boolean) {
+  busy.value = true
+  error.value = ''
+  try {
+    if (item.kind === 'preference') {
+      await feedbackPreference(item.id, helpful)
+    } else {
+      await feedbackFact(item.id, helpful)
+    }
+    await loadAll()
+    notice.value = helpful ? '已记好评，置信度上升' : '已记差评，置信度下降'
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : String(e)
   } finally {
@@ -363,6 +383,7 @@ onMounted(async () => {
         :busy="busy"
         @correct="(c) => onCorrect(item.id, c)"
         @remove="onDelete(item.id)"
+        @feedback="(helpful) => onFeedback(item, helpful)"
       />
     </section>
 

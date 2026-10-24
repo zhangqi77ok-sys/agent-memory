@@ -66,6 +66,9 @@ class MemoryItem(BaseModel):
     # 第十七轮：佐证置信度与佐证次数（被独立来源重复证实的程度）
     confidence: float = 0.5
     support_count: int = 1
+    # 第二十三轮：人工好评/差评计数（事实级反馈后才非零）
+    feedback_pos: int = 0
+    feedback_neg: int = 0
 
 
 class MemoryPage(BaseModel):
@@ -150,6 +153,32 @@ class FeedbackOut(BaseModel):
     feedback_pos: int
     feedback_neg: int
     success_count: int
+
+
+class FactFeedbackRequest(UserScopedRequest):
+    fact_id: str = Field(min_length=1, max_length=32)
+    helpful: bool
+
+
+class FactFeedbackOut(BaseModel):
+    fact_id: str
+    confidence: float
+    support_count: int
+    feedback_pos: int
+    feedback_neg: int
+
+
+class PreferenceFeedbackRequest(UserScopedRequest):
+    preference_id: str = Field(min_length=1, max_length=32)
+    helpful: bool
+
+
+class PreferenceFeedbackOut(BaseModel):
+    preference_id: str
+    confidence: float
+    support_count: int
+    feedback_pos: int
+    feedback_neg: int
 
 
 class InsightListItem(BaseModel):

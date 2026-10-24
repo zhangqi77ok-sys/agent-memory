@@ -250,15 +250,29 @@ def support_confidence(support_count: int) -> float:
     return s / (s + 1)
 
 
+def fact_confidence(support_count: int, feedback_pos: int = 0, feedback_neg: int = 0) -> float:
+    """事实/偏好置信度（第二十三轮）：(S+P)/(S+P+N+1)，S = 佐证计数、P = 人工好评、
+    N = 人工差评——即佐证公式的拉普拉斯推广。无反馈时恒等于 support_confidence
+    （(S+0)/(S+0+0+1) = S/(S+1)），旧行数值不动；好评如一次新佐证，差评拉低，
+    正负相抵回中性。佐证与反馈共用此式，两处口径不再打架。"""
+    s = max(int(support_count or 1), 1)
+    p = max(int(feedback_pos or 0), 0)
+    n = max(int(feedback_neg or 0), 0)
+    return (s + p) / (s + p + n + 1)
+
+
 def _bump_support(rows: list, content: str, attr: str) -> None:
     """NOOP 的另一面（第十七轮）：内容被再次独立抽到 = 一次新佐证。
     此前 NOOP 直接丢弃，同一事实被说十次和被说一次在库里毫无区别；
     现在给命中的现行行记 support_count+1 并重算置信度（不新建版本，
-    内容没变就不该有版本噪音）。"""
+    内容没变就不该有版本噪音）。第二十三轮：重算用 fact_confidence——
+    反馈后若再被佐证，旧 support_confidence 会把负反馈洗掉；无反馈时
+    两式同值，旧行为不变。"""
     for row in rows:
         if norm(getattr(row, attr)) == norm(content):
             row.support_count = (row.support_count or 1) + 1
-            row.confidence = support_confidence(row.support_count)
+            row.confidence = fact_confidence(row.support_count,
+                                             row.feedback_pos or 0, row.feedback_neg or 0)
 
 
 def _apply_fact(db: Session, job: m.MemoryJob, subject: str, content: str, proposal: str,

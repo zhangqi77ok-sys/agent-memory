@@ -45,14 +45,16 @@ def _fact_item(f: m.MemoryFact) -> MemoryItem:
     return MemoryItem(id=f.id, kind="fact", subject=f.subject, content=f.content, version=f.version,
                       valid_from=f.valid_from, source_session_id=f.source_session_id,
                       confidence=f.confidence if f.confidence is not None else 0.5,
-                      support_count=f.support_count or 1)
+                      support_count=f.support_count or 1,
+                      feedback_pos=f.feedback_pos or 0, feedback_neg=f.feedback_neg or 0)
 
 
 def _pref_item(p: m.MemoryPreference) -> MemoryItem:
     return MemoryItem(id=p.id, kind="preference", subject=p.key, content=p.value, version=p.version,
                       valid_from=p.valid_from,
                       confidence=p.confidence if p.confidence is not None else 0.5,
-                      support_count=p.support_count or 1)
+                      support_count=p.support_count or 1,
+                      feedback_pos=p.feedback_pos or 0, feedback_neg=p.feedback_neg or 0)
 
 
 @router.get("/memories", response_model=MemoryPage)

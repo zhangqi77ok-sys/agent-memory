@@ -6,6 +6,7 @@ const props = defineProps<{ item: MemoryItem; busy?: boolean }>()
 const emit = defineEmits<{
   correct: [content: string]
   remove: []
+  feedback: [helpful: boolean]
 }>()
 
 const editing = ref(false)
@@ -52,6 +53,8 @@ function formatTime(iso: string) {
         置信 {{ Math.round((item.confidence ?? 0.5) * 100) }}% · 佐证 {{ item.support_count ?? 1 }}
       </span>
       <span class="spacer" />
+      <button type="button" class="btn btn-ghost" :disabled="busy" data-testid="feedback-helpful-btn" title="这条准：好评如一次新佐证，置信度上升" @click="emit('feedback', true)">有用</button>
+      <button type="button" class="btn btn-ghost" :disabled="busy" data-testid="feedback-unhelpful-btn" title="这条不准：差评把置信度压下去" @click="emit('feedback', false)">无用</button>
       <button type="button" class="btn btn-ghost" :disabled="busy" data-testid="edit-btn" @click="startEdit">纠正</button>
       <button type="button" class="btn btn-ghost" :disabled="busy" data-testid="delete-btn" @click="emit('remove')">删除</button>
     </div>

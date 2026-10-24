@@ -12,8 +12,26 @@ from app.auth import bind_user, user_ctx
 from app.config import settings
 from app.db import get_db
 from app.embeddings import build_embedder
-from app.episodes import brief_for_task, find_episode_by_key, record_feedback, submit_episode
-from app.schemas import BriefRequest, BriefResponse, EpisodeAccepted, EpisodeSubmitRequest, FeedbackOut, FeedbackRequest
+from app.episodes import (
+    brief_for_task,
+    find_episode_by_key,
+    record_fact_feedback,
+    record_feedback,
+    record_preference_feedback,
+    submit_episode,
+)
+from app.schemas import (
+    BriefRequest,
+    BriefResponse,
+    EpisodeAccepted,
+    EpisodeSubmitRequest,
+    FactFeedbackOut,
+    FactFeedbackRequest,
+    FeedbackOut,
+    FeedbackRequest,
+    PreferenceFeedbackOut,
+    PreferenceFeedbackRequest,
+)
 
 router = APIRouter(prefix="/v1")
 
@@ -89,3 +107,40 @@ def feedback(req: FeedbackRequest, db: Session = Depends(get_db)):
     return FeedbackOut(insight_id=row.id, confidence=round(row.confidence, 4),
                        feedback_pos=row.feedback_pos or 0, feedback_neg=row.feedback_neg or 0,
                        success_count=row.success_count or 0)
+
+
+@router.post("/facts/feedback", response_model=FactFeedbackOut)
+def fact_feedback(req: FactFeedbackRequest, db: Session = Depends(get_db)):
+    """事实级反馈入口（第二十三轮）：与 /v1/insights/feedback 同形——
+    未同意/已暂停、跨用户、不存在一律 404，不泄露存在性。"""
+    u = bind_user(db, user_ctx(req.user_id))
+    if not memory_enabled(db, u):
+        raise HTTPException(status_code=404, detail="fact not found")
+    try:
+        row = record_fact_feedback(db, u, req.fact_id, helpful=req.helpful)
+    except ValueError:
+        db.rollback()
+        raise HTTPException(status_code=404, detail="fact not found") from None
+    db.commit()
+    return FactFeedbackOut(fact_id=row.id, confidence=round(row.confidence, 4),
+                           support_count=row.support_count or 1,
+                           feedback_pos=row.feedback_pos or 0,
+                           feedback_neg=row.feedback_neg or 0)
+
+
+@router.post("/preferences/feedback", response_model=PreferenceFeedbackOut)
+def preference_feedback(req: PreferenceFeedbackRequest, db: Session = Depends(get_db)):
+    """偏好级反馈入口（第二十三轮）：与事实反馈同形。"""
+    u = bind_user(db, user_ctx(req.user_id))
+    if not memory_enabled(db, u):
+        raise HTTPException(status_code=404, detail="preference not found")
+    try:
+        row = record_preference_feedback(db, u, req.preference_id, helpful=req.helpful)
+    except ValueError:
+        db.rollback()
+        raise HTTPException(status_code=404, detail="preference not found") from None
+    db.commit()
+    return PreferenceFeedbackOut(preference_id=row.id, confidence=round(row.confidence, 4),
+                                 support_count=row.support_count or 1,
+                                 feedback_pos=row.feedback_pos or 0,
+                                 feedback_neg=row.feedback_neg or 0)

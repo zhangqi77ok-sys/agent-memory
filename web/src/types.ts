@@ -11,6 +11,9 @@ export interface MemoryItem {
   // 第十七轮：佐证置信度（被独立来源重复证实的程度）
   confidence?: number
   support_count?: number
+  // 第二十三轮：人工好评/差评计数（事实级反馈后才非零）
+  feedback_pos?: number
+  feedback_neg?: number
 }
 
 export interface MemoryPage {

@@ -75,6 +75,10 @@ class MemoryFact(UserScoped, Base):
     # 此前事实/偏好没有置信度概念——被说过一次和被证实五次排得一样靠前。
     confidence: Mapped[float] = mapped_column(Float, default=0.5)
     support_count: Mapped[int] = mapped_column(Integer, default=1)
+    # 事实级反馈（第二十三轮）：人工好评/差评计数，与佐证计数一起进
+    # fact_confidence（见 worker.py）——好评如一次新佐证，差评拉低置信度。
+    feedback_pos: Mapped[int] = mapped_column(Integer, default=0)
+    feedback_neg: Mapped[int] = mapped_column(Integer, default=0)
     embedding = mapped_column(Embedding, nullable=True)
     embed_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
@@ -94,6 +98,8 @@ class MemoryPreference(UserScoped, Base):
     value: Mapped[str] = mapped_column(Text)
     confidence: Mapped[float] = mapped_column(Float, default=0.5)  # 与事实同口径（第十七轮）
     support_count: Mapped[int] = mapped_column(Integer, default=1)
+    feedback_pos: Mapped[int] = mapped_column(Integer, default=0)  # 第二十三轮：与事实同口径
+    feedback_neg: Mapped[int] = mapped_column(Integer, default=0)
     embedding = mapped_column(Embedding, nullable=True)  # 第十八轮：偏好语义去重用
     embed_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

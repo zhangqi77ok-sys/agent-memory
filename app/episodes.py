@@ -32,9 +32,11 @@ from app.models import (
     AuditLog,
     BriefDelivery,
     BriefDeliveryEdge,
+    MemoryFact,
     MemoryInsight,
     MemoryInsightToken,
     MemoryLink,
+    MemoryPreference,
     TaskEpisode,
     _now,
 )
@@ -657,6 +659,59 @@ def record_feedback(db: Session, u: UserContext, insight_id: str, *,
         if link is not None and link.valid_to is None:
             link.strength = (strength_on_applied(link.strength or 0.5) if helpful
                              else strength_on_rejected(link.strength or 0.5))
+    db.add(AuditLog(app_id=u.app_id, user_id=u.user_id, action="feedback",
+                    fact_ids=[row.id]))
+    db.flush()
+    return row
+
+
+def record_fact_feedback(db: Session, u: UserContext, fact_id: str, *,
+                         helpful: bool) -> MemoryFact:
+    """事实级反馈（第二十三轮）：经验反馈闭环在事实上的对位——直接 memory_write
+    的用户终于有了事实回流通道。
+
+    只认本人名下的事实（跨用户/不存在一律 ValueError，REST 转 404，不泄露
+    存在性；与 record_feedback 同形，不查 valid_to——已关闭的旧版本同样可
+    被评价，评价落到该行本身）。好评记 feedback_pos、差评记 feedback_neg，
+    置信度当场按 worker.fact_confidence 重算并落库（无反馈时恒等于旧佐证
+    公式，旧行数值不动）。事实没有扩散交付边，不碰边权；也没有闲置衰减
+    时钟，不刷时间。调用方负责 commit。"""
+    from app.worker import fact_confidence
+
+    row = db.scalar(select(MemoryFact).where(
+        MemoryFact.id == fact_id, MemoryFact.app_id == u.app_id,
+        MemoryFact.user_id == u.user_id))
+    if row is None:
+        raise ValueError("fact not found")
+    if helpful:
+        row.feedback_pos = (row.feedback_pos or 0) + 1
+    else:
+        row.feedback_neg = (row.feedback_neg or 0) + 1
+    row.confidence = fact_confidence(row.support_count or 1,
+                                     row.feedback_pos or 0, row.feedback_neg or 0)
+    db.add(AuditLog(app_id=u.app_id, user_id=u.user_id, action="feedback",
+                    fact_ids=[row.id]))
+    db.flush()
+    return row
+
+
+def record_preference_feedback(db: Session, u: UserContext, preference_id: str, *,
+                               helpful: bool) -> MemoryPreference:
+    """偏好级反馈（第二十三轮）：与 record_fact_feedback 同形——偏好与事实
+    共用佐证置信口径（第十七轮），反馈计数与重算公式也共用。"""
+    from app.worker import fact_confidence
+
+    row = db.scalar(select(MemoryPreference).where(
+        MemoryPreference.id == preference_id, MemoryPreference.app_id == u.app_id,
+        MemoryPreference.user_id == u.user_id))
+    if row is None:
+        raise ValueError("preference not found")
+    if helpful:
+        row.feedback_pos = (row.feedback_pos or 0) + 1
+    else:
+        row.feedback_neg = (row.feedback_neg or 0) + 1
+    row.confidence = fact_confidence(row.support_count or 1,
+                                     row.feedback_pos or 0, row.feedback_neg or 0)
     db.add(AuditLog(app_id=u.app_id, user_id=u.user_id, action="feedback",
                     fact_ids=[row.id]))
     db.flush()
