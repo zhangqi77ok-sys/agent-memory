@@ -15,11 +15,15 @@ from sqlalchemy.orm import Session
 from app import models as m
 from app.auth import UserContext
 from app.db import WorkerSession
+from app.embeddings import cosine
 from app.extract import MAX_SUBJECT_LEN, PROMPT_VERSION, InvalidExtraction, decide, is_injection, norm, same_subject, strip_injection
 from app.redact import mask_user_id, redact
 
 MAX_ATTEMPTS = 3
 LOCK_SECONDS = 120
+# 语义去重阈值（第十八轮）：与经验合并的 MERGE_COSINE 同值——主题措辞不同、
+# 但主题+内容向量近到这个程度，就是同一件事的不同说法，不该并存两行。
+SEMANTIC_DUP_COSINE = 0.95
 log = logging.getLogger("worker")
 
 
@@ -161,31 +165,82 @@ def _embed_fact(embedder, fact: m.MemoryFact) -> None:
     fact.embed_model = getattr(embedder, "model", None)
 
 
-def _matched_facts(db: Session, job: m.MemoryJob, subject: str) -> list[m.MemoryFact]:
+def _embed_preference(embedder, pref: m.MemoryPreference) -> None:
+    """给一条新偏好补向量（第十八轮，迁移 0018 加列后才有地方存）。
+    偏好此前没有向量，语义去重在偏好侧只能退回词面——补齐后与事实同口径。"""
+    try:
+        vec = embedder.embed([f"{pref.key} {pref.value}"], task_type="RETRIEVAL_DOCUMENT")[0]
+    except Exception as e:
+        log.warning("embed preference=%s failed: %s", pref.id, e)
+        return
+    pref.embedding = vec
+    pref.embed_model = getattr(embedder, "model", None)
+
+
+def _semantic_ids(db: Session, model, job: m.MemoryJob, text: str, embedder) -> list[str]:
+    """语义分支（第十八轮）：词面 same_subject 抓不到的跨措辞重复，靠向量抓。
+    新文本现场嵌一次（与 _embed_fact 同口径 RETRIEVAL_DOCUMENT），与现行行里
+    已存的同模型向量逐一比余弦，≥ SEMANTIC_DUP_COSINE 即同一件事。没 embedder、
+    嵌失败、无存量向量时静默回落词面——语义是加分项，不是写入的前置条件。"""
+    if embedder is None or not text:
+        return []
+    try:
+        vec = embedder.embed([text], task_type="RETRIEVAL_DOCUMENT")[0]
+    except Exception:
+        return []
+    if not vec:
+        return []
+    model_name = getattr(embedder, "model", None)
+    rows = db.execute(select(model.id, model.embedding, model.embed_model).where(
+        model.app_id == job.app_id,
+        model.user_id == job.user_id,
+        model.valid_to.is_(None),
+        model.embedding.is_not(None),
+    )).all()
+    qvec = [float(x) for x in vec]
+    out = []
+    for rid, emb, em in rows:
+        if model_name is not None and em is not None and em != model_name:
+            continue
+        try:
+            if cosine([float(x) for x in emb], qvec) >= SEMANTIC_DUP_COSINE:
+                out.append(rid)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _matched_facts(db: Session, job: m.MemoryJob, subject: str, content: str = "",
+                   embedder=None) -> list[m.MemoryFact]:
     """找与 subject 说同一件事的有效事实。先只查 (id, subject) 轻列做相似匹配，
     命中的才整行加载——不再把该用户的全部事实拉进内存逐条比。
-    相似合并（same_subject）顺带治旧账：历史上字面不同、意思相同的重复行会在下一次写入时被一并失效。"""
+    相似合并（same_subject）顺带治旧账：历史上字面不同、意思相同的重复行会在下一次写入时被一并失效。
+    第十八轮补语义分支：主题措辞不同但意思相同（向量 ≥0.95）的行同样命中，
+    之后走同一套 NOOP/UPDATE 判定——内容相同是佐证，内容不同是新版本。"""
     light = db.execute(select(m.MemoryFact.id, m.MemoryFact.subject).where(
         m.MemoryFact.app_id == job.app_id,
         m.MemoryFact.user_id == job.user_id,
         m.MemoryFact.valid_to.is_(None),
     )).all()
-    ids = [fid for fid, subj in light if same_subject(subj, subject)]
+    ids = {fid for fid, subj in light if same_subject(subj, subject)}
+    ids.update(_semantic_ids(db, m.MemoryFact, job, f"{subject} {content}".strip(), embedder))
     if not ids:
         return []
-    return list(db.scalars(select(m.MemoryFact).where(m.MemoryFact.id.in_(ids))))
+    return list(db.scalars(select(m.MemoryFact).where(m.MemoryFact.id.in_(sorted(ids)))))
 
 
-def _matched_preferences(db: Session, job: m.MemoryJob, key: str) -> list[m.MemoryPreference]:
+def _matched_preferences(db: Session, job: m.MemoryJob, key: str, value: str = "",
+                         embedder=None) -> list[m.MemoryPreference]:
     light = db.execute(select(m.MemoryPreference.id, m.MemoryPreference.key).where(
         m.MemoryPreference.app_id == job.app_id,
         m.MemoryPreference.user_id == job.user_id,
         m.MemoryPreference.valid_to.is_(None),
     )).all()
-    ids = [pid for pid, k in light if same_subject(k, key)]
+    ids = {pid for pid, k in light if same_subject(k, key)}
+    ids.update(_semantic_ids(db, m.MemoryPreference, job, f"{key} {value}".strip(), embedder))
     if not ids:
         return []
-    return list(db.scalars(select(m.MemoryPreference).where(m.MemoryPreference.id.in_(ids))))
+    return list(db.scalars(select(m.MemoryPreference).where(m.MemoryPreference.id.in_(sorted(ids)))))
 
 
 def support_confidence(support_count: int) -> float:
@@ -208,7 +263,7 @@ def _bump_support(rows: list, content: str, attr: str) -> None:
 
 def _apply_fact(db: Session, job: m.MemoryJob, subject: str, content: str, proposal: str,
                 source_msg_id: str | None, embedder=None) -> tuple[str, str | None]:
-    active = _matched_facts(db, job, subject)
+    active = _matched_facts(db, job, subject, content, embedder)
     decision = decide(_active_value(active, content, "content"), content, proposal=proposal)
     if decision == "NOOP":
         _bump_support(active, content, "content")
@@ -235,8 +290,9 @@ def _apply_fact(db: Session, job: m.MemoryJob, subject: str, content: str, propo
     return decision.lower(), created.id
 
 
-def _apply_preference(db: Session, job: m.MemoryJob, key: str, value: str, proposal: str) -> tuple[str, str | None]:
-    active = _matched_preferences(db, job, key)
+def _apply_preference(db: Session, job: m.MemoryJob, key: str, value: str, proposal: str,
+                      embedder=None) -> tuple[str, str | None]:
+    active = _matched_preferences(db, job, key, value, embedder)
     decision = decide(_active_value(active, value, "value"), value, proposal=proposal)
     if decision == "NOOP":
         _bump_support(active, value, "value")
@@ -251,6 +307,8 @@ def _apply_preference(db: Session, job: m.MemoryJob, key: str, value: str, propo
     )
     db.add(created)
     db.flush()
+    if embedder is not None:
+        _embed_preference(embedder, created)
     return decision.lower(), created.id
 
 
@@ -260,7 +318,7 @@ def _apply(db: Session, job: m.MemoryJob, candidate, source_msg_id: str | None, 
     if not subject or not content or len(subject) > MAX_SUBJECT_LEN or is_injection(subject) or is_injection(content):
         return "noop", None
     if candidate.kind == "preference":
-        return _apply_preference(db, job, subject, content, candidate.action)
+        return _apply_preference(db, job, subject, content, candidate.action, embedder=embedder)
     return _apply_fact(db, job, subject, content, candidate.action, source_msg_id, embedder=embedder)
 
 

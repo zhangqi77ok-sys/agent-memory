@@ -78,6 +78,8 @@ class MemoryPreference(UserScoped, Base):
     value: Mapped[str] = mapped_column(Text)
     confidence: Mapped[float] = mapped_column(Float, default=0.5)  # 与事实同口径（第十七轮）
     support_count: Mapped[int] = mapped_column(Integer, default=1)
+    embedding = mapped_column(Embedding, nullable=True)  # 第十八轮：偏好语义去重用
+    embed_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)

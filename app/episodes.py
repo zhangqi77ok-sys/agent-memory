@@ -72,6 +72,37 @@ def find_episode_by_key(db: Session, app_id: str, user_id: str, idempotency_key:
         TaskEpisode.idempotency_key == idempotency_key))
 
 
+VALID_OUTCOMES = ("success", "partial", "failure")
+
+
+def validate_episode(title: str, outcome: str, steps: list[dict], cost: dict | None) -> None:
+    """提交完整性校验（第十八轮）：此前服务层不拦，空标题、非法结果、空轨迹、
+    无动作的步骤都能直接落库，提炼时才暴露成脏数据。REST 的 pydantic 只管
+    HTTP 入口，MCP 与直调服务层走同一道闸——非法一律 ValueError，REST 转 400。"""
+    if not title or not str(title).strip():
+        raise ValueError("episode title 不能为空")
+    if outcome not in VALID_OUTCOMES:
+        raise ValueError(f"episode outcome 非法：{outcome!r}，只接受 success/partial/failure")
+    if not isinstance(steps, list) or not steps:
+        raise ValueError("episode steps 不能为空列表")
+    for s in steps:
+        if not isinstance(s, dict) or not s.get("action") or not str(s["action"]).strip():
+            raise ValueError("episode 每个步骤都必须有非空 action")
+        for k in ("observation", "error"):
+            if s.get(k) is not None and not isinstance(s[k], str):
+                raise ValueError(f"episode 步骤的 {k} 必须是字符串")
+    if cost is None:
+        return
+    if not isinstance(cost, dict):
+        raise ValueError("episode cost 必须是对象")
+    for k in ("tokens", "retries"):
+        v = cost.get(k)
+        if v is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+            raise ValueError(f"episode cost 的 {k} 必须是非负数")
+
+
 def submit_episode(db: Session, u: UserContext, *, source: str, title: str,
                    outcome: str, steps: list[dict], cost: dict,
                    idempotency_key: str | None = None,
@@ -83,6 +114,7 @@ def submit_episode(db: Session, u: UserContext, *, source: str, title: str,
         existing = find_episode_by_key(db, u.app_id, u.user_id, idempotency_key)
         if existing is not None:
             return existing
+    validate_episode(title, outcome, steps, cost)
     ep = TaskEpisode(app_id=u.app_id, user_id=u.user_id, source=source, title=redact(title),
                      outcome=outcome, steps=_redact_steps(steps), cost=_redact_cost(cost),
                      idempotency_key=idempotency_key, project=project,
@@ -573,6 +605,8 @@ DECAY_GRACE_DAYS = 30      # 闲置宽限：最后活跃 30 天内置信度不�
 DECAY_FACTOR = 0.95        # 宽限后每满 30 天置信度乘一次
 CONFIDENCE_FLOOR = 0.1     # 衰减下限：再老也不归零（证据还在，只是久未验证）
 MERGE_COSINE = 0.95        # 向量近似到这个程度且同主题，视为同一条经验
+MERGE_CONTENT_CAP = 4000   # 第十八轮：合并时败者内容附录进保留行，总长上限
+MERGE_APPLIES_CAP = 500    # 第十八轮：合并时适用情境拼接上限
 RETIRE_IDLE_DAYS = 180     # 真遗忘线（第十六轮）：闲置超半年、从未被应用、从未有过正面证据
 ADJUDICATE_GAP = 0.30      # 矛盾裁决门槛：置信度差距至少这么大才动手
 ADJUDICATE_MIN_EVIDENCE = 2  # 且胜方至少攒了这么多条证据（人工+自动），防先验互相残杀
@@ -648,6 +682,14 @@ def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
                 if norm(a.content) == norm(b.content) or (pc is not None and pc >= MERGE_COSINE):
                     keeper, loser = (a, b) if ((a.confidence or 0.5), a.valid_from) >= \
                         ((b.confidence or 0.5), b.valid_from) else (b, a)
+                    # 第十八轮：败者内容不再静默丢弃——以附录形式并入保留行，
+                    # 面板与导出仍能看到被合并掉的那份表述；适用情境去重拼接。
+                    appendix = f"\n\n[合并自同类经验：{loser.subject}] {loser.content or ''}"
+                    keeper.content = (keeper.content + appendix)[:MERGE_CONTENT_CAP]
+                    if loser.applies_when and loser.applies_when not in (keeper.applies_when or ""):
+                        keeper.applies_when = (
+                            (keeper.applies_when or "") + "；另见：" + loser.applies_when
+                        )[:MERGE_APPLIES_CAP]
                     loser.valid_to = now
                     keeper.use_count = (keeper.use_count or 0) + (loser.use_count or 0)
                     keeper.success_count = (keeper.success_count or 0) + (loser.success_count or 0)
@@ -692,7 +734,7 @@ def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
 
 def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
                    embedder: GeminiEmbedder | None = None, token_budget: int = 1500,
-                   project: str | None = None) -> list[InsightOut]:
+                   project: str | None = None, meta: dict | None = None) -> list[InsightOut]:
     """情境召回：新任务开始前，按任务描述捞出适用的历史经验。
 
     排序与门槛完全沿用事实混合召回（0.7 向量 + 0.3 关键词；入选需关键词命中
@@ -721,6 +763,16 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
         token_budget = 1500
     plan = _QueryPlan(task)
     qvec = _query_vector(embedder, task)
+    # 元记忆（第十八轮）：简报要自报家门——没向量时是纯关键词降级结果，
+    # 调用方（REST/MCP）据此判断这份简报的可信度，而不是当成全量召回用。
+    # 返回值保持 list 不变（旧测试与调用方不受影响），meta 字典外带。
+    if meta is not None:
+        if embedder is None:
+            meta.update(degraded=True, degraded_reason="no_embedder")
+        elif qvec is None:
+            meta.update(degraded=True, degraded_reason="embed_failed")
+        else:
+            meta.update(degraded=False, degraded_reason=None)
     # 无查询向量时不搬 embedding 列：SQLite 上它是 JSON，每行都要解码，纯属浪费
     cols = [MemoryInsight.id, MemoryInsight.kind, MemoryInsight.subject,
             MemoryInsight.content, MemoryInsight.applies_when,
@@ -752,8 +804,10 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
         if len(winners) >= k:
             break
         cost = _est_tokens(row.content)
+        # 第十八轮：预算装包 break 改 skip——超预算的长条目跳过、继续试后面
+        # 更小的条目，而不是一超就截断整份简报（扩散分支早就是 continue）。
         if used + cost > token_budget:
-            break
+            continue
         used += cost
         winners.append((score, row, reason))
     # 扩散激活（第十五轮「织网」）：直接命中没占满名额时，沿关联边一跳把强相关

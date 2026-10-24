@@ -116,7 +116,10 @@ def test_submit_episode_idempotent_by_key(db):
 
 def test_rest_episode_submit_idempotency_header(client, db):
     consent(client, "alice")
-    body = {"user_id": "alice", "title": "部署", "outcome": "success", "steps": [], "cost": {}}
+    # 第十八轮：空轨迹提交已被服务层校验拒绝（完整性），本用例测的是幂等头，
+    # 不是空轨迹——给一步有效轨迹，断言目标（duplicate 标记）不变。
+    body = {"user_id": "alice", "title": "部署", "outcome": "success",
+            "steps": [{"action": "部署"}], "cost": {}}
     r1 = client.post("/v1/episodes", json=body, headers={"Idempotency-Key": "rest-1"})
     r2 = client.post("/v1/episodes", json=body, headers={"Idempotency-Key": "rest-1"})
     assert r1.status_code == 202 and r1.json()["duplicate"] is False

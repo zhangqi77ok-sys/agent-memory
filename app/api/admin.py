@@ -7,8 +7,8 @@ RLS 注意：迁移 0002 之后，应用账号（memsvc_app）不绑用户时一
 （这是有意为之的隔离，没有“未设置用户=全可见”的后门），所以管理查询不能
 走 get_db。跨用户读统一走 WorkerSession——数据库账号 memsvc_worker 带
 BYPASSRLS，绕过与否由账号决定、应用代码无法自行打开；接口层再用管理密钥
-把关，两套机制各司其职。WORKER_DATABASE_URL 未配时（worker_engine 回落到
-应用引擎）管理端直接 503，绝不静默返回空表。
+把关，两套机制各司其职。PG 且 WORKER_DATABASE_URL 未配时（worker_engine
+回落到应用引擎）管理端直接 503，绝不静默返回空表；SQLite 没有 RLS，不拦。
 """
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
@@ -16,15 +16,20 @@ from sqlalchemy.orm import Session
 
 from app import models as m
 from app.auth import is_valid_admin_key
-from app.db import WorkerSession
 
 router = APIRouter(prefix="/v1/admin")
 
 
-def get_admin_db():
-    from app.config import settings
+def get_admin_db(x_admin_key: str | None = Header(default=None)):
+    # 顺序有讲究（第十八轮全套挖出）：先过管理密钥（404/403），再查 worker 库
+    # （503）。反过来会把“管理端没开”误报成“服务不可用”，旧测试即因此失败。
+    # 503 只拦一种情形：PG 且没配独立 worker 库——此时 worker 引擎回落到应用
+    # 引擎，RLS 会把跨用户查询静默过滤成空表。SQLite 没有 RLS，单库直查就是
+    # 全量，不拦；PG + 独立 worker 库走 BYPASSRLS，也不拦。
+    _require_admin(x_admin_key)
+    from app.db import WorkerSession, engine, worker_engine
 
-    if not settings.worker_database_url:
+    if worker_engine is engine and engine.dialect.name == "postgresql":
         raise HTTPException(status_code=503, detail="admin requires worker database")
     db = WorkerSession()
     try:

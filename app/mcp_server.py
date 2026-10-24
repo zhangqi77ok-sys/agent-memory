@@ -247,9 +247,10 @@ def memory_brief(task: str, k: int = 5, project: str = "") -> dict:
         if not memory_enabled(db, u):
             return {"insights": [], "note": "该用户未同意开启记忆，经验库为空"}
         embedder = build_embedder(timeout=settings.recall_timeout_s)
+        meta: dict = {}
         insights = brief_for_task(db, u, task, k,
                                   embedder=embedder,
-                                  project=proj)
+                                  project=proj, meta=meta)
         # 前瞻记忆（第十七轮）：武装中的意图拿这次任务撞一遍
         from app.reminders import check_triggers
         from app.schemas import reminder_out
@@ -259,7 +260,9 @@ def memory_brief(task: str, k: int = 5, project: str = "") -> dict:
                           fact_ids=[i.insight_id for i in insights]))
         db.commit()
         return {"insights": [i.model_dump() for i in insights],
-                "reminders": [reminder_out(r).model_dump() for r in fired]}
+                "reminders": [reminder_out(r).model_dump() for r in fired],
+                "degraded": bool(meta.get("degraded")),
+                "degraded_reason": meta.get("degraded_reason")}
 
 
 @mcp.tool()

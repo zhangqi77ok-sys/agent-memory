@@ -330,8 +330,10 @@ def recall_facts(db: Session, u: UserContext, query: str, k: int, token_budget: 
         if len(out) >= k:
             break
         cost = _est_tokens(r.content)
+        # 第十八轮：与简报同口径，预算装包 break 改 skip——超预算条目跳过、
+        # 后面更小的事实仍可递补，不再一超截断。
         if used + cost > token_budget:
-            break
+            continue
         used += cost
         out.append(FactOut(fact_id=r.id, subject=r.subject, content=r.content, score=round(s, 4),
                            reason=reason,

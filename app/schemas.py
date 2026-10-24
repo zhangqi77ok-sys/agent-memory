@@ -239,3 +239,6 @@ class BriefResponse(BaseModel):
     insights: list[InsightOut]
     # 第十七轮：本次任务触发的前瞻记忆（「当 X 时做 Y」），与经验分开列
     reminders: list[ReminderOut] = []
+    # 第十八轮：元记忆——简报是否降级（纯关键词），以及降级原因
+    degraded: bool = False
+    degraded_reason: str | None = None

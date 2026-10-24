@@ -144,6 +144,24 @@ def backfill_embeddings(db: Session, embedder, limit: int = 200) -> int:
     return len(rows)
 
 
+def backfill_preference_embeddings(db: Session, embedder, limit: int = 200) -> int:
+    """给尚无向量的有效偏好批量补向量（第十八轮，迁移 0018 加列后）。
+    匹配面与入库时一致：key + value。存量偏好不补，向量侧语义去重就永远
+    看不到它们——与事实/经验的补齐通道同理。"""
+    active = db.scalars(select(m.MemoryPreference).where(
+        m.MemoryPreference.valid_to.is_(None))).all()
+    rows = [r for r in active if r.embedding is None][:limit]
+    if not rows:
+        return 0
+    vectors = embedder.embed([f"{r.key} {r.value}" for r in rows],
+                             task_type="RETRIEVAL_DOCUMENT")
+    for row, vec in zip(rows, vectors, strict=True):
+        row.embedding = vec
+        row.embed_model = getattr(embedder, "model", None)
+    db.commit()
+    return len(rows)
+
+
 def backfill_insight_embeddings(db: Session, embedder, limit: int = 200) -> int:
     """给尚无向量的有效经验批量补向量（第八轮补：此前只有事实有补向量通道，
     无 key 期间攒下的经验在配好 key 后也永远没向量，brief 长期只有关键词一路）。

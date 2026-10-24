@@ -28,9 +28,13 @@ def submit(req: EpisodeSubmitRequest, idempotency_key: str | None = Header(defau
         existing = find_episode_by_key(db, u.app_id, u.user_id, idempotency_key)
         if existing is not None:
             return EpisodeAccepted(episode_id=existing.id, duplicate=True)
-    ep = submit_episode(db, u, source=req.source, title=req.title, outcome=req.outcome,
-                        steps=[s.model_dump() for s in req.steps], cost=req.cost,
-                        idempotency_key=idempotency_key, project=req.project)
+    try:
+        ep = submit_episode(db, u, source=req.source, title=req.title, outcome=req.outcome,
+                            steps=[s.model_dump() for s in req.steps], cost=req.cost,
+                            idempotency_key=idempotency_key, project=req.project)
+    except ValueError as e:
+        # 第十八轮：服务层完整性校验失败是客户端问题，不是 500
+        raise HTTPException(status_code=400, detail=str(e)) from None
     return EpisodeAccepted(episode_id=ep.id)
 
 
@@ -40,9 +44,10 @@ def brief(req: BriefRequest, db: Session = Depends(get_db)):
     if not memory_enabled(db, u):
         return BriefResponse(insights=[])
     embedder = build_embedder(timeout=settings.recall_timeout_s)
+    meta: dict = {}
     insights = brief_for_task(db, u, req.task, req.k,
                               embedder=embedder,
-                              token_budget=req.token_budget, project=req.project)
+                              token_budget=req.token_budget, project=req.project, meta=meta)
     # 前瞻记忆（第十七轮）：武装中的意图拿这次任务撞一遍，命中的单独列出
     from app.reminders import check_triggers
     from app.schemas import reminder_out
@@ -53,7 +58,9 @@ def brief(req: BriefRequest, db: Session = Depends(get_db)):
                       fact_ids=[i.insight_id for i in insights]))
     db.commit()
     return BriefResponse(insights=insights,
-                         reminders=[reminder_out(r) for r in fired])
+                         reminders=[reminder_out(r) for r in fired],
+                         degraded=bool(meta.get("degraded")),
+                         degraded_reason=meta.get("degraded_reason"))
 
 
 @router.post("/insights/feedback", response_model=FeedbackOut)
