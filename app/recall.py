@@ -303,7 +303,7 @@ def recall_facts(db: Session, u: UserContext, query: str, k: int, token_budget: 
     plan = _QueryPlan(query)
     qvec = _query_vector(embedder, query)
     # 无查询向量时不搬 embedding 列：SQLite 上它是 JSON，每行都要解码，纯属浪费
-    cols = [m.MemoryFact.id, m.MemoryFact.subject, m.MemoryFact.content]
+    cols = [m.MemoryFact.id, m.MemoryFact.subject, m.MemoryFact.content, m.MemoryFact.confidence]
     if qvec is not None:
         cols += [m.MemoryFact.embedding, m.MemoryFact.embed_model]
     scope = (m.MemoryFact.app_id == u.app_id,
@@ -317,7 +317,10 @@ def recall_facts(db: Session, u: UserContext, query: str, k: int, token_budget: 
     scored = _score_rows(rows, plan, qvec, getattr(embedder, "model", None),
                          pinned_of=lambda r: False,
                          fields_of=lambda r: f"{r.subject} {r.content}")
-    ranked = sorted(((f, reason, gated, r)
+    # 佐证置信加权（第十七轮）：只动排序不动门槛——被反复证实的事实排前，
+    # 乘子 0.85+0.3·confidence（0.5 中性先验时约 1.0，满佐证渐近 1.15）
+    ranked = sorted(((f * (0.85 + 0.3 * (r.confidence if r.confidence is not None else 0.5)),
+                      reason, gated, r)
                      for (f, reason, gated), r in zip(scored, rows, strict=True)),
                     key=lambda x: x[0], reverse=True)
     out, used = [], 0
@@ -331,7 +334,8 @@ def recall_facts(db: Session, u: UserContext, query: str, k: int, token_budget: 
             break
         used += cost
         out.append(FactOut(fact_id=r.id, subject=r.subject, content=r.content, score=round(s, 4),
-                           reason=reason))
+                           reason=reason,
+                           confidence=r.confidence if r.confidence is not None else 0.5))
     # 扩散激活（第十五轮「织网」，与简报同口径）：名额没满时沿关联边带出相连事实，
     # reason='linked' 且 linked_from 标明来历，分数按边强度打折，不冒充直接命中。
     if len(out) < k:
@@ -358,5 +362,6 @@ def recall_facts(db: Session, u: UserContext, query: str, k: int, token_budget: 
                     continue
                 used += cost
                 out.append(FactOut(fact_id=r.id, subject=r.subject, content=r.content,
-                                   score=round(dscore, 4), reason="linked", linked_from=via))
+                                   score=round(dscore, 4), reason="linked", linked_from=via,
+                                   confidence=r.confidence if r.confidence is not None else 0.5))
     return out

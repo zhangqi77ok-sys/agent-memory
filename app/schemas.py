@@ -43,6 +43,8 @@ class FactOut(BaseModel):
     reason: str
     # 第十五轮：沿关联边扩散带出时，标明是被哪条事实连带想起的（直接命中为空）
     linked_from: str | None = None
+    # 第十七轮：佐证置信度（被独立抽到的次数折算），排序已按它加权
+    confidence: float = 0.5
 
 
 class RecallResponse(BaseModel):
@@ -61,6 +63,9 @@ class MemoryItem(BaseModel):
     version: int
     valid_from: datetime
     source_session_id: str | None = None
+    # 第十七轮：佐证置信度与佐证次数（被独立来源重复证实的程度）
+    confidence: float = 0.5
+    support_count: int = 1
 
 
 class MemoryPage(BaseModel):
@@ -201,5 +206,36 @@ class InsightOut(BaseModel):
     verified: bool = True
 
 
+class ReminderOut(BaseModel):
+    """前瞻记忆（第十七轮）：触发条件 + 要做的事 + 武装状态。"""
+    reminder_id: str
+    condition: str
+    action: str
+    project: str | None = None
+    once: bool = True
+    status: str = "armed"
+    fire_count: int = 0
+
+
+def reminder_out(row) -> ReminderOut:
+    return ReminderOut(reminder_id=row.id, condition=row.condition_text,
+                       action=row.action_text, project=row.project,
+                       once=bool(row.once), status=row.status,
+                       fire_count=row.fire_count or 0)
+
+
+class ReminderCreateRequest(UserScopedRequest):
+    condition: str = Field(min_length=1, max_length=500)
+    action: str = Field(min_length=1, max_length=1000)
+    project: str | None = Field(default=None, max_length=128)
+    once: bool = True
+
+
+class ReminderDismissRequest(UserScopedRequest):
+    pass
+
+
 class BriefResponse(BaseModel):
     insights: list[InsightOut]
+    # 第十七轮：本次任务触发的前瞻记忆（「当 X 时做 Y」），与经验分开列
+    reminders: list[ReminderOut] = []

@@ -132,20 +132,24 @@ async function loadData() {
   ]);
   const nodes = [];
   if (ins.status === "fulfilled" && Array.isArray(ins.value)) {
-    for (const i of ins.value) nodes.push({ t:"insight", kind:i.kind, subject:i.subject,
+    for (const i of ins.value) nodes.push({ id:i.id, t:"insight", kind:i.kind, subject:i.subject,
       content:i.content, applies_when:i.applies_when, confidence:i.confidence ?? 0.5,
-      use:i.use_count || 0, succ:i.success_count || 0, project:i.project, pinned:i.pinned, muted:i.muted });
+      use:i.use_count || 0, succ:i.success_count || 0, applied:i.applied_count || 0,
+      verified:i.verified !== false, project:i.project, pinned:i.pinned, muted:i.muted });
   }
   if (mem.status === "fulfilled" && mem.value && Array.isArray(mem.value.items)) {
-    for (const f of mem.value.items) nodes.push({ t:"fact",
+    for (const f of mem.value.items) nodes.push({ id:f.id, t:"fact",
       kind: f.kind === "preference" ? "preference" : "fact", subject:f.subject,
-      content:f.content, confidence:1, use:0 });
+      content:f.content, confidence:f.confidence ?? 1, support:f.support_count || 1, use:0 });
   }
   if (exp.status === "fulfilled" && exp.value && Array.isArray(exp.value.episodes)) {
-    for (const e of exp.value.episodes) nodes.push({ t:"episode", kind:"episode",
+    for (const e of exp.value.episodes) nodes.push({ id:e.id, t:"episode", kind:"episode",
       subject:e.title, content:`结果：${e.outcome} · 提炼状态：${e.distill_status}`,
-      confidence:0, use:0, project:e.project });
+      confidence:0, use:0, project:e.project, salience:e.salience || 0, skeletonized:!!e.skeletonized });
   }
+  // 第十五轮的真实关联边（第十七轮接进星图）：来自导出，不再只靠同主题猜线
+  EDGES = (exp.status === "fulfilled" && exp.value && Array.isArray(exp.value.links))
+    ? exp.value.links.filter(l => !l.valid_to) : [];
   if (!nodes.length) throw new Error("empty");
   return nodes;
 }
@@ -154,7 +158,7 @@ async function loadData() {
 const canvas = document.getElementById("sky");
 const ctx = canvas.getContext("2d");
 let W = 0, H = 0, DPR = 1;
-let nodes = [], bgStars = [], nebulas = [];
+let nodes = [], bgStars = [], nebulas = [], EDGES = [];
 let cam = { x: 0, y: 0, z: 1 }, mouse = { x: -999, y: -999 }, hover = null, selected = null;
 let drag = null, query = "", enabledKinds = new Set(Object.keys(KINDS));
 
@@ -260,6 +264,21 @@ function frame(t) {
     arr.forEach((n, i) => i ? ctx.lineTo(n.x, n.y) : ctx.moveTo(n.x, n.y));
     ctx.stroke();
   }
+  // 真实关联边（memory_link）：线宽随强度，矛盾边红色最醒目
+  if (EDGES.length) {
+    const byId = new Map(nodes.map(n => [n.id, n]));
+    const REL_COLOR = { supports:"rgba(52,211,153,", contradicts:"rgba(251,113,133,",
+      refines:"rgba(56,189,248,", generalizes:"rgba(251,191,36,", related:"rgba(148,163,184," };
+    for (const e of EDGES) {
+      const a = byId.get(e.src_id), b = byId.get(e.dst_id);
+      if (!a || !b || !visible(a) || !visible(b)) continue;
+      const c = REL_COLOR[e.relation] || REL_COLOR.related;
+      ctx.strokeStyle = c + (0.12 + 0.4 * (e.strength ?? 0.5)) + ")";
+      ctx.lineWidth = e.relation === "contradicts" ? 1.6 : 1;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+    ctx.lineWidth = 1;
+  }
   // 星体
   for (const n of nodes) {
     const vis = visible(n);
@@ -320,9 +339,16 @@ canvas.addEventListener("click", e => {
     ${n.applies_when ? `<div class="when">适用情境：${esc(n.applies_when)}</div>` : ""}
     ${n.t === "insight" ? `<div class="meta">
       <span>置信度 <b>${pct}%</b><span class="bar"><i style="width:${pct}%"></i></span></span>
-      <span>被递出 <b>${n.use || 0}</b> 次</span>
+      <span>证据 <b>${n.verified === false ? "未验证 · 已降权" : "已验证"}</b></span>
+      <span>曝光 <b>${n.use || 0}</b> 次 · 应用 <b>${n.applied || 0}</b> 次</span>
       <span>关联成功 <b>${n.succ || 0}</b> 次</span>
-      <span>类型 <b>${k.label}</b></span></div>` : ""}`;
+      <span>类型 <b>${k.label}</b></span></div>` : ""}
+    ${n.t === "fact" ? `<div class="meta">
+      <span>置信度 <b>${pct}%</b><span class="bar"><i style="width:${pct}%"></i></span></span>
+      <span>佐证 <b>${n.support || 1}</b> 次</span></div>` : ""}
+    ${n.t === "episode" ? `<div class="meta">
+      <span>显著性 <b>${(n.salience || 0).toFixed(1)}</b></span>
+      <span>轨迹 <b>${n.skeletonized ? "已骨架化" : "全量"}</b></span></div>` : ""}`;
   d.classList.add("show");
 });
 

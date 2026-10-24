@@ -4,20 +4,28 @@ import {
   ApiError,
   clearAllMemories,
   correctMemory,
+  createReminder,
   deleteMemory,
+  dismissReminder,
   exportMemories,
   getSettings,
+  listInsights,
   listJobs,
   listMemories,
+  listReminders,
   needsConsent,
+  patchInsight,
   updateSettings,
 } from './api'
 import { clearUserId, getUserId, setUserId } from './user'
-import type { Job, MemoryItem, Settings } from './types'
+import type { InsightItem, Job, MemoryItem, Reminder, Settings } from './types'
+import AdminPanel from './components/AdminPanel.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import ConsentPage from './components/ConsentPage.vue'
+import InsightsPanel from './components/InsightsPanel.vue'
 import JobsList from './components/JobsList.vue'
 import MemoryRow from './components/MemoryRow.vue'
+import RemindersPanel from './components/RemindersPanel.vue'
 
 const userId = ref<string | null>(null)
 const draft = ref('')
@@ -30,6 +38,9 @@ const error = ref('')
 const notice = ref('')
 const showClearConfirm = ref(false)
 const filter = ref<'all' | 'fact' | 'preference'>('all')
+const view = ref<'memories' | 'insights' | 'reminders' | 'admin'>('memories')
+const insights = ref<InsightItem[]>([])
+const reminders = ref<Reminder[]>([])
 
 const showConsent = computed(() => settings.value != null && needsConsent(settings.value))
 
@@ -44,10 +55,14 @@ async function loadAll() {
       items.value = page.items
       total.value = page.total
       jobs.value = await listJobs(20)
+      insights.value = await listInsights()
+      reminders.value = await listReminders(true)
     } else {
       items.value = []
       total.value = 0
       jobs.value = []
+      insights.value = []
+      reminders.value = []
     }
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : String(e)
@@ -155,6 +170,64 @@ async function onExport() {
   }
 }
 
+async function onTogglePin(item: InsightItem) {
+  busy.value = true
+  error.value = ''
+  try {
+    await patchInsight(item.id, { pinned: !item.pinned })
+    insights.value = await listInsights()
+  } catch (e) {
+    error.value = e instanceof ApiError ? e.message : String(e)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function onToggleMute(item: InsightItem) {
+  busy.value = true
+  error.value = ''
+  try {
+    await patchInsight(item.id, { muted: !item.muted })
+    insights.value = await listInsights()
+  } catch (e) {
+    error.value = e instanceof ApiError ? e.message : String(e)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function onCreateReminder(body: {
+  condition: string
+  action: string
+  project?: string | null
+  once?: boolean
+}) {
+  busy.value = true
+  error.value = ''
+  try {
+    await createReminder(body)
+    reminders.value = await listReminders(true)
+    notice.value = '前瞻记忆已武装'
+  } catch (e) {
+    error.value = e instanceof ApiError ? e.message : String(e)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function onDismissReminder(item: Reminder) {
+  busy.value = true
+  error.value = ''
+  try {
+    await dismissReminder(item.reminder_id)
+    reminders.value = await listReminders(true)
+  } catch (e) {
+    error.value = e instanceof ApiError ? e.message : String(e)
+  } finally {
+    busy.value = false
+  }
+}
+
 function useUser() {
   const id = draft.value.trim()
   if (!id) {
@@ -231,7 +304,7 @@ onMounted(async () => {
       </p>
     </section>
 
-    <section class="card" data-testid="memory-panel">
+    <section v-if="view === 'memories'" class="card" data-testid="memory-panel">
       <div class="row" style="margin-bottom: 12px">
         <h2 style="margin: 0">记忆列表</h2>
         <span class="muted">共 {{ total }} 条</span>
@@ -259,7 +332,30 @@ onMounted(async () => {
       />
     </section>
 
-    <JobsList :jobs="jobs" />
+    <div class="row" style="gap: 8px; margin: 4px 0 12px" data-testid="view-tabs">
+      <button type="button" class="btn" :class="{ 'btn-primary': view === 'memories' }" data-testid="tab-memories" @click="view = 'memories'">记忆</button>
+      <button type="button" class="btn" :class="{ 'btn-primary': view === 'insights' }" data-testid="tab-insights" @click="view = 'insights'">经验</button>
+      <button type="button" class="btn" :class="{ 'btn-primary': view === 'reminders' }" data-testid="tab-reminders" @click="view = 'reminders'">前瞻记忆</button>
+      <button type="button" class="btn" :class="{ 'btn-primary': view === 'admin' }" data-testid="tab-admin" @click="view = 'admin'">管理端</button>
+    </div>
+
+    <InsightsPanel
+      v-if="view === 'insights'"
+      :insights="insights"
+      :busy="busy"
+      @toggle-pin="onTogglePin"
+      @toggle-mute="onToggleMute"
+    />
+    <RemindersPanel
+      v-if="view === 'reminders'"
+      :reminders="reminders"
+      :busy="busy"
+      @create="onCreateReminder"
+      @dismiss="onDismissReminder"
+    />
+    <AdminPanel v-if="view === 'admin'" />
+
+    <JobsList v-if="view === 'memories'" :jobs="jobs" />
   </template>
 
   <ConfirmDialog

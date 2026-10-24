@@ -39,14 +39,21 @@ def brief(req: BriefRequest, db: Session = Depends(get_db)):
     u = bind_user(db, user_ctx(req.user_id))
     if not memory_enabled(db, u):
         return BriefResponse(insights=[])
+    embedder = build_embedder(timeout=settings.recall_timeout_s)
     insights = brief_for_task(db, u, req.task, req.k,
-                              embedder=build_embedder(timeout=settings.recall_timeout_s),
+                              embedder=embedder,
                               token_budget=req.token_budget, project=req.project)
+    # 前瞻记忆（第十七轮）：武装中的意图拿这次任务撞一遍，命中的单独列出
+    from app.reminders import check_triggers
+    from app.schemas import reminder_out
+
+    fired = check_triggers(db, u, req.task, embedder=embedder, project=req.project)
     # 与事实召回对齐留审计（第八轮补：此前 brief 查了什么、给了什么完全无痕）
     db.add(m.AuditLog(app_id=u.app_id, user_id=u.user_id, action="brief",
                       fact_ids=[i.insight_id for i in insights]))
     db.commit()
-    return BriefResponse(insights=insights)
+    return BriefResponse(insights=insights,
+                         reminders=[reminder_out(r) for r in fired])
 
 
 @router.post("/insights/feedback", response_model=FeedbackOut)

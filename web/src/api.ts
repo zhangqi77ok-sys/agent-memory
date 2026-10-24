@@ -1,4 +1,14 @@
-import type { Job, MemoryItem, MemoryKind, MemoryPage, Settings } from './types'
+import type {
+  AdminUserMemories,
+  AdminUserRow,
+  InsightItem,
+  Job,
+  MemoryItem,
+  MemoryKind,
+  MemoryPage,
+  Reminder,
+  Settings,
+} from './types'
 import { getUserId } from './user'
 
 export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) || '/memory'
@@ -105,4 +115,76 @@ export function listJobs(limit = 20): Promise<Job[]> {
 /** 是否需要重新展示授权页：未同意，或同意版本落后。 */
 export function needsConsent(s: Settings): boolean {
   return !s.consent_version || s.consent_version !== s.current_consent_version
+}
+
+// ---------- 经验库（第十七轮前端同步） ----------
+
+export function listInsights(): Promise<InsightItem[]> {
+  return request<InsightItem[]>('/v1/me/insights')
+}
+
+export async function patchInsight(
+  id: string,
+  body: { pinned?: boolean; muted?: boolean },
+): Promise<InsightItem> {
+  // 该端点的 user_id 走查询参数（与其它 /me 接口的约定不同），单独发请求
+  const userId = getUserId()
+  if (!userId) throw new ApiError(422, null, '请先填写 user_id')
+  const res = await fetch(`${API_BASE}/v1/me/insights/${id}?user_id=${encodeURIComponent(userId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new ApiError(res.status, null, `更新失败 ${res.status}`)
+  return (await res.json()) as InsightItem
+}
+
+// ---------- 前瞻记忆（第十七轮） ----------
+
+export function listReminders(includeClosed = true): Promise<Reminder[]> {
+  return request<Reminder[]>(`/v1/reminders?include_closed=${includeClosed}`)
+}
+
+export function createReminder(body: {
+  condition: string
+  action: string
+  project?: string | null
+  once?: boolean
+}): Promise<Reminder> {
+  return request<Reminder>('/v1/reminders', { method: 'POST', body: JSON.stringify(body) })
+}
+
+export function dismissReminder(id: string): Promise<Reminder> {
+  return request<Reminder>(`/v1/reminders/${id}/dismiss`, { method: 'POST', body: '{}' })
+}
+
+// ---------- 管理端（第十七轮）：密钥只存 sessionStorage，请求直带 X-Admin-Key ----------
+
+const ADMIN_KEY_STORE = 'memsvc_admin_key'
+
+export function getAdminKey(): string {
+  return sessionStorage.getItem(ADMIN_KEY_STORE) || ''
+}
+
+export function setAdminKey(k: string): void {
+  if (k) sessionStorage.setItem(ADMIN_KEY_STORE, k)
+  else sessionStorage.removeItem(ADMIN_KEY_STORE)
+}
+
+async function adminRequest<T>(path: string): Promise<T> {
+  const key = getAdminKey()
+  if (!key) throw new ApiError(403, null, '请先填写管理密钥')
+  const res = await fetch(`${API_BASE}${path}`, { headers: { 'X-Admin-Key': key } })
+  if (!res.ok) {
+    throw new ApiError(res.status, null, res.status === 404 ? '管理端未启用（服务端未配置 ADMIN_KEYS）' : `管理端请求失败 ${res.status}`)
+  }
+  return (await res.json()) as T
+}
+
+export function adminOverview(): Promise<{ users: AdminUserRow[] }> {
+  return adminRequest<{ users: AdminUserRow[] }>('/v1/admin/overview')
+}
+
+export function adminUserMemories(userId: string): Promise<AdminUserMemories> {
+  return adminRequest<AdminUserMemories>(`/v1/admin/users/${encodeURIComponent(userId)}/memories`)
 }

@@ -42,12 +42,16 @@ def memory_enabled(db: Session, u: UserContext) -> bool:
 
 def _fact_item(f: m.MemoryFact) -> MemoryItem:
     return MemoryItem(id=f.id, kind="fact", subject=f.subject, content=f.content, version=f.version,
-                      valid_from=f.valid_from, source_session_id=f.source_session_id)
+                      valid_from=f.valid_from, source_session_id=f.source_session_id,
+                      confidence=f.confidence if f.confidence is not None else 0.5,
+                      support_count=f.support_count or 1)
 
 
 def _pref_item(p: m.MemoryPreference) -> MemoryItem:
     return MemoryItem(id=p.id, kind="preference", subject=p.key, content=p.value, version=p.version,
-                      valid_from=p.valid_from)
+                      valid_from=p.valid_from,
+                      confidence=p.confidence if p.confidence is not None else 0.5,
+                      support_count=p.support_count or 1)
 
 
 @router.get("/memories", response_model=MemoryPage)
@@ -115,6 +119,9 @@ def clear_all(u: UserContext = Depends(user_from_query), db: Session = Depends(g
         db.execute(delete(m.MemoryInsightToken).where(m.MemoryInsightToken.insight_id.in_(insight_ids)))
     # 关联边（第十五轮）全清：节点都没了，网自然不留
     db.execute(delete(m.MemoryLink).where(*_mine(m.MemoryLink, u)))
+    # 第十六/十七轮的新表同清：简报交付账与前瞻记忆也是「全部」的一部分
+    db.execute(delete(m.BriefDelivery).where(*_mine(m.BriefDelivery, u)))
+    db.execute(delete(m.MemoryReminder).where(*_mine(m.MemoryReminder, u)))
     for i in fact_ids:
         db.merge(m.ForgottenId(id=i, kind="fact"))
     for i in pref_ids:
@@ -138,6 +145,10 @@ def export(u: UserContext = Depends(user_from_query), db: Session = Depends(get_
                           .order_by(m.MemoryInsight.valid_from))
     episodes = db.scalars(select(m.TaskEpisode).where(*_mine(m.TaskEpisode, u))
                           .order_by(m.TaskEpisode.created_at))
+    links = db.scalars(select(m.MemoryLink).where(*_mine(m.MemoryLink, u))
+                       .order_by(m.MemoryLink.created_at))
+    reminders = db.scalars(select(m.MemoryReminder).where(*_mine(m.MemoryReminder, u))
+                            .order_by(m.MemoryReminder.created_at))
     s = get_setting(db, u)
     _audit(db, u, "export", [])
     db.commit()
@@ -148,18 +159,32 @@ def export(u: UserContext = Depends(user_from_query), db: Session = Depends(get_
         "settings": {"memory_enabled": bool(s and s.memory_enabled),
                      "consent_version": s.consent_version if s else None},
         "facts": [{"id": f.id, "subject": f.subject, "content": f.content, "version": f.version,
+                   "confidence": f.confidence, "support_count": f.support_count,
                    "valid_from": iso(f.valid_from), "valid_to": iso(f.valid_to),
                    "source_session_id": f.source_session_id} for f in facts],
         "preferences": [{"id": p.id, "key": p.key, "value": p.value, "version": p.version,
+                         "confidence": p.confidence, "support_count": p.support_count,
                          "valid_from": iso(p.valid_from), "valid_to": iso(p.valid_to)} for p in prefs],
         "insights": [{"id": i.id, "subject": i.subject, "content": i.content,
                       "applies_when": i.applies_when, "version": i.version,
                       "project": i.project, "confidence": i.confidence,
+                      "verified": True if i.verified is None else bool(i.verified),
+                      "applied_count": i.applied_count or 0,
+                      "use_count": i.use_count or 0,
                       "pinned": bool(i.pinned), "muted": bool(i.muted),
                       "valid_from": iso(i.valid_from), "valid_to": iso(i.valid_to)} for i in insights],
         "episodes": [{"id": e.id, "source": e.source, "title": e.title, "outcome": e.outcome,
                       "steps": e.steps, "cost": e.cost, "distill_status": e.distill_status,
+                      "salience": e.salience, "skeletonized": bool(e.skeletonized),
                       "created_at": iso(e.created_at)} for e in episodes],
+        # 第十五轮的边（第十七轮补进导出）：星图据此画真实关联，不再靠同主题猜线
+        "links": [{"id": lk.id, "src_kind": lk.src_kind, "src_id": lk.src_id,
+                   "dst_kind": lk.dst_kind, "dst_id": lk.dst_id, "relation": lk.relation,
+                   "strength": lk.strength, "origin": lk.origin,
+                   "valid_to": iso(lk.valid_to)} for lk in links],
+        "reminders": [{"id": r.id, "condition": r.condition_text, "action": r.action_text,
+                       "project": r.project, "once": bool(r.once), "status": r.status,
+                       "fire_count": r.fire_count or 0} for r in reminders],
     }
 
 

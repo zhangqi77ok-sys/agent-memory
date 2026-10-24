@@ -246,13 +246,20 @@ def memory_brief(task: str, k: int = 5, project: str = "") -> dict:
     with _session() as (db, u):
         if not memory_enabled(db, u):
             return {"insights": [], "note": "该用户未同意开启记忆，经验库为空"}
+        embedder = build_embedder(timeout=settings.recall_timeout_s)
         insights = brief_for_task(db, u, task, k,
-                                  embedder=build_embedder(timeout=settings.recall_timeout_s),
+                                  embedder=embedder,
                                   project=proj)
+        # 前瞻记忆（第十七轮）：武装中的意图拿这次任务撞一遍
+        from app.reminders import check_triggers
+        from app.schemas import reminder_out
+
+        fired = check_triggers(db, u, task, embedder=embedder, project=proj)
         db.add(m.AuditLog(app_id=u.app_id, user_id=u.user_id, action="brief",
                           fact_ids=[i.insight_id for i in insights]))
         db.commit()
-        return {"insights": [i.model_dump() for i in insights]}
+        return {"insights": [i.model_dump() for i in insights],
+                "reminders": [reminder_out(r).model_dump() for r in fired]}
 
 
 @mcp.tool()
@@ -278,6 +285,46 @@ def memory_feedback(insight_id: str, helpful: bool, task_outcome: str = "") -> d
         return {"ok": True, "insight_id": row.id, "confidence": round(row.confidence, 4),
                 "feedback_pos": row.feedback_pos or 0, "feedback_neg": row.feedback_neg or 0,
                 "success_count": row.success_count or 0}
+
+
+@mcp.tool()
+def memory_remind(condition: str, action: str, project: str = "", once: bool = True) -> dict:
+    """武装一条前瞻记忆：「当 condition 发生时，提醒做 action」。
+
+    与经验不同，这是面向将来的意图：以后任何任务开始前的 memory_brief 都会拿
+    任务描述去撞它，命中就单独亮出来（不与经验争名额）。once=True 触发一次后
+    落幕；once=False 常驻（例行检查类）。例：condition="部署到生产环境时"，
+    action="先确认数据库备份完成"。"""
+    proj = (project or os.environ.get("MEMORY_PROJECT") or "").strip()[:128] or None
+    with _session() as (db, u):
+        if not memory_enabled(db, u):
+            return {"ok": False, "error": "memory_disabled", "note": "该用户未同意开启记忆"}
+        from app.reminders import create_reminder
+        from app.schemas import reminder_out
+
+        row = create_reminder(db, u, condition=condition.strip(), action=action.strip(),
+                              project=proj, once=bool(once),
+                              embedder=build_embedder(timeout=settings.recall_timeout_s))
+        return {"ok": True, "reminder": reminder_out(row).model_dump()}
+
+
+@mcp.tool()
+def memory_trigger_check(task: str, project: str = "") -> dict:
+    """单独拿一段任务描述去撞武装中的前瞻记忆，返回这次触发的意图清单。
+
+    memory_brief 已经顺带做这件事；这个工具用于不开简报、只想确认
+    「这件事有没有挂着待办意图」的场合。命中的一次性意图会被消费（fired）。"""
+    proj = (project or os.environ.get("MEMORY_PROJECT") or "").strip()[:128] or None
+    with _session() as (db, u):
+        if not memory_enabled(db, u):
+            return {"reminders": [], "note": "该用户未同意开启记忆"}
+        from app.reminders import check_triggers
+        from app.schemas import reminder_out
+
+        fired = check_triggers(db, u, task,
+                               embedder=build_embedder(timeout=settings.recall_timeout_s),
+                               project=proj)
+        return {"reminders": [reminder_out(r).model_dump() for r in fired]}
 
 
 @mcp.tool()

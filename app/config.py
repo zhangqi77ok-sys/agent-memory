@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     app_env: str = "dev"  # dev | test | prod
     env: str | None = None  # 支持 ENV=prod 环境变量
     service_keys: str = ""  # 逗号分隔的合法服务密钥，支持轮换
+    admin_keys: str = ""  # 管理端密钥（逗号分隔，第十七轮）；为空 = 管理端接口关闭（404）
     database_url: str = "sqlite:///./dev.db"  # 服务运行账号（非 owner/非超级用户）
     worker_database_url: str | None = None  # Worker 账号 memsvc_worker（BYPASSRLS）；为空时用 database_url（仅 SQLite/开发）
     migrate_database_url: str | None = None  # 迁移账号（owner）；为空时用 database_url
@@ -27,6 +28,7 @@ class Settings(BaseSettings):
     rate_limit_read_per_min: int = 120  # 读接口限流阈值（次/分钟）
     rate_limit_write_per_min: int = 30  # 写/导出/删除接口限流阈值（次/分钟）
     memory_ttl_days: int = 0  # 记忆自动过期时长（天）；0 表示不过期
+    episode_skeleton_days: int = 90  # 轨迹骨架化保留期（天，第十七轮）；0 表示不骨架化
 
     @property
     def is_rate_limit_enabled(self) -> bool:
@@ -47,6 +49,12 @@ class Settings(BaseSettings):
         if not self.service_keys:
             return []
         return [k.strip() for k in self.service_keys.split(",") if k.strip()]
+
+    @property
+    def admin_key_list(self) -> list[str]:
+        if not self.admin_keys:
+            return []
+        return [k.strip() for k in self.admin_keys.split(",") if k.strip()]
 
 
 settings = Settings()

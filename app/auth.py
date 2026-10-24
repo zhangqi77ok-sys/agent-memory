@@ -22,6 +22,22 @@ def is_valid_service_key(provided_key: str | None, s: Settings | None = None) ->
     return valid
 
 
+def is_valid_admin_key(provided_key: str | None, s: Settings | None = None) -> bool:
+    """校验管理端密钥请求头 X-Admin-Key（第十七轮）。与服务密钥同一纪律：
+    多值轮换、常量时间比较；未配置任何管理密钥时恒 False（管理端关闭）。"""
+    if not provided_key:
+        return False
+    conf = s or settings
+    keys = conf.admin_key_list
+    if not keys:
+        return False
+    valid = False
+    for k in keys:
+        if hmac.compare_digest(provided_key, k):
+            valid = True
+    return valid
+
+
 @dataclass(frozen=True)
 class UserContext:
     app_id: str

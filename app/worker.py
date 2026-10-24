@@ -188,11 +188,30 @@ def _matched_preferences(db: Session, job: m.MemoryJob, key: str) -> list[m.Memo
     return list(db.scalars(select(m.MemoryPreference).where(m.MemoryPreference.id.in_(ids))))
 
 
+def support_confidence(support_count: int) -> float:
+    """佐证置信度（第十七轮）：support/(support+1)——1 次 0.5、2 次 0.67、3 次 0.75，
+    随独立佐证次数单调上升、渐近于 1。与经验的拉普拉斯置信同哲学：证据计数说话。"""
+    s = max(int(support_count or 1), 1)
+    return s / (s + 1)
+
+
+def _bump_support(rows: list, content: str, attr: str) -> None:
+    """NOOP 的另一面（第十七轮）：内容被再次独立抽到 = 一次新佐证。
+    此前 NOOP 直接丢弃，同一事实被说十次和被说一次在库里毫无区别；
+    现在给命中的现行行记 support_count+1 并重算置信度（不新建版本，
+    内容没变就不该有版本噪音）。"""
+    for row in rows:
+        if norm(getattr(row, attr)) == norm(content):
+            row.support_count = (row.support_count or 1) + 1
+            row.confidence = support_confidence(row.support_count)
+
+
 def _apply_fact(db: Session, job: m.MemoryJob, subject: str, content: str, proposal: str,
                 source_msg_id: str | None, embedder=None) -> tuple[str, str | None]:
     active = _matched_facts(db, job, subject)
     decision = decide(_active_value(active, content, "content"), content, proposal=proposal)
     if decision == "NOOP":
+        _bump_support(active, content, "content")
         return "noop", None
     now = datetime.now(timezone.utc)
     closed_ids = []
@@ -220,6 +239,7 @@ def _apply_preference(db: Session, job: m.MemoryJob, key: str, value: str, propo
     active = _matched_preferences(db, job, key)
     decision = decide(_active_value(active, value, "value"), value, proposal=proposal)
     if decision == "NOOP":
+        _bump_support(active, value, "value")
         return "noop", None
     now = datetime.now(timezone.utc)
     for row in active:
@@ -376,6 +396,11 @@ def main() -> None:  # pragma: no cover
                     wstats = weave_links(db, linker=linker)
                     if wstats["linked"] or wstats["generalized"] or wstats["pruned"]:
                         log.info("weave_links: %s", wstats)
+                    # 轨迹骨架化（第十七轮）：提炼完的旧轨迹只留骨架，与巡检同节拍
+                    from app.episodes import skeletonize_episodes
+                    sk = skeletonize_episodes(db, retention_days=settings.episode_skeleton_days)
+                    if sk:
+                        log.info("skeletonize_episodes: %s", sk)
                     last_cleanup = time.time()
                 except Exception as e:
                     log.warning("cleanup error: %s", e)

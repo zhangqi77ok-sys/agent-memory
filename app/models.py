@@ -54,6 +54,11 @@ class MemoryFact(UserScoped, Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
     subject: Mapped[str] = mapped_column(String(128))
     content: Mapped[str] = mapped_column(Text)
+    # 佐证置信度（第十七轮）：同一事实被独立会话重复抽到即 +1 佐证，
+    # confidence = support/(support+1)（1 次 0.5、2 次 0.67、3 次 0.75…）。
+    # 此前事实/偏好没有置信度概念——被说过一次和被证实五次排得一样靠前。
+    confidence: Mapped[float] = mapped_column(Float, default=0.5)
+    support_count: Mapped[int] = mapped_column(Integer, default=1)
     embedding = mapped_column(Embedding, nullable=True)
     embed_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
@@ -71,6 +76,8 @@ class MemoryPreference(UserScoped, Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
     key: Mapped[str] = mapped_column(String(128))
     value: Mapped[str] = mapped_column(Text)
+    confidence: Mapped[float] = mapped_column(Float, default=0.5)  # 与事实同口径（第十七轮）
+    support_count: Mapped[int] = mapped_column(Integer, default=1)
     valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
@@ -108,6 +115,13 @@ class TaskEpisode(UserScoped, Base):
     project: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)  # 来源项目/仓库（第十轮）：防跨项目串扰；为空=通用
     distill_status: Mapped[str] = mapped_column(String(16), default="pending", index=True)  # pending/running/done/failed
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+    # 编码显著性（第十七轮）：提交时按结果与成本算出（失败 > 部分 > 成功，成本/重试加权），
+    # 提炼队列按它领取——重要的经历先复盘，不再纯 FIFO 让琐碎任务排在翻车前面。
+    salience: Mapped[float] = mapped_column(Float, default=0.0)
+    # 轨迹骨架化（第十七轮）：提炼完成且超过保留期的轨迹，中间步只留动作骨架
+    # （观察细节丢弃、出错步与首尾步保全），细节让位给提炼出的经验，与人脑
+    # 「只记要点、忘掉流水账」同构。True 表示已骨架化。
+    skeletonized: Mapped[bool] = mapped_column(Boolean, default=False)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # 领取锁定期；过期可被其他 Worker 重领
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)  # 客户端重试防重；为空表示不防重
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -167,6 +181,29 @@ class MemoryInsight(UserScoped, Base):
         Index("ix_insight_pinned_scope", "app_id", "user_id",
               sqlite_where=text("pinned = 1"), postgresql_where=text("pinned")),
     )
+
+
+class MemoryReminder(UserScoped, Base):
+    """前瞻记忆（第十七轮）：「当 X 发生时，提醒我做 Y」。
+
+    此前 applies_when 只是被动文本，要等简报按主题相似度捞经验时顺带命中；
+    前瞻记忆是独立武装的意图：触发条件（condition）与当前任务做关键词/向量
+    匹配，命中即在简报里单独亮出来。once=True 触发一次即 fired 落幕；
+    once=False 常驻，记 fire_count/last_fired_at。status: armed|fired|dismissed。
+    """
+
+    __tablename__ = "memory_reminder"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
+    condition_text: Mapped[str] = mapped_column(Text)  # 触发条件，如「部署到生产环境时」
+    action_text: Mapped[str] = mapped_column(Text)     # 要做的事，如「先跑数据库备份」
+    project: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    once: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(16), default="armed", index=True)
+    fire_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    embedding = mapped_column(Embedding, nullable=True)
+    embed_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class BriefDelivery(UserScoped, Base):

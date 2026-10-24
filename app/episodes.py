@@ -85,7 +85,8 @@ def submit_episode(db: Session, u: UserContext, *, source: str, title: str,
             return existing
     ep = TaskEpisode(app_id=u.app_id, user_id=u.user_id, source=source, title=redact(title),
                      outcome=outcome, steps=_redact_steps(steps), cost=_redact_cost(cost),
-                     idempotency_key=idempotency_key, project=project)
+                     idempotency_key=idempotency_key, project=project,
+                     salience=episode_salience(outcome, cost))
     db.add(ep)
     try:
         db.commit()
@@ -108,6 +109,27 @@ def submit_episode(db: Session, u: UserContext, *, source: str, title: str,
 
 
 BACKFLOW_WINDOW_DAYS = 7  # 简报→任务→提交的合理间隔；超窗的交付视为没赶上这次任务
+
+
+def episode_salience(outcome: str, cost: dict | None) -> float:
+    """编码显著性（第十七轮）：一次任务在提炼队列里的优先级。
+
+    结果权重为主：失败的经历最值得复盘（3），部分完成次之（2），成功最低（1）；
+    成本加权为辅：烧的 token 越多、重试越多，越说明这条路走得贵——贵有贵的教训。
+    纯函数、量纲固定，单测可钉死。"""
+    base = {"failure": 3.0, "partial": 2.0, "success": 1.0}.get(outcome or "", 1.0)
+    cost = cost or {}
+    tokens = cost.get("tokens") or 0
+    retries = cost.get("retries") or 0
+    try:
+        tokens = float(tokens)
+    except (TypeError, ValueError):
+        tokens = 0.0
+    try:
+        retries = float(retries)
+    except (TypeError, ValueError):
+        retries = 0.0
+    return base + min(tokens / 20000.0, 1.0) + min(retries * 0.25, 0.5)
 
 
 def _successor_of(db: Session, row: MemoryInsight) -> MemoryInsight | None:
@@ -424,6 +446,40 @@ def _evidence_ok(evidence: str, rendered: str) -> bool:
     return ev in norm(rendered)
 
 
+def skeletonize_episodes(db: Session, now: datetime | None = None,
+                         retention_days: int = 90) -> int:
+    """轨迹骨架化巡检（第十七轮）：提炼已完成、超过保留期的轨迹瘦身。
+
+    中间步（非首、非尾、无错误）只留动作骨架：观察细节整段丢弃——细节的价值
+    已经沉淀进提炼出的经验里，流水账原文不必永久全量保存。出错步与首尾步
+    保全（错误是复盘的锚点，首尾是上下文的边界）。返回处理条数，自己 commit。"""
+    if retention_days <= 0:
+        return 0
+    now = now or _now()
+    cutoff = now - timedelta(days=retention_days)
+    rows = list(db.scalars(select(TaskEpisode).where(
+        TaskEpisode.distill_status == "done",
+        TaskEpisode.created_at < cutoff,
+        or_(TaskEpisode.skeletonized.is_(False), TaskEpisode.skeletonized.is_(None)))))
+    done = 0
+    for ep in rows:
+        steps = ep.steps or []
+        if len(steps) > 3:
+            skel = []
+            for i, st in enumerate(steps):
+                if i == 0 or i == len(steps) - 1 or st.get("error"):
+                    skel.append(st)
+                else:
+                    skel.append({"action": str(st.get("action", ""))[:120],
+                                 "skeletonized": True})
+            ep.steps = skel
+        ep.skeletonized = True
+        done += 1
+    if done:
+        db.commit()
+    return done
+
+
 def claim_episode(db: Session) -> TaskEpisode | None:
     """领取一条待提炼 episode，与 claim_job 同构：状态先转 running 并设锁定期，
     SKIP LOCKED 只防同一瞬间，状态+锁定才防得住「领了还没处理完又被别人领走」。
@@ -435,7 +491,8 @@ def claim_episode(db: Session) -> TaskEpisode | None:
             TaskEpisode.attempts < MAX_DISTILL_ATTEMPTS,
             or_(TaskEpisode.distill_status == "pending",
                 (TaskEpisode.distill_status == "running") & (TaskEpisode.locked_until < now)))
-        .order_by(TaskEpisode.created_at).limit(1)
+        # 显著性领取（第十七轮）：失败/昂贵的经历先复盘，同显著性仍按提交序
+        .order_by(TaskEpisode.salience.desc(), TaskEpisode.created_at).limit(1)
         .with_for_update(skip_locked=True)).first()
     if ep is None:
         return None
