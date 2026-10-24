@@ -37,8 +37,9 @@ def test_decay_after_grace_period(db):
     _insight(db, days_ago=10, confidence=0.8, subject="新经验")
     stats = consolidate_insights(db, now=NOW)
     assert stats["decayed"] == 1
-    # 闲置 100 天：宽限 30 天后按 (100-1)//30=3 段衰减
-    assert old.confidence == pytest.approx(0.8 * 0.95 ** 3, abs=1e-3)
+    # 闲置 100 天：宽限 30 天后按 (100-1)//30=3 段衰减；第二十二轮起月因子
+    # 随复述变慢：3 次好评 → 因子 1 - 0.05/4 = 0.9875，不再是旧的 0.95
+    assert old.confidence == pytest.approx(0.8 * 0.9875 ** 3, abs=1e-3)
     assert old.feedback_pos == 3  # 衰减只压置信度，不动证据计数
 
 

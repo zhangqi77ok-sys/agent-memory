@@ -82,7 +82,10 @@ def decay_idle_edges(db: Session, now: datetime | None = None) -> int:
     或上次结清以来」的整月数衰减一次（0.95^月数，下限 0.10），并把
     decayed_until 记到 now——下次只算新增的闲置月数，同一段闲置不重复扣。
 
-    未被交付过的边从创建起算闲置；被交付过的从最近一次交付起算；结清
+    第二十二轮「遗忘曲线」对齐：基线从「最近一次交付」改为「最近一次被
+    证实应用的交付」（applied 的交付边记录）——曝光（交付了但没被证实有用）
+    不再重置边的遗忘时钟，与第十六轮「曝光≠用上」的口径一致。未被证实
+    应用过的边从创建起算闲置；被证实应用过的从最近一次应用起算；结清
     过的从上次结清起算——三者取最晚的作基准。调用方负责 commit。
     每小时的 weave 巡检顺带调用也安全：不足整月的边直接跳过。
     """
@@ -90,9 +93,10 @@ def decay_idle_edges(db: Session, now: datetime | None = None) -> int:
     decayed = 0
     for link in db.scalars(select(MemoryLink).where(
             MemoryLink.valid_to.is_(None))):
-        last_del = db.scalar(select(func.max(BriefDeliveryEdge.created_at)).where(
-            BriefDeliveryEdge.link_id == link.id))
-        base = max(x for x in (_aware(last_del), _aware(link.decayed_until),
+        last_applied = db.scalar(select(func.max(BriefDeliveryEdge.created_at)).where(
+            BriefDeliveryEdge.link_id == link.id,
+            BriefDeliveryEdge.applied.is_(True)))
+        base = max(x for x in (_aware(last_applied), _aware(link.decayed_until),
                               _aware(link.created_at))
                    if x is not None)
         months = (now - base).days // 30

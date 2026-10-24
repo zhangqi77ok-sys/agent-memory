@@ -177,6 +177,11 @@ class MemoryInsight(UserScoped, Base):
     feedback_pos: Mapped[int] = mapped_column(Integer, default=0)
     feedback_neg: Mapped[int] = mapped_column(Integer, default=0)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 遗忘曲线（第二十二轮）：衰减结清锚点，与边的 decayed_until 同哲学——
+    # 巡检每次只算锚点后新增的闲置，同一段闲置不重复扣；被用上刷新
+    # last_used_at 后，锚点被新的最后使用时间盖过，宽限重算。
+    decayed_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
     # 信任三件套（第十六轮）：use_count 是「曝光」（简报递出），applied_count 才是
     # 「真被后续任务用上」（结果回流时记）——两者分开，马太效应才断得开：曝光不再
     # 刷新 last_used_at，只有应用与人工反馈才算「用过」。auto_pos/auto_neg 是回流

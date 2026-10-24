@@ -676,7 +676,10 @@ ADJUDICATE_MIN_EVIDENCE = 2  # 且胜方至少攒了这么多条证据（人工+
 
 
 def _aware(dt):
-    """SQLite 读回的 datetime 可能丢 tzinfo；统一补 UTC 再参与运算，免得 aware/naive 相减报错。"""
+    """SQLite 读回的 datetime 可能丢 tzinfo；统一补 UTC 再参与运算，免得 aware/naive 相减报错。
+    None 原样返回（与 edge_learning._aware 同口径；decayed_until 对旧行就是 None）。"""
+    if dt is None:
+        return None
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
@@ -693,9 +696,12 @@ def _pair_cosine(a: MemoryInsight, b: MemoryInsight) -> float | None:
 def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
     """经验生命周期巡检（第十一轮）：衰减、合并、矛盾标记。Worker 每小时跑一轮。
 
-    - 衰减：以 last_used_at（无则 valid_from）为最后活跃时间，闲置超过宽限期后
-      每满 30 天置信度 ×0.95，下限 0.1。只压置信度、不动反馈计数——新反馈进来时
-      record_feedback 按计数重算，等于用新证据覆盖衰减，这正是想要的语义。
+    - 衰减（第二十二轮遗忘曲线）：基线 = max(最后使用, 衰减锚点 decayed_until)；
+      首扣（锚点为空或锚点 ≤ 最后使用）用宽限公式，续扣每满 30 天 exactly 一块，
+      扣完锚点记到 now——同一段闲置只扣一次（此前无锚点时每小时巡检重复计费）。
+      月因子随复述变慢：1 - 0.05/(1 + applied_count + feedback_pos)，0 次复述即
+      旧的 0.95。只压置信度、不动反馈计数——新反馈进来时 record_feedback 按计数
+      重算，等于用新证据覆盖衰减，这正是想要的语义。
     - 合并：同用户内 same_subject 且（内容规范化相同，或向量余弦 ≥ 0.95）的现行
       经验对，保留置信度高者（并列取更新的），另一行关行、计数并入保留行、留审计。
       第十九轮：主题不同但内容向量 ≥ 0.98 的对也合并（换个词说同一件事的经验
@@ -717,11 +723,25 @@ def consolidate_insights(db: Session, now: datetime | None = None) -> dict:
     for row in rows:
         conf = row.confidence if row.confidence is not None else 0.5
         idle = (now - _aware(row.last_used_at or row.valid_from)).days
-        if idle > DECAY_GRACE_DAYS:
-            blocks = (idle - 1) // DECAY_GRACE_DAYS
-            new_conf = max(CONFIDENCE_FLOOR, conf * (DECAY_FACTOR ** blocks))
+        # 第二十二轮「遗忘曲线」：锚点结清 + 复述依赖因子。锚点为空或锚点 ≤
+        # 最后使用（被用上刷新了时钟，宽限重算）时用宽限公式；锚点新于最后
+        # 使用（续扣）时每满 30 天 exactly 一块，宽限不再重算——两式在总额上
+        # 与旧单次口径一致，只修每小时重复计费。复述计数 = 任务回流证实应用
+        # + 人工好评（曝光不算，auto_pos 已含在 applied_count 里不重复计）；
+        # 复述越多月因子越近 1，0 次复述即旧的 0.95。
+        anchor = _aware(row.decayed_until)
+        last_use = _aware(row.last_used_at or row.valid_from)
+        if anchor is None or anchor <= last_use:
+            blocks = (idle - 1) // DECAY_GRACE_DAYS if idle > DECAY_GRACE_DAYS else 0
+        else:
+            blocks = (now - anchor).days // DECAY_GRACE_DAYS
+        if blocks >= 1:
+            rehearsals = (row.applied_count or 0) + (row.feedback_pos or 0)
+            factor = 1.0 - (1.0 - DECAY_FACTOR) / (1 + rehearsals)
+            new_conf = max(CONFIDENCE_FLOOR, conf * (factor ** blocks))
             if new_conf < conf - 1e-9:
                 row.confidence = round(new_conf, 4)
+                row.decayed_until = now
                 decayed += 1
         if (idle > RETIRE_IDLE_DAYS and not row.pinned
                 and not (row.applied_count or 0) and not (row.success_count or 0)

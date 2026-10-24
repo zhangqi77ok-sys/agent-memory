@@ -156,12 +156,30 @@ def test_decay_idle_edges_anchor_prevents_double_decay(db):
     assert db.get(m.MemoryLink, link.id).strength == pytest.approx(0.9 * 0.95 ** 2)
 
 
-def test_decay_idle_edges_skips_recently_delivered(db):
+def test_decay_idle_edges_delivered_but_unapplied_still_decays(db):
     _, _, link, _ = _spread_pair(db, strength=0.9)
     db.flush()
     link.created_at = NOW - timedelta(days=60)
     db.commit()
-    # 交付边是刚建的（简报时）：基准取最近交付，不足整月，不衰减
+    # 第二十二轮「遗忘曲线」对齐：交付了但没被证实应用，曝光不再重置
+    # 遗忘时钟——基线仍是创建时间（60 天前），衰减照常发生。
+    assert decay_idle_edges(db, now=NOW) == 1
+    db.commit()
+    db.expire_all()
+    assert db.get(m.MemoryLink, link.id).strength == pytest.approx(0.9 * 0.95 ** 2)
+
+
+def test_decay_idle_edges_skips_recently_applied(db):
+    _, _, link, _ = _spread_pair(db, strength=0.9)
+    db.flush()
+    link.created_at = NOW - timedelta(days=60)
+    # 把这次交付标为已应用（回流/反馈结账时就是这么标的）：基线取最近应用，
+    # 不足整月，不衰减。
+    erow = db.scalars(select(m.BriefDeliveryEdge).where(
+        m.BriefDeliveryEdge.link_id == link.id)).one()
+    erow.applied = True
+    erow.created_at = NOW
+    db.commit()
     assert decay_idle_edges(db, now=NOW) == 0
     db.commit()
 
