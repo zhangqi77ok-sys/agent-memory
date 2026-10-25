@@ -92,8 +92,15 @@ def list_memories(kind: str | None = Query(None, pattern="^(fact|preference)$"),
 
 @router.patch("/memories/{item_id}", response_model=MemoryItem)
 def correct(item_id: str, req: CorrectRequest, db: Session = Depends(get_db), request: Request = None):
-    """纠正：旧版本 valid_to=now 失效，新建 version+1；召回只会看到新版本。"""
+    """纠正：旧版本 valid_to=now 失效，新建 version+1；召回只会看到新版本。
+
+    修复第 7 轮：同意门——未同意/已暂停/同意过期时 404，与反馈/提醒
+    入口同形（不泄露行存在性）。门查在行查找之前，避免墓碑 409 泄露
+    行存在性；纠正是新建版本行的实质写，不适用“策展豁免”。
+    """
     u = bind_user(db, user_ctx(resolve_asserted(request, req.user_id)))
+    if not memory_enabled(db, u):
+        raise HTTPException(404)
     now = datetime.now(UTC)
     old = db.get(m.MemoryFact, item_id)
     if old and old.user_id == u.user_id and old.app_id == u.app_id and old.valid_to is None:
@@ -303,7 +310,12 @@ def export_markdown_ep(u: UserContext = Depends(user_from_query),
 @router.post("/markdown/import")
 def import_markdown_ep(payload: dict, u: UserContext = Depends(user_from_query),
                        db: Session = Depends(get_db)):
-    """把编辑过的 Markdown 导回（第十三轮）：按 id 应用编辑与新增；删除只报告不执行。"""
+    """把编辑过的 Markdown 导回（第十三轮）：按 id 应用编辑与新增；删除只报告不执行。
+
+    修复第 7 轮：同意门——未同意/已暂停/同意过期时 404（审计 F-14
+    建议口径，与提醒创建一致）。导回的 created 分支会新建记忆行，
+    是实质写；门查在 apply 之前，apply 本身不再另设门（仅本端点调用）。
+    """
     from app.markdown_sync import apply_markdown_import
 
     files = payload.get("files")
@@ -313,6 +325,8 @@ def import_markdown_ep(payload: dict, u: UserContext = Depends(user_from_query),
     if len(files) > 500:
         raise HTTPException(422, "文件数超限（500）")
     bind_user(db, u)
+    if not memory_enabled(db, u):
+        raise HTTPException(404)
     return apply_markdown_import(db, u, files)
 
 
@@ -416,8 +430,15 @@ def patch_insight(insight_id: str, req: InsightPatch,
                   u: UserContext = Depends(user_from_query), db: Session = Depends(get_db)):
     """单条策展：改指导/适用情境、置顶、禁用。改匹配面（content/applies_when）会作废
     旧向量——宁可退化成关键词召回，也不能拿着旧向量假装语义命中；补向量走现成 CLI。
-    不存在或不是本人的 → 404（与 feedback 同形，不泄露存在性）。"""
+    不存在或不是本人的 → 404（与 feedback 同形，不泄露存在性）。
+
+    修复第 7 轮：同意门——未同意/已暂停/同意过期时同样 404。改内容是
+    实质记忆写，不适用“策展豁免”；纯标记改动（置顶/禁用）为求门语义
+    简单可审计，不在同一端点内拆分豁免。门查在行查找之前。
+    """
     bind_user(db, u)
+    if not memory_enabled(db, u):
+        raise HTTPException(status_code=404, detail="insight not found")
     row = db.scalar(select(m.MemoryInsight).where(
         *_mine(m.MemoryInsight, u), m.MemoryInsight.id == insight_id))
     if row is None:

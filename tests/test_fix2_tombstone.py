@@ -168,6 +168,7 @@ def test_redistill_same_episode_blocked(client, db):
 
 
 def test_markdown_import_tombstoned(client, db):
+    consent(client, "alice")  # 修复第 7 轮：导入入口过同意门，墓碑断言需先开启
     fid = _fact(db, "咖啡", "喜欢咖啡")
     _forget(client, fid)
     files = {"facts/kafei.md": "---\ntype: facts\nsubject: 咖啡\n---\n\n# 事实 · 咖啡\n\n- 喜欢咖啡\n"}
@@ -178,6 +179,7 @@ def test_markdown_import_tombstoned(client, db):
 
 
 def test_correct_and_patch_tombstoned_409(client, db):
+    consent(client, "alice")  # 修复第 7 轮：纠正/PATCH 入口过同意门，墓碑断言需先开启
     fid = _fact(db, "咖啡", "喜欢咖啡")
     _forget(client, fid)
     other = _fact(db, "咖啡", "讨厌咖啡")

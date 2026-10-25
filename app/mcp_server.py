@@ -11,7 +11,8 @@
 环境变量：
     MEMORY_USER_ID        必填。记忆归属的用户 id；每个工具进程固定一个身份，服务侧不再鉴权切换。
     MEMORY_SOURCE         可选。写入来源标记（如 codex / gemini-cli / grok），拼进 session_id 便于溯源，默认 mcp。
-    MEMORY_AUTO_CONSENT   =1 时每次调用前自动为该用户开启记忆同意。仅建议个人自用部署开启；
+    MEMORY_AUTO_CONSENT   =1 时仅为无设置行新用户默认开启记忆同意。仅建议个人自用部署开启；
+                          显式关闭或同意版本过期的已有行绝不被它改动（修复第 7 轮）；
                           不开则需先通过 REST 的 /v1/me/settings 完成同意，否则写入会被跳过、召回为空。
 数据库与嵌入配置沿用 app.config 的环境变量（DATABASE_URL、GEMINI_API_KEY 等）。
 
@@ -70,18 +71,20 @@ def _user() -> UserContext:
 
 
 def _ensure_auto_consent(db: Session, u: UserContext) -> None:
-    """个人自用便利：MEMORY_AUTO_CONSENT=1 时自动开启同意，免去先调一遍设置接口。"""
+    """个人自用便利：MEMORY_AUTO_CONSENT=1 时仅为无设置行新用户默认开启同意，
+    免去先调一遍设置接口。
+
+    修复第 7 轮（审计 F-15）：绝不修改已有行——显式关闭高于自动同意，
+    同意版本过期也必须由用户经 settings PUT 带当前版本重新同意，不能由
+    环境变量静默刷掉；否则 MCP 侧全部 memory_enabled 检查恒为真，同意门
+    形同虚设。
+    """
     if os.environ.get("MEMORY_AUTO_CONSENT") != "1":
         return
     row = get_setting(db, u)
     if row is None:
         db.add(m.UserSetting(app_id=u.app_id, user_id=u.user_id, memory_enabled=True,
                              consent_version=CONSENT_VERSION, consent_at=datetime.now(UTC)))
-        db.commit()
-    elif not (row.memory_enabled and row.consent_version == CONSENT_VERSION):
-        row.memory_enabled = True
-        row.consent_version = CONSENT_VERSION
-        row.consent_at = datetime.now(UTC)
         db.commit()
 
 

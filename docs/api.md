@@ -65,6 +65,7 @@
 - 读取：`GET /v1/me/settings?user_id=alice`。
 - 开启：`PUT {"user_id": "alice", "memory_enabled": true, "consent_version": "2026-10-v1"}`。版本必须等于 `GET` 返回的 `current_consent_version`，否则 `409 consent_required`，前端重新展示授权页。隐私说明改版时升版本号，老用户需要重新同意。
 - 关闭：`PUT {"user_id": "alice", "memory_enabled": false}`，立即生效：不写入、不召回，**已有数据保留**（要删请用清空）。再次开启同一版本无需重新同意。
+- 同意门覆盖全部同步写入口（修复第 7 轮收口）：纠正、Markdown 导回、经验 PATCH 在未同意/已暂停/同意过期时一律 `404`（与反馈/提醒入口同形，不泄露状态）；无设置行用户同样被拦。删除（单条遗忘、全部清空）与开关本身不受门限制。MCP 的 `MEMORY_AUTO_CONSENT=1` 仅为无设置行新用户默认开启，显式关闭或版本过期的已有行绝不被它改动。
 
 ## 查看我的记忆 ✅　`GET /v1/me/memories?user_id=&kind=fact|preference&offset=0&limit=50`
 - v1 先全量查出再在内存里分页（单用户条数有上限，见架构文档）；数据量上来后改成 SQL 分页。

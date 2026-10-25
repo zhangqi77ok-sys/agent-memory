@@ -116,6 +116,9 @@ def test_markdown_import_redacts_secrets(db):
 
 
 def test_markdown_rest_endpoints(db, client):
+    from tests.conftest import consent
+
+    consent(client, "alice")  # 修复第 7 轮：导入入口过同意门
     _insight(db, content="REST 同步的经验", confidence=0.8)
     r = client.get("/v1/me/markdown", params={"user_id": "alice"})
     assert r.status_code == 200 and r.json()["count"] >= 1
