@@ -114,6 +114,12 @@ pytest -q -k cross_user   # 只跑串用户
 这是合成场景的数字——真实任务的数字要拿自己的轨迹按脚本 docstring 的
 JSONL 格式喂进去跑；跑生产库会污染回流账本，脚本只认临时库。
 
+第二十六轮补成真两臂 + 返工：brief 臂（只读简报）vs no-brief 臂（通读
+轨迹全文），同 5 场景下返工 0 vs 5、避免返工 5（模拟口径：no-brief 臂必然
+重踩 pitfall，brief 臂命中 must 串时跳过；缺 pitfall 的场景不计返工）。
+返工是确定性模拟，不是真 agent 实测；token 口径未变，77.9% 与第十九轮
+完全一致。
+
 ### 排序乘子敏感性（scripts/ranking_sensitivity.py，200 条合成经验）
 
 | 变体 | top-5 Jaccard | Kendall tau |

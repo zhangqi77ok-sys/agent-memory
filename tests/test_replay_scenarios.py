@@ -61,6 +61,7 @@ SCENARIOS = [
             applies_when="部署或启动本地服务、需要绑定端口时")],
         "task": "再部署一个新服务到这台机器",
         "must": "ss -tlnp",
+        "pitfall": "在 8080 启动服务",
     },
     {
         "id": "migration-pg-only",
@@ -84,6 +85,7 @@ SCENARIOS = [
             applies_when="写数据库迁移或改表结构时")],
         "task": "给订单表加一列备注，走数据库迁移上线",
         "must": "真库",
+        "pitfall": "本地 SQLite 测试全绿，提交",
     },
     {
         "id": "git-push-ssh",
@@ -111,6 +113,7 @@ SCENARIOS = [
             applies_when="在本机向 GitHub 推送失败时")],
         "task": "把另一个仓库的分支推送到 GitHub",
         "must": "ssh.github.com",
+        "pitfall": "git push 走 HTTPS，弹出用户名密码，失败",
     },
     {
         "id": "rate-limit-retry",
@@ -136,6 +139,7 @@ SCENARIOS = [
             applies_when="批量调用有速率限制的外部 API 时")],
         "task": "再批量调用一次这个 API 处理新数据",
         "must": "Retry-After",
+        "pitfall": "以为是临时抖动，原样重跑，又在差不多的位置挂掉",
     },
     {
         "id": "secret-in-logs",
@@ -160,6 +164,7 @@ SCENARIOS = [
             applies_when="打印配置、连接串或请求头做调试时")],
         "task": "排查测试环境调用失败，准备打印请求细节看问题",
         "must": "脱敏",
+        "pitfall": "把连接串完整打印到调试日志里确认参数",
     },
 ]
 
