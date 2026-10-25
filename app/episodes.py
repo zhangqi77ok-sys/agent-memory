@@ -448,6 +448,23 @@ def _lock_user(db: Session, app_id: str, user_id: str) -> None:
                    {"k": f"{app_id}:{user_id}"})
 
 
+def _switch_off(db: Session, ep: TaskEpisode) -> bool:
+    """记忆开关是否被显式关掉（修复第 4 轮）。函数级导入避免循环
+    （worker.py:113 同款写法）。
+
+    语义取舍（与巡检过滤同口径，见 fix4-design-draft.md §5）：只认
+    “有设置行且未开启（含同意版本过期）”。无设置行的用户不过滤——
+    提炼入口（REST submit）本就对无设置用户严格拒绝，worker 侧这道门
+    只负责“已有设置被关掉”的在途变更；直接调服务层提炼的存量行为
+    （含多轮测试直接造轨迹）不受影响。主动关过开关的用户一定有
+    设置行，一定被拦住——审计关心的情形全覆盖。"""
+    from app.api.me import get_setting
+    from app.schemas import CONSENT_VERSION
+
+    s = get_setting(db, UserContext(ep.app_id, ep.user_id))
+    return s is not None and not (s.memory_enabled and s.consent_version == CONSENT_VERSION)
+
+
 def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmbedder | None = None,
                     linker=None) -> str:
     """对一个 episode 做复盘提炼并入库，返回聚合裁决 update > add > noop（无产出为 empty）。
@@ -455,6 +472,8 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
     提炼器可以是对象（.distill(text)）或可调用；单条经验被注入闸门拦下只丢弃该条，
     不像事实抽取那样整批作废——轨迹里混入的恶意文本不该让正当经验陪葬，
     闸门拦截本身留痕在日志里方便复盘。
+    另两种终态（修复第 4 轮）：开关关闭为 skipped（整批回滚、集置 done），
+    轨迹行中途被删为 missing（整批回滚、不提交）。
     """
     u = UserContext(ep.app_id, ep.user_id)
     _lock_user(db, ep.app_id, ep.user_id)
@@ -478,6 +497,19 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
                         fact_ids=[], decision="tombstoned"))
         db.commit()
         return "tombstoned"
+    # 修复第 4 轮：提炼起手开关门——审计 F1a：此前提炼全程无开关检查，
+    # 关闭后仍写经验。命中即消费掉该集（done + skipped 审计），不置回
+    # pending：pending 会在开关持续关闭期间被反复认领、空耗认领次数
+    # 或主循环空转；开关关闭是状态变更不是瞬时故障，消费 + 留痕与
+    # 事实侧 skip 语义一致，轨迹行本身保留，日后可重提。
+    if _switch_off(db, ep):
+        ep.distill_status = "done"
+        ep.locked_until = None
+        ep.last_error = None
+        db.add(AuditLog(app_id=ep.app_id, user_id=ep.user_id, action="distill",
+                        fact_ids=[], decision="skipped"))
+        db.commit()
+        return "skipped"
     rendered, sec_header, sec_steps = _render_episode_parts(ep)
     text = strip_injection(rendered).strip()
     # 校验用小节与提炼器视野同口径：题头与各渲染行各过一次 strip_injection
@@ -551,6 +583,26 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
                             action="distill", fact_ids=[], decision="tombstoned"))
             db.commit()
         return "tombstoned"
+    # 修复第 4 轮：提交前开关门——提炼慢调用窗口内关闭开关时整批回滚，
+    # 不留半批经验；语义与起手门一致（done + skipped 审计）。
+    if _switch_off(db, ep):
+        ep_id = ep.id
+        db.rollback()
+        live = db.get(TaskEpisode, ep_id)
+        if live is not None:
+            live.distill_status = "done"
+            live.locked_until = None
+            live.last_error = None
+            db.add(AuditLog(app_id=live.app_id, user_id=live.user_id,
+                            action="distill", fact_ids=[], decision="skipped"))
+            db.commit()
+        return "skipped"
+    # 修复第 4 轮：提交前存在性重查——轨迹行在提炼中途被删时，
+    # 末尾对已删行 UPDATE 0 行即 StaleDataError（与事实侧同机理），
+    # 故先查后提交；行已删则回滚整批并返回 missing。
+    if db.scalar(select(TaskEpisode.id).where(TaskEpisode.id == ep.id)) is None:
+        db.rollback()
+        return "missing"
     ep.distill_status = "done"
     ep.locked_until = None
     ep.last_error = None
@@ -603,10 +655,14 @@ def skeletonize_episodes(db: Session, now: datetime | None = None,
         return 0
     now = now or _now()
     cutoff = now - timedelta(days=retention_days)
-    rows = list(db.scalars(select(TaskEpisode).where(
+    from app.api.me import switched_off_users
+
+    off = switched_off_users(db)
+    rows = [r for r in list(db.scalars(select(TaskEpisode).where(
         TaskEpisode.distill_status == "done",
         TaskEpisode.created_at < cutoff,
         or_(TaskEpisode.skeletonized.is_(False), TaskEpisode.skeletonized.is_(None)))))
+        if (r.app_id, r.user_id) not in off]
     done = 0
     for ep in rows:
         steps = ep.steps or []
@@ -656,11 +712,19 @@ def run_episode_once(db: Session, distiller, embedder: GeminiEmbedder | None = N
     ep = claim_episode(db)
     if ep is None:
         return None
+    # 修复第 4 轮：先取主键——distill_episode 回滚后 ep 对象过期，
+    # 再访问 ep.id 会触发 refresh，已删行即抛 ObjectDeletedError；
+    # 此前两处 except 分支与末尾返回都有同一隐患。
+    ep_id = ep.id
     try:
         distill_episode(db, ep, distiller, embedder, linker=linker)
     except InvalidExtraction:
         db.rollback()
-        ep = db.get(TaskEpisode, ep.id)
+        ep = db.get(TaskEpisode, ep_id)
+        # 修复第 4 轮：轨迹行在提炼中途被删是正常终态，直接返回 None；
+        # 此前直接解引用抛 AttributeError，掩盖原错且无法记账。
+        if ep is None:
+            return None
         ep.distill_status = "done"
         ep.locked_until = None
         ep.last_error = "discarded: invalid distiller output"
@@ -669,12 +733,14 @@ def run_episode_once(db: Session, distiller, embedder: GeminiEmbedder | None = N
         db.commit()
     except Exception as e:  # 瞬时故障：计数后退回重试或标失败，错误留痕
         db.rollback()
-        ep = db.get(TaskEpisode, ep.id)
+        ep = db.get(TaskEpisode, ep_id)
+        if ep is None:
+            return None
         ep.distill_status = "failed" if ep.attempts >= MAX_DISTILL_ATTEMPTS else "pending"
         ep.locked_until = None
         ep.last_error = str(e)[:2000]
         db.commit()
-    return db.get(TaskEpisode, ep.id)
+    return db.get(TaskEpisode, ep_id)
 
 
 def _confidence(pos: int, neg: int, auto_pos: int = 0, auto_neg: int = 0) -> float:
@@ -835,9 +901,15 @@ def consolidate_insights(db: Session, now: datetime | None = None, linker=None) 
       正面证据（人工好评与自动成功皆无）的经验关行退出召回——衰减下限 0.1 还留
       约 58% 排序权重，那不叫遗忘，叫赖着不走。关行不真删，面板与导出仍可见。
     返回 {"decayed": n, "merged": n, "conflicts": n, "adjudicated": n, "retired": n,
-    "differentiated": n, "synthesized": n}，自己 commit。"""
+    "differentiated": n, "synthesized": n}，自己 commit。
+    修复第 4 轮：显式关掉记忆的用户整轮跳过（入口快照语义，轮内翻转
+    下一轮起效，见 fix4-design-draft.md §5）。"""
     now = now or _now()
-    rows = list(db.scalars(select(MemoryInsight).where(MemoryInsight.valid_to.is_(None))))
+    from app.api.me import switched_off_users
+
+    off = switched_off_users(db)
+    rows = [r for r in list(db.scalars(select(MemoryInsight).where(MemoryInsight.valid_to.is_(None))))
+            if (r.app_id, r.user_id) not in off]
     decayed = 0
     retired = 0
     for row in rows:

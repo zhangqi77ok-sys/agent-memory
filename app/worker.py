@@ -61,38 +61,46 @@ def expire_memories(db: Session, ttl_days: int = 0, now: datetime | None = None)
     now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(days=ttl_days)
     count = 0
+    # 修复第 4 轮：巡检开关过滤——显式关掉记忆的用户（§5 口径）不碰，
+    # 哪怕是 TTL 到期也不由 worker 动他的数据；重新开启后下一轮恢复。
+    from app.api.me import switched_off_users
+
+    off = switched_off_users(db)
+
+    def keep(r):
+        return (r.app_id, r.user_id) not in off
 
     # 事实过期
-    facts = db.scalars(select(m.MemoryFact).where(
+    facts = [f for f in db.scalars(select(m.MemoryFact).where(
         m.MemoryFact.valid_to.is_(None),
         m.MemoryFact.valid_from < cutoff,
-    )).all()
+    )).all() if keep(f)]
     for f in facts:
         f.valid_to = now
         count += 1
 
     # 偏好过期
-    prefs = db.scalars(select(m.MemoryPreference).where(
+    prefs = [p for p in db.scalars(select(m.MemoryPreference).where(
         m.MemoryPreference.valid_to.is_(None),
         m.MemoryPreference.valid_from < cutoff,
-    )).all()
+    )).all() if keep(p)]
     for p in prefs:
         p.valid_to = now
         count += 1
 
     # 经验过期（第七轮补：新表此前不在 TTL 覆盖内，只进不出）
-    insights = db.scalars(select(m.MemoryInsight).where(
+    insights = [i for i in db.scalars(select(m.MemoryInsight).where(
         m.MemoryInsight.valid_to.is_(None),
         m.MemoryInsight.valid_from < cutoff,
-    )).all()
+    )).all() if keep(i)]
     for ins in insights:
         ins.valid_to = now
         count += 1
 
     # 轨迹过期：原始过程比经验更敏感，不做软失效，直接删行（已提炼的经验按上一条独立过期）
-    old_episodes = db.scalars(select(m.TaskEpisode).where(
+    old_episodes = [e for e in db.scalars(select(m.TaskEpisode).where(
         m.TaskEpisode.created_at < cutoff,
-    )).all()
+    )).all() if keep(e)]
     for ep in old_episodes:
         db.delete(ep)
         count += 1
@@ -362,6 +370,33 @@ def _lock_user(db: Session, job: m.MemoryJob) -> None:
                    {"k": f"{job.app_id}:{job.user_id}"})
 
 
+def _midflight_gate(db: Session, job: m.MemoryJob) -> str | None:
+    """在途任务提交前三重门（修复第 4 轮，审计 F1a/F1b/F1c 的剩余口子）。
+
+    抽取/嵌入是慢调用，起手门（第 2 轮）看不见窗口内发生的状态变更，
+    故每次写入前重查——三次查询均为新鲜 SELECT，不用 ORM 缓存对象
+    （另一会话的提交只有新 SELECT 才看得见；SQLite 按提交态可见、
+    PG 按 READ COMMITTED 语句快照，两库都成立）。
+    返回 None = 放行；"missing" = 任务行已被删（clear_all 等）；
+    "skip" = 开关已关，或用户在任务创建后又有新的遗忘（水位规则与
+    第 2 轮起手门同一口径：整单丢弃，不论候选是否与遗忘内容相关——
+    抽取输出措辞可能与被遗忘内容不同，逐候选哈希拦不住语义复活）。
+    """
+    from app.tombstone import _aware, user_forget_watermark
+
+    if db.scalar(select(m.MemoryJob.id).where(m.MemoryJob.id == job.id)) is None:
+        return "missing"
+    if not _memory_on(db, job):
+        return "skip"
+    watermark = user_forget_watermark(db, job.app_id, job.user_id)
+    if watermark is not None and _aware(job.created_at) is not None \
+            and _aware(job.created_at) < watermark:
+        log.info("job=%s user=%s skip: forgotten during extraction",
+                 job.id, mask_user_id(job.user_id))
+        return "skip"
+    return None
+
+
 def _extract_and_write(db: Session, job: m.MemoryJob, extractor, embedder=None,
                        linker=None) -> tuple[str, list[str]]:
     if not _memory_on(db, job):
@@ -386,7 +421,19 @@ def _extract_and_write(db: Session, job: m.MemoryJob, extractor, embedder=None,
     source_msg_id = _source_msg_id(messages)
     decisions: list[str] = []
     ids: list[str] = []
+    # 修复第 4 轮：抽取返回后先过一次门——候选为空时循环不跑，若不查，
+    # _finish 会对已被删的任务行 UPDATE 0 行（SQLite 崩溃的直接触发点）。
+    gate = _midflight_gate(db, job)
+    if gate is not None:
+        db.rollback()
+        return gate, []
     for candidate in candidates:
+        # 嵌入调用也可能耗时，逐候选再查一次；命中则回滚本批待定写入，
+        # 不留半批（_finish 只提交审计与任务终态，事实写回已被回滚）。
+        gate = _midflight_gate(db, job)
+        if gate is not None:
+            db.rollback()
+            return gate, []
         decision, new_id = _apply(db, job, candidate, source_msg_id, embedder=embedder)
         decisions.append(decision)
         if new_id:
@@ -416,11 +463,20 @@ def process_job(db: Session, job: m.MemoryJob, extractor, embedder=None, linker=
     except InvalidExtraction:
         db.rollback()
         current = db.scalar(select(m.MemoryJob).where(m.MemoryJob.id == job_id).with_for_update())
+        # 修复第 4 轮：重读为空 = 任务行在抽取中途被删（clear_all），
+        # 是正常终态不是故障；此前直接 current.user_id 会 AttributeError。
+        if current is None:
+            return "missing"
         log.info("job=%s user=%s decision=discard prompt=%s", job_id, mask_user_id(current.user_id), PROMPT_VERSION)
         return _finish(db, current, "discard", [])
     except Exception:
         db.rollback()
         raise
+    # 修复第 4 轮：任务行已删时不调 _finish——行已无，无可更新，
+    # 调了就是 UPDATE 0 行的 StaleDataError（SQLite 崩溃的触发点）。
+    if decision == "missing":
+        db.rollback()
+        return "missing"
     return _finish(db, current, decision, fact_ids)
 
 
@@ -436,7 +492,10 @@ def run_once(db: Session, extractor, embedder=None, linker=None) -> m.MemoryJob 
         db.rollback()
         failed = db.get(m.MemoryJob, job_id)
         if failed is None:
-            raise
+            # 修复第 4 轮：任务行在处理中途被删是正常终态（clear_all），
+            # 不是故障；此前重抛 → main 主循环无 try → worker 进程退出。
+            log.warning("job=%s deleted mid-flight, dropping", job_id)
+            return None
         fail_job(db, failed, str(e))
         log.warning("job=%s attempts=%s status=%s error=%s", job_id, failed.attempts, failed.status, failed.last_error)
     return db.get(m.MemoryJob, job_id)

@@ -237,9 +237,15 @@ def sleep_consolidate(db: Session, linker=None,
     "linked": n, "generalized": n}。无记忆的用户不落行（weave 同口径）。
     """
     now = _aware(now) or _now()
+    # 修复第 4 轮：巡检开关过滤——显式关掉记忆的用户整轮跳过，
+    # 不落报告行（入口快照语义，轮内翻转下一轮起效）。
+    from app.api.me import switched_off_users
+
+    off = switched_off_users(db)
     users = db.execute(select(MemoryInsight.app_id, MemoryInsight.user_id).distinct()).all()
     users += [u for u in db.execute(select(MemoryFact.app_id, MemoryFact.user_id).distinct()).all()
               if u not in users]
+    users = [u for u in users if tuple(u) not in off]
     stats = {"reports": 0, "merged": 0, "pruned": 0, "strengthened": 0,
              "linked": 0, "generalized": 0}
     for app_id, user_id in users:

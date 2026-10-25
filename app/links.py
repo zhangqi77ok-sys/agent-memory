@@ -460,14 +460,18 @@ def _uf_find(parent: list[int], x: int) -> int:
     return x
 
 
-def _close_dead_links(db: Session) -> int:
-    """关掉指向已关闭/已删除端点的现行边，返回关边数（巡检兜底）。"""
+def _close_dead_links(db: Session, skip_users: set | None = None) -> int:
+    """关掉指向已关闭/已删除端点的现行边，返回关边数（巡检兜底）。
+    skip_users（修复第 4 轮）：显式关掉记忆的用户不碰，其残边留待
+    该用户重新开启后的巡检处理。"""
     alive = {}
     for model, kind in ((MemoryFact, "fact"), (MemoryInsight, "insight")):
         alive[kind] = {r[0] for r in db.execute(
             select(model.id).where(model.valid_to.is_(None))).all()}
     closed = 0
     for link in db.scalars(select(MemoryLink).where(MemoryLink.valid_to.is_(None))):
+        if skip_users is not None and (link.app_id, link.user_id) in skip_users:
+            continue
         if link.src_id not in alive.get(link.src_kind, set()) or \
                 link.dst_id not in alive.get(link.dst_kind, set()):
             link.valid_to = _now()
@@ -485,15 +489,20 @@ def weave_links(db: Session, linker=None) -> dict:
        落一条 project=None 的经验并连 generalizes 边（无判定器不硬造原则，
        簇内只连 related）。
     返回 {"pruned": n, "linked": n, "contradicts": n, "generalized": n}。"""
+    from app.api.me import switched_off_users
     from app.auth import UserContext
     from app.episodes import _apply_insight, _Cand  # 局部导入避免循环（episodes 也 import 本模块）
 
-    stats = {"pruned": _close_dead_links(db), "linked": 0, "contradicts": 0,
+    # 修复第 4 轮：巡检开关过滤——显式关掉记忆的用户整轮跳过
+    # （入口快照语义，轮内翻转下一轮起效，见 fix4-design-draft.md §5）。
+    off = switched_off_users(db)
+    stats = {"pruned": _close_dead_links(db, skip_users=off), "linked": 0, "contradicts": 0,
              "generalized": 0, "decayed_edges": 0}
     judge = linker.judge if linker is not None else None
     users = db.execute(select(MemoryInsight.app_id, MemoryInsight.user_id).distinct()).all()
     users += [u for u in db.execute(select(MemoryFact.app_id, MemoryFact.user_id).distinct()).all()
               if u not in users]
+    users = [u for u in users if tuple(u) not in off]
     for app_id, user_id in users:
         linked_pairs: set[frozenset] = set()
         for link in db.scalars(select(MemoryLink).where(

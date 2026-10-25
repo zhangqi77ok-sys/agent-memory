@@ -43,6 +43,20 @@ def memory_enabled(db: Session, u: UserContext) -> bool:
     return bool(s and s.memory_enabled and s.consent_version == CONSENT_VERSION)
 
 
+def switched_off_users(db: Session) -> set[tuple[str, str]]:
+    """显式关掉记忆的用户集合（修复第 4 轮，巡检过滤用）：有设置行且
+    未开启（含同意版本过期——memory_enabled 对这类用户同样返回 False，
+    口径一致）。无设置行的用户不过滤：巡检面对的存量行可能早于设置表，
+    且多轮巡检测试直接造行而不走 consent，严格语义会悄悄改变 legacy
+    行为；主动关过开关的用户一定有设置行，一定被滤掉。"""
+    rows = db.execute(select(m.UserSetting.app_id, m.UserSetting.user_id).where(
+        (m.UserSetting.memory_enabled.is_(False))
+        | (m.UserSetting.consent_version != CONSENT_VERSION))).all()
+    # 转普通 tuple：Row 对象与 tuple 的哈希不一致，直接 set(rows) 会使
+    # 后续的 tuple 成员判断静默失效。
+    return {(r[0], r[1]) for r in rows}
+
+
 def _fact_item(f: m.MemoryFact) -> MemoryItem:
     return MemoryItem(id=f.id, kind="fact", subject=f.subject, content=f.content, version=f.version,
                       valid_from=f.valid_from, source_session_id=f.source_session_id,
@@ -117,6 +131,14 @@ def clear_all(u: UserContext = Depends(user_from_query), db: Session = Depends(g
     v1 同步执行（单用户数据量小）；id 记入 forgotten_id，备份恢复后据此重删。
     """
     bind_user(db, u)
+    # 修复第 4 轮：任务行最先删（审计 F1c 的 PG 一半）。PG 下在途 worker
+    # 持有任务行 FOR UPDATE 锁，任务行删除会阻塞到 worker 提交为止——
+    # 阻塞是期望的：它把“在途写回”变成“发生在事实删除之前”，从而被
+    # 后续的用户谓词删除覆盖；快照随之移到任务行删除之后（PG READ
+    # COMMITTED 下快照语句看得见 worker 刚提交的新行，新事实的 token
+    # 与墓碑一并覆盖，孤儿 token 消失）。SQLite 下任务行删除立即成功，
+    # 在途 worker 靠提交前存在性重查回滚，同样零残留。
+    db.execute(delete(m.MemoryJob).where(*_mine(m.MemoryJob, u)))
     # 修复第 2 轮：删前先载内容字段（Core delete 后无从取），逐行记内容墓碑；
     # 此前只载 id，清空后重发同一内容无墓碑可查。
     fact_rows = list(db.scalars(select(m.MemoryFact).where(*_mine(m.MemoryFact, u))))
@@ -136,7 +158,7 @@ def clear_all(u: UserContext = Depends(user_from_query), db: Session = Depends(g
     insight_snap = [(r.subject, r.content) for r in insight_rows]
     episode_snap = [(r.title, r.steps) for r in episode_rows]
     reminder_snap = [(r.condition_text, r.action_text) for r in reminder_rows]
-    for model in (m.MemoryFact, m.MemoryPreference, m.SessionSummary, m.SessionMessage, m.MemoryJob,
+    for model in (m.MemoryFact, m.MemoryPreference, m.SessionSummary, m.SessionMessage,
                   m.MemoryInsight, m.TaskEpisode):
         db.execute(delete(model).where(*_mine(model, u)))
     # 倒排索引随父行清（Core delete 不触发 ORM 事件；按本用户的父 id 精确删）
