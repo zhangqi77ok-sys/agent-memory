@@ -92,6 +92,8 @@ Jenkins 全局环境变量：`DEPLOY_HOST`（Jenkins 容器访问宿主用 docke
 | `ROOT_PATH` | 反向代理前缀 `/memory`，传给 `uvicorn --root-path`，Swagger 才能加载正确的 `openapi.json` |
 | `DOCS_ENABLED` | Swagger UI 开关。默认 prod 关闭；演示部署设 `true` 打开 `/memory/docs`。正式上线前改回 `false` |
 | `SERVICE_KEYS` | 业务调用方服务密钥，支持逗号分隔多个值以便轮换。业务接口必须在请求头带 `X-Service-Key` |
+| `SERVICE_KEY_USERS` | 逗号分隔 `key:user` 对：绑密钥到用户，绑定后该密钥的请求身份钉死，`user_id` 断言失效（推荐的多用户部署方式） |
+| `ALLOW_UNBOUND_ASSERTION` | 默认 `0`：未绑定密钥的远程断言一律 `403`。仅在确认单用户自用的前提下设 `1`，显式恢复断言行为 |
 | `RATE_LIMIT_ENABLED` | 是否开启应用层限流，默认 `true` |
 | `RATE_LIMIT_READ_PER_MIN` | 读接口按 `user_id` 每分钟限流阈值，默认 `120` |
 | `RATE_LIMIT_WRITE_PER_MIN` | 写/导出/删除接口按 `user_id` 每分钟限流阈值（限得更严），默认 `30` |

@@ -50,6 +50,10 @@ def create_app(s: Settings = settings) -> FastAPI:
             # 第二十五轮身份绑定：密钥映射到用户时，该请求后续的身份解析
             # 一律以绑定用户为准（user_from_query / body 端点）；未绑定为 None。
             request.state.bound_user = bound_user(key, s)
+            # 修复第 1 轮：把该应用的断言放行开关同样盖到请求上，身份函数
+            # （user_from_query / resolve_asserted）据此执行默认拒绝口径；
+            # 不经模块级 settings，避免 create_app(Settings(...)) 测试应用走错口径。
+            request.state.allow_unbound_assertion = s.allow_unbound_assertion
 
             # 应用层 user_id 限流（绑定用户优先，否则账算到被断言的人头上）
             if s.is_rate_limit_enabled and path.startswith("/v1/"):

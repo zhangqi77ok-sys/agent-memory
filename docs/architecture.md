@@ -44,7 +44,7 @@ flowchart LR
 | 组件 | 职责 | 关键约束 |
 |---|---|---|
 | 接入层 | 路由、版本 `/v1`、限流、请求 ID / traceparent | 不接受 body 里的 `app_id`；`user_id` 由业务传入 |
-| 身份 | 读取请求里的 `user_id`，配上配置 `APP_ID`，生成 `UserContext` | 应用只来自 `APP_ID` |
+| 身份 | 读取请求里的 `user_id`，配上配置 `APP_ID`，生成 `UserContext` | 应用只来自 `APP_ID`；未绑定密钥的远程断言默认 403（修复第 1 轮），身份来源是绑定或显式单用户声明，不是裸断言 |
 | 写入 API | 校验、幂等登记、入队，立即返回 `202 + job_id` | 同一 `Idempotency-Key` 只处理一次 |
 | Worker | 原文脱敏 → LLM 抽取候选 → 候选再脱敏 → 同 subject/key 去重 → 代码判定 ADD/UPDATE/NOOP → 入库 | 模型只给建议，判定规则在代码里。嵌入列仍为空，向量召回未接 |
 | 召回 API | 检索前预过滤（应用/用户 + `valid_to IS NULL`）→ 向量 top-N + BM25 top-N → RRF 融合 → token 预算裁剪 | 结果带 `fact_id` 便于审计 |

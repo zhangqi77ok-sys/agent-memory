@@ -3,7 +3,7 @@
 - Base URL：`http(s)://<host>:8000`，所有业务接口带 `/v1` 前缀。
 - 信任边界与服务密钥：服务仅供内网/业务服务器调用。所有 `/v1/*` 业务接口必须在请求头中携带服务密钥 `X-Service-Key`（取自环境变量 `SERVICE_KEYS`，支持多值轮换），缺失或错误返回 `401`；健康检查 `/healthz`、`/readyz` 不需要密钥。
 - 身份：业务调用方在上游完成身份校验与鉴权后传入 `user_id`（有 JSON body 的接口放 body，GET/DELETE 用 `?user_id=`），本服务不做用户登录。缺失或空串返回 `422`。`app_id` 由服务配置 `APP_ID` 固定（默认 `tiancode`），调用方不能切换；body 里出现 `app_id` 等未定义字段一律 `422`。
-- 身份绑定（第二十五轮，opt-in）：配置 `SERVICE_KEY_USERS`（逗号分隔 `key:user` 对）后，该密钥的请求即以绑定用户为准，查询与 body 里的 `user_id` 断言全部失效；未配置时行为不变。绑定只收窄不放宽——映射里的 key 仍须先过 `SERVICE_KEYS` 校验。面板可用 `GET /v1/me/identity` 查看当前身份与模式（`bound`）。MCP 不受绑定影响（工具传参面，见 architecture.md）。
+- 身份绑定（第二十五轮，opt-in）与未绑定断言默认拒绝（修复第 1 轮）：配置 `SERVICE_KEY_USERS`（逗号分隔 `key:user` 对）后，该密钥的请求即以绑定用户为准，查询与 body 里的 `user_id` 断言全部失效；未配置绑定时，默认不再接受远程断言——未绑定密钥带 `user_id` 调任何业务接口一律 `403`（错误码 `unbound_assertion_denied`），出路二选一：用 `SERVICE_KEY_USERS` 绑密钥，或在确认单用户自用的前提下设 `ALLOW_UNBOUND_ASSERTION=1` 显式恢复断言行为。绑定只收窄不放宽——映射里的 key 仍须先过 `SERVICE_KEYS` 校验。面板可用 `GET /v1/me/identity` 查看当前身份与模式（`bound`）。MCP 不受绑定影响（工具传参面，见 architecture.md）。
 - 交互式文档：非 prod 环境或配置 `DOCS_ENABLED=true` 时可访问 `/docs`（Swagger UI）或 `/openapi.json`；prod 默认关闭（返回 `404`）。
 - C 端面板：`/memory/ui/`（Vue 静态站，只调本文 `/v1/me/*`；仅内网可访问；演示填写 `user_id`，也可用 `?user_id=` 预填）。
 - 接入指南与调用代码示例：详见 [tiancode 业务方接入指南](tiancode-integration.md)。

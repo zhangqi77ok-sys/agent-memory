@@ -15,6 +15,10 @@ else:
     os.environ["DATABASE_URL"] = "sqlite:///./test.db"
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("SERVICE_KEYS", "test-service-key,test-service-key-2")
+# 修复第 1 轮：存量套件历来就是单用户断言模式（未绑定测试密钥 + ?user_id=/body 断言），
+# 在此显式声明测试态放行断言；默认拒绝口径由 tests/test_fix1_key_binding.py 专测，
+# 不改几百处旧测试的调用方式。
+os.environ.setdefault("ALLOW_UNBOUND_ASSERTION", "1")
 
 import pytest
 from fastapi.testclient import TestClient

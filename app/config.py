@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     env: str | None = None  # 支持 ENV=prod 环境变量
     service_keys: str = ""  # 逗号分隔的合法服务密钥，支持轮换
     service_key_users: str = ""  # 逗号分隔 key:user 对（第二十五轮）：绑定后该密钥即身份，自断言失效；为空 = 不绑定
+    allow_unbound_assertion: bool = False  # 修复第 1 轮：显式声明单用户自用才允许未绑定密钥自断言身份；
+    # 默认 False = 经中间件的远程断言一律 403（绑定密钥与进程内直调不受影响）
     admin_keys: str = ""  # 管理端密钥（逗号分隔，第十七轮）；为空 = 管理端接口关闭（404）
     database_url: str = "sqlite:///./dev.db"  # 服务运行账号（非 owner/非超级用户）
     worker_database_url: str | None = None  # Worker 账号 memsvc_worker（BYPASSRLS）；为空时用 database_url（仅 SQLite/开发）
