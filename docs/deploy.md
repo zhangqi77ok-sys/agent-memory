@@ -25,7 +25,15 @@
   产物 `agent-memory-<日期>.dump`；恢复：`pg_restore -d memory <文件>` 后
   `alembic upgrade head`（dump 本身不含 `alembic_version` 的话需先核对版本）。
 - 恢复演练每季度做一次：恢复到临时库、跑 `curl /readyz` 与一条简报查询，
-  只备不练等于没备。
+  只备不练等于没备。可执行的演练（第三十轮，首次实跑验证）：
+  `scripts/restore_drill.sh`（自起自停 scratch 集群，只跑
+  tests/test_round30_drill.py，临时库 memory_drill_*，不碰生产库），
+  或在 PG 套件里随全套跑。演练证明点：dump 往返行数相等（含两张
+  token 表与 forgotten_id）、alembic_version 随 dump 走（恢复后
+  `alembic current` 等于备份前版本）、恢复后简报可用、备份后才发生
+  的遗忘经 forgotten_id 合并重删后不复活。注意：deploy/restore.sh
+  本身是 docker-compose 绑定的生产路径，演练验证的是同一套语义的
+  直连 pg_dump/pg_restore 实现，不是 docker 路径本身。
 - 回滚镜像不回滚数据库（先扩后缩）；只有回滚到 0006 之前历史版本时才需先
   `alembic downgrade 0005_app_id`（见下方“回滚”一节）。
 

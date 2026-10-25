@@ -344,3 +344,22 @@ p50 不变、p95 变宽是模型给出的预期，不是事后解释。
   语义判定需 embedding/LLM，本 VM 无可用 embedder/LLM key，判为不可
   落地，不以假阈值充数；同一引文支撑多个结论不做批量去重（一步原文
   可合法支撑一个 pitfall 加一个 strategy）。
+
+## 第 30 轮：备份/恢复演练（首次实跑验证）
+
+- 缺口：备份与恢复脚本、演练节奏（每季度/每月）早已存在，但从未
+  有过一次实跑证据；且 deploy/restore.sh 是 docker-compose 绑定的，
+  在本 VM 上根本跑不起来。演练改走直连 pg_dump/pg_restore，验证
+  同一套语义，不宣称 docker 路径已验。
+- 演练（tests/test_round30_drill.py，PG-only；独立运行器
+  scripts/restore_drill.sh）：临时库 memory_drill_src → pg_dump -Fc →
+  恢复到 memory_drill_dst。种子 3 条事实、2 条经验、1 条备份前已
+  遗忘的 forgotten_id。断言：5 张表往返行数相等；dst 的
+  alembic_version 等于 src 且 `alembic current` 输出一致；恢复后
+  简报（纯关键词路）捞回种子经验；备份后才发生的遗忘（往 dst 插
+  forgotten_id 再按表重删）不复活，其余行仍在。
+- 实跑（2026-10-25）：独立演练 3 passed（4.50s，DRILL_EXIT=0）。
+  候选核查：前端搜索已存在（App.vue 搜索框 + 过滤 + 空态），不重复
+  做；10M 实测先算账——token 行约 5.2 亿、2–4 小时长跑、VM 替换会
+  中途清空，证明的只是第 20 轮已说明过的结论，现阶段不做、不伪造
+  10M 数字。
