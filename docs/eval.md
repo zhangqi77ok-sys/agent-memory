@@ -410,3 +410,42 @@ p50 不变、p95 变宽是模型给出的预期，不是事后解释。
 - 诚实边界：14 组探针、短条件短任务，数字不外推为生产误触率；生产
   任务通常更长，余弦分布可能不同；本轮不碰 COS_MIN、不改任何
   生产阈值、不改提醒触发逻辑——只量、只记录、只钉规则。
+
+## 修复第 3 轮：生产恢复五类重删 + 墓碑 sidecar（审计 Top 3）
+
+- 缺口：修复前 `deploy/restore.sh` 只重删事实；偏好、经验无重删，
+  轨迹、提醒连墓碑都没有；第 30 轮演练只测事实且没跑 restore.sh
+  本身。本轮把恢复重删扩到五类（fact / preference / insight /
+  episode / reminder），并补墓碑 sidecar 与真正跑生产脚本的演练。
+- 恢复流程：pg_restore → 合并墓碑（线上库 + sidecar + 备份自带
+  三源取并集）→ 按墓碑重删。id 段精确，并同删 token 行、关联边、
+  交付边；哈希段按 `forgotten_content` 内容哈希删“新 id 重发同一
+  内容”的行（SQL 用 pgcrypto + lower/空白折叠近似 Python norm；
+  轨迹 steps JSON 规范化无法在 SQL 复现，轨迹只走 id 段）。
+  目标库无内容墓碑表（0024 前备份）或 pgcrypto 建不出来时，哈希段
+  整段跳过并打印警告，只走 id 段，不中断恢复。
+- sidecar：`scripts/backup.sh` 在 dump 旁写同名 `.tombstones.json`
+  （只含遗忘 id 与内容哈希，不含原文）；恢复时 `deploy/restore.sh
+  <dump> [目标库] [sidecar]` 合并 sidecar，活库损坏时仅 sidecar
+  生效。任务书“先于数据导入墓碑”字面顺序不可行（pg_restore
+  --clean 会重建墓碑表），实际顺序是“合并墓碑先于重删”，语义等价。
+- 提醒墓碑：clear_all 此前从未给提醒写过任何墓碑，本轮补记内容墓碑
+  （subject=条件，content=动作）与 id 墓碑；无新迁移（两张墓碑表
+  已存在，kind 只是字符串值）。
+- 演练（tests/test_fix3_restore.py，PG-only；独立运行器
+  scripts/restore_drill.sh 现跑 round30 + fix3 两个文件）：直接跑
+  生产 restore.sh 本文件（直连参数覆盖 docker 命令），docker 路径
+  本身在 VM 上仍未验，不宣称已验。场景 1（线上库 + sidecar）五类
+  id/哈希/sidecar 三段全部重删、跨用户同内容行存活、被删者派生数据
+  清零、存活者 intact、简报可用、版本一致、恢复重跑幂等；场景 2
+  （活库不存在）仅 sidecar 仍重删其覆盖的两类；场景 3（备份侧）
+  直连跑 backup.sh，dump 非空且 sidecar 含探针墓碑行。
+- 实跑：独立演练 8 passed（round30 3 + fix3 5，DRILL_EXIT=0）。
+  演练插曲两则（均已修复，非生产事故）：边表的 link_id 在 flush
+  前取不到（测试先 flush 再建边）；恢复重跑时连接池空闲连接占着
+  目标库致 DROP 报 in use（测试重跑前 dispose 引擎；生产侧对应
+  要求是恢复前停应用，见 docs/deploy.md）。
+- 诚实边界：哈希段是近似口径——德语 ß、土耳其 İ、连字、非 ASCII
+  空白可能漏删；写路径禁写（修复第 2 轮，精确 Python 口径）仍是
+  第一道，恢复后新写入仍被它挡住。brief_delivery 的 JSON 账本不改，
+  与 forget 入口行为一致（审计已知残留，另轮处理）。

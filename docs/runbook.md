@@ -31,7 +31,7 @@ curl -s 127.0.0.1:8090/readyz
   本地与异地严格保留 7 天（`KEEP_DAYS=7`）。用户行使「遗忘」后，旧物理备份中尚存该记录；7 天后备份轮换删除才算物理彻底销毁（需与隐私政策对齐）。
 
 ## 3. 恢复 + 遗忘重删演练（每月一次，O2）
-为了保证备份有效且符合遗忘合规，每月必须在演练库执行一次恢复演练（只用假数据，绝不影响生产库）。仓库内可直接跑的演练（第三十轮）：`scripts/restore_drill.sh`（自带 scratch 集群，不依赖 docker）；下面是部署机上的生产路径写法，语义与演练一致：
+为了保证备份有效且符合遗忘合规，每月必须在演练库执行一次恢复演练（只用假数据，绝不影响生产库）。仓库内可直接跑的演练（第三十轮，修复第 3 轮扩展到五类重删 + sidecar）：`scripts/restore_drill.sh`（自带 scratch 集群，不依赖 docker，跑 round30 与 fix3 两个演练文件）；下面是部署机上的生产路径写法，语义与演练一致：
 ```bash
 cd /opt/agent-memory
 ./backup.sh                                                    # 生成最新 dump 文件
@@ -45,8 +45,8 @@ docker compose -p agent-memory exec -T db psql -U memory -d memory -c "DROP DATA
 ```
 - **真实线上库灾难恢复 SOP**：
   1. 停止业务流量与应用容器：`docker compose -p agent-memory stop api worker`
-  2. 选定目标 dump 执行恢复：`./restore.sh /srv/backups/agent-memory/memory-XXX.dump`
-     - `restore.sh` 脚本会先取出当前线上库的 `forgotten_id`，恢复后合并到恢复库，并自动执行重删，防止被遗忘的数据意外复活。
+  2. 选定目标 dump 与 sidecar 执行恢复：`./restore.sh /srv/backups/agent-memory/memory-XXX.dump memory /srv/backups/agent-memory/memory-XXX.tombstones.json`
+     - `restore.sh` 脚本会先取出当前线上库的墓碑（id + 内容哈希），恢复后与 sidecar、备份自带墓碑三源合并，并自动执行五类重删（含哈希段），防止被遗忘的数据意外复活；活库损坏时线上取数为空，仅 sidecar 生效。
      - 脚本随后校验 `alembic current` 以及 `/readyz`。
   3. 恢复应用容器：`docker compose -p agent-memory up -d`
   4. 验证对外服务：`curl -s 127.0.0.1:8090/readyz` 返回 `{"status":"ready"}`。

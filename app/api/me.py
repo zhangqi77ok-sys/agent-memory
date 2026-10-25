@@ -123,14 +123,19 @@ def clear_all(u: UserContext = Depends(user_from_query), db: Session = Depends(g
     pref_rows = list(db.scalars(select(m.MemoryPreference).where(*_mine(m.MemoryPreference, u))))
     insight_rows = list(db.scalars(select(m.MemoryInsight).where(*_mine(m.MemoryInsight, u))))
     episode_rows = list(db.scalars(select(m.TaskEpisode).where(*_mine(m.TaskEpisode, u))))
+    # 修复第 3 轮：提醒是 clear_all 删、此前从未写过任何墓碑；不补则恢复
+    # 五类重删里的 reminder 一类是空文。subject=条件，content=动作。
+    reminder_rows = list(db.scalars(select(m.MemoryReminder).where(*_mine(m.MemoryReminder, u))))
     fact_ids = [r.id for r in fact_rows]
     pref_ids = [r.id for r in pref_rows]
     insight_ids = [r.id for r in insight_rows]
+    reminder_ids = [r.id for r in reminder_rows]
     # 删前快照内容元组：Core delete 后 ORM 对象过期，删后再取会取不到。
     fact_snap = [(r.subject, r.content) for r in fact_rows]
     pref_snap = [(r.key, r.value) for r in pref_rows]
     insight_snap = [(r.subject, r.content) for r in insight_rows]
     episode_snap = [(r.title, r.steps) for r in episode_rows]
+    reminder_snap = [(r.condition_text, r.action_text) for r in reminder_rows]
     for model in (m.MemoryFact, m.MemoryPreference, m.SessionSummary, m.SessionMessage, m.MemoryJob,
                   m.MemoryInsight, m.TaskEpisode):
         db.execute(delete(model).where(*_mine(model, u)))
@@ -150,6 +155,8 @@ def clear_all(u: UserContext = Depends(user_from_query), db: Session = Depends(g
         db.merge(m.ForgottenId(id=i, kind="preference"))
     for i in insight_ids:
         db.merge(m.ForgottenId(id=i, kind="insight"))
+    for i in reminder_ids:
+        db.merge(m.ForgottenId(id=i, kind="reminder"))
     from app.tombstone import record_episode_tombstone, record_tombstone
 
     for subject, content in fact_snap:
@@ -160,6 +167,8 @@ def clear_all(u: UserContext = Depends(user_from_query), db: Session = Depends(g
         record_tombstone(db, u.app_id, u.user_id, "insight", subject, content)
     for title, steps in episode_snap:
         record_episode_tombstone(db, u.app_id, u.user_id, title, steps)
+    for condition, action in reminder_snap:
+        record_tombstone(db, u.app_id, u.user_id, "reminder", condition, action)
     _audit(db, u, "clear_all", fact_ids + pref_ids + insight_ids)
     db.commit()
 

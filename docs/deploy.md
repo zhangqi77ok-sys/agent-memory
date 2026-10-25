@@ -22,22 +22,38 @@
 
 - 备份：`scripts/backup.sh`（pg_dump，表级一致性快照；不含密钥，只备数据）。
   部署机上跑：`BACKUP_DIR=/opt/agent-memory/backups ./scripts/backup.sh`，
-  产物 `agent-memory-<日期>.dump`；恢复：`pg_restore -d memory <文件>` 后
-  `alembic upgrade head`（dump 本身不含 `alembic_version` 的话需先核对版本）。
+  产物 `agent-memory-<日期>.dump` + 同名 `.tombstones.json` 墓碑 sidecar
+  （修复第 3 轮：与 dump 分离存放，只含遗忘 id 与内容哈希，不含原文；
+  恢复时合并 sidecar，即使活库损坏墓碑也不丢）。恢复：生产路径
+  `deploy/restore.sh <dump> [目标库] [sidecar]`，然后 `alembic upgrade
+  head`（dump 本身不含 `alembic_version` 的话需先核对版本）。
+  恢复前先停应用：restore.sh 往非 memory 目标库恢复时会 DROP 重建，
+  目标库有会话会报 in use；往 memory 本库恢复也应停写再做。
+- 恢复流程（修复第 3 轮）：pg_restore → 合并墓碑（线上库 + sidecar +
+  备份自带三源取并集）→ 按墓碑重删 → alembic 校验 → readyz。
+  重删五类：fact / preference / insight / episode / reminder；id 段
+  精确，并同删 token 行、关联边、交付边；哈希段按内容哈希删
+  “新 id 重发同一内容”的行（SQL 用 pgcrypto + lower/空白折叠近似
+  Python norm，残差：德语 ß、土耳其 İ、连字、非 ASCII 空白可能漏删；
+  轨迹 steps JSON 规范化无法在 SQL 复现，轨迹只走 id 段）。
+  目标库无 `forgotten_content` 表（0024 前备份）或 pgcrypto 建不出来
+  时，哈希段整段跳过并打印警告，只走 id 段，不中断恢复。
 - 恢复演练每季度做一次：恢复到临时库、跑 `curl /readyz` 与一条简报查询，
-  只备不练等于没备。可执行的演练（第三十轮，首次实跑验证）：
-  `scripts/restore_drill.sh`（自起自停 scratch 集群，只跑
-  tests/test_round30_drill.py，临时库 memory_drill_*，不碰生产库），
-  或在 PG 套件里随全套跑。演练证明点：dump 往返行数相等（含两张
-  token 表与 forgotten_id）、alembic_version 随 dump 走（恢复后
-  `alembic current` 等于备份前版本）、恢复后简报可用、备份后才发生
-  的遗忘经 forgotten_id 合并重删后不复活。修复第 2 轮新增迁移 0024
- （`forgotten_content` 内容墓碑表）：拉 main 后 `alembic upgrade head`
-  即建表；旧库无内容墓碑，升级前已遗忘的内容只受旧 id-tombstone
-  （恢复侧）保护，写入侧禁写自升级后新发生的遗忘起生效。
-  注意：deploy/restore.sh
-  本身是 docker-compose 绑定的生产路径，演练验证的是同一套语义的
-  直连 pg_dump/pg_restore 实现，不是 docker 路径本身。
+  只备不练等于没备。可执行的演练（第三十轮首次实跑，修复第 3 轮扩展）：
+  `scripts/restore_drill.sh`（自起自停 scratch 集群，跑
+  tests/test_round30_drill.py 与 tests/test_fix3_restore.py，临时库
+  memory_drill_* / memory_fix3_*，不碰生产库），或在 PG 套件里随全套跑。
+  演练证明点：dump 往返行数相等（含两张 token 表与 forgotten_id）、
+  alembic_version 随 dump 走（恢复后 `alembic current` 等于备份前版本）、
+  恢复后简报可用、五类已遗忘数据经三源墓碑合并重删后不复活（含哈希段
+  与 sidecar-only 活库损坏场景）、跨用户同内容行不受影响、恢复重跑幂等。
+  修复第 2 轮新增迁移 0024（`forgotten_content` 内容墓碑表）：拉 main
+  后 `alembic upgrade head` 即建表；旧库无内容墓碑，升级前已遗忘的内容
+  只受旧 id-tombstone（恢复侧）保护，写入侧禁写自升级后新发生的遗忘起
+  生效。修复第 3 轮无新迁移（脚本与 clear_all 提醒墓碑复用 0024 两张表）。
+  注意：deploy/restore.sh 本身是 docker-compose 绑定的生产路径，演练
+  跑的是该文件本身（直连参数覆盖 docker 命令），验证的是同一文件同一
+  SQL；但 docker 路径本身在 VM 上仍未验（容器起不来），不要宣称已验。
 - 回滚镜像不回滚数据库（先扩后缩）；只有回滚到 0006 之前历史版本时才需先
   `alembic downgrade 0005_app_id`（见下方“回滚”一节）。
 
