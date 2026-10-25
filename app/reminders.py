@@ -19,6 +19,7 @@ from app.tokenize import tokens_of
 log = logging.getLogger(__name__)
 
 TRIGGER_OVERLAP_MIN = 0.5  # 条件 token 被任务覆盖的比例下限（按较小集合计）
+SHORT_COND_TOKENS = 2  # 第二十七轮：条件 token 数 ≤ 此值时关键词路必须全中（见 _trigger_score）
 
 
 def create_reminder(db: Session, u: UserContext, *, condition: str, action: str,
@@ -74,7 +75,12 @@ def _trigger_score(row: MemoryReminder, task_tokens: set[str],
     best = None
     if cond_tokens:
         overlap = len(cond_tokens & task_tokens) / len(cond_tokens)
-        if overlap >= TRIGGER_OVERLAP_MIN:
+        # 第二十七轮短条件全匹配：条件只有 ≤2 个 token 时，单个共享 bigram
+        # 证据太弱（“上线”满大街都是，0.5 的半中全是误触），必须全中才算
+        # 关键词命中；向量路不受影响。平抬阈值不是解法——0.75 会误杀 0.50
+        # 的真阳性（如“再部署一个服务”）。
+        required = 1.0 if len(cond_tokens) <= SHORT_COND_TOKENS else TRIGGER_OVERLAP_MIN
+        if overlap >= required:
             best = overlap
     if (qvec is not None and row.embedding is not None
             and row.embed_model == embedder_model):
