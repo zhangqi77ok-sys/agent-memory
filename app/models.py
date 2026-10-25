@@ -466,6 +466,22 @@ class ForgottenId(Base):
     forgotten_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class ForgottenContent(Base):
+    """内容级遗忘墓碑（修复第 2 轮）：forget/clear 时按内容规范化哈希记行，
+    写路径落库前查它——新 id 重发同一内容也命中，旧 id 墓碑匹配不上的
+    复活口子在此堵住。哈希不可逆，不存原文。"""
+
+    __tablename__ = "forgotten_content"
+    app_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)  # fact|preference|insight|episode
+    content_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    forgotten_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    __table_args__ = (
+        Index("ix_forgotten_content_user", "app_id", "user_id", "forgotten_at"),
+    )
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)

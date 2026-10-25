@@ -86,6 +86,8 @@ def forget(item_id: str, u: UserContext = Depends(user_from_query), db: Session 
             m.MemoryFact.app_id == u.app_id, m.MemoryFact.user_id == u.user_id,
             m.MemoryFact.subject == fact.subject)).all()
         ids = [v.id for v in versions]
+        # 删前快照内容：Core delete 后 ORM 对象过期，删后再取会取不到。
+        snap = [(v.subject, v.content) for v in versions]
         db.execute(delete(m.MemoryFact).where(m.MemoryFact.id.in_(ids)))
         # Core delete 不触发 ORM 事件：倒排行在这里显式清（探针是 JOIN 取数，
         # 残留也命不中，但别让孤儿攒着）
@@ -95,6 +97,12 @@ def forget(item_id: str, u: UserContext = Depends(user_from_query), db: Session 
             delete_links_touching(db, u.app_id, u.user_id, "fact", i)
         for i in ids:
             db.merge(m.ForgottenId(id=i, kind="fact"))
+        # 修复第 2 轮：删前记内容墓碑（删后无从取内容）——新 id 重发
+        # 同一内容也命中，旧 id 墓碑匹配不上的复活口子在此堵住。
+        from app.tombstone import record_tombstone
+
+        for subject, content in snap:
+            record_tombstone(db, u.app_id, u.user_id, "fact", subject, content)
         # TODO(v1): 受影响的 session_summary 重新生成、来源 session_message 删除（Worker 任务）
         _audit(db, u, "forget", ids)
         db.commit()
@@ -105,9 +113,14 @@ def forget(item_id: str, u: UserContext = Depends(user_from_query), db: Session 
             m.MemoryPreference.app_id == u.app_id, m.MemoryPreference.user_id == u.user_id,
             m.MemoryPreference.key == pref.key)).all()
         ids = [v.id for v in versions]
+        snap = [(v.key, v.value) for v in versions]
         db.execute(delete(m.MemoryPreference).where(m.MemoryPreference.id.in_(ids)))
         for i in ids:
             db.merge(m.ForgottenId(id=i, kind="preference"))
+        from app.tombstone import record_tombstone
+
+        for key, value in snap:
+            record_tombstone(db, u.app_id, u.user_id, "preference", key, value)
         _audit(db, u, "forget", ids)
         db.commit()
         return
@@ -118,18 +131,28 @@ def forget(item_id: str, u: UserContext = Depends(user_from_query), db: Session 
             m.MemoryInsight.app_id == u.app_id, m.MemoryInsight.user_id == u.user_id,
             m.MemoryInsight.subject == insight.subject)).all()
         ids = [v.id for v in versions]
+        snap = [(v.subject, v.content) for v in versions]
         db.execute(delete(m.MemoryInsight).where(m.MemoryInsight.id.in_(ids)))
         db.execute(delete(m.MemoryInsightToken).where(m.MemoryInsightToken.insight_id.in_(ids)))
         for i in ids:
             delete_links_touching(db, u.app_id, u.user_id, "insight", i)
         for i in ids:
             db.merge(m.ForgottenId(id=i, kind="insight"))
+        from app.tombstone import record_tombstone
+
+        for subject, content in snap:
+            record_tombstone(db, u.app_id, u.user_id, "insight", subject, content)
         _audit(db, u, "forget", ids)
         db.commit()
         return
     episode = db.get(m.TaskEpisode, item_id)
     if episode and episode.user_id == u.user_id and episode.app_id == u.app_id:
-        # 轨迹是单行原始记录：直接删行（派生出的经验不在此联动删除，按各自 id 删）
+        # 修复第 2 轮：轨迹此前不写任何 tombstone，重提炼无墓碑可查；
+        # 删前补 id + 内容两份（派生出的经验不在此联动删除，按各自 id 删）
+        from app.tombstone import record_episode_tombstone
+
+        db.merge(m.ForgottenId(id=item_id, kind="episode"))
+        record_episode_tombstone(db, u.app_id, u.user_id, episode.title, episode.steps)
         db.execute(delete(m.TaskEpisode).where(m.TaskEpisode.id == item_id))
         _audit(db, u, "forget", [item_id])
         db.commit()

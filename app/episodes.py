@@ -384,6 +384,15 @@ def _apply_insight(db: Session, u: UserContext, cand, episode_id: str,
                    project: str | None = None,
                    agent: str | None = None) -> tuple[str, str | None]:
     """按 decide() 裁决写入一条经验，返回 (decision, insight_id)。"""
+    # 修复第 2 轮：内容墓碑检查放在匹配/NOOP 之前——旧任务重提炼已遗忘
+    # 经验时，若只拦 ADD/UPDATE 不拦 NOOP，support 会被刷到重建的行上。
+    # sleep/links/consolidate 的综合调用点走同一入口，一并收口。
+    # 注意：墓碑 kind 按行类型（insight），不用候选 kind（lesson/pitfall/
+    # strategy/principle）——同一内容换个 kind 重贴同样是复活。
+    from app.tombstone import block_if_tombstoned
+
+    if block_if_tombstoned(db, u.app_id, u.user_id, "insight", cand.subject, cand.content):
+        return "tombstoned", None
     matched = _matched_insights(db, u.app_id, u.user_id, cand.subject)
     same = next((r for r in matched if norm(r.content) == norm(cand.content)), None)
     existing = _active_content(matched, cand.content)
@@ -449,6 +458,26 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
     """
     u = UserContext(ep.app_id, ep.user_id)
     _lock_user(db, ep.app_id, ep.user_id)
+    # 修复第 2 轮：起手禁写判定——轨迹本身被遗忘过，或本集创建于用户
+    # 最近一次删除之前（旧任务整单丢弃，见 worker 的同款水位规则）。
+    # 命中则不产出任何经验；提交前还会再查一次，覆盖提炼中途被遗忘。
+    from app.tombstone import _aware, is_episode_tombstoned, user_forget_watermark
+
+    def _distill_blocked() -> bool:
+        if is_episode_tombstoned(db, ep.app_id, ep.user_id, ep.title, ep.steps):
+            return True
+        wm = user_forget_watermark(db, ep.app_id, ep.user_id)
+        return wm is not None and _aware(ep.created_at) is not None \
+            and _aware(ep.created_at) < wm
+
+    if _distill_blocked():
+        ep.distill_status = "done"
+        ep.locked_until = None
+        ep.last_error = None
+        db.add(AuditLog(app_id=ep.app_id, user_id=ep.user_id, action="distill",
+                        fact_ids=[], decision="tombstoned"))
+        db.commit()
+        return "tombstoned"
     rendered, sec_header, sec_steps = _render_episode_parts(ep)
     text = strip_injection(rendered).strip()
     # 校验用小节与提炼器视野同口径：题头与各渲染行各过一次 strip_injection
@@ -508,6 +537,20 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
                 new_row = db.get(MemoryInsight, iid)
                 if new_row is not None:
                     weave_on_write(db, u.app_id, u.user_id, new_row, linker=linker)
+    # 修复第 2 轮：提交前再查一次——提炼中途被遗忘时，整批候选回滚，
+    # 不留半批经验；行已删则只返回，行还在则标记 done 并审计。
+    if _distill_blocked():
+        ep_id = ep.id  # rollback 会过期 ep 对象，先取主键
+        db.rollback()
+        live = db.get(TaskEpisode, ep_id)
+        if live is not None:
+            live.distill_status = "done"
+            live.locked_until = None
+            live.last_error = None
+            db.add(AuditLog(app_id=live.app_id, user_id=live.user_id,
+                            action="distill", fact_ids=[], decision="tombstoned"))
+            db.commit()
+        return "tombstoned"
     ep.distill_status = "done"
     ep.locked_until = None
     ep.last_error = None

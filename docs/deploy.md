@@ -31,7 +31,11 @@
   或在 PG 套件里随全套跑。演练证明点：dump 往返行数相等（含两张
   token 表与 forgotten_id）、alembic_version 随 dump 走（恢复后
   `alembic current` 等于备份前版本）、恢复后简报可用、备份后才发生
-  的遗忘经 forgotten_id 合并重删后不复活。注意：deploy/restore.sh
+  的遗忘经 forgotten_id 合并重删后不复活。修复第 2 轮新增迁移 0024
+ （`forgotten_content` 内容墓碑表）：拉 main 后 `alembic upgrade head`
+  即建表；旧库无内容墓碑，升级前已遗忘的内容只受旧 id-tombstone
+  （恢复侧）保护，写入侧禁写自升级后新发生的遗忘起生效。
+  注意：deploy/restore.sh
   本身是 docker-compose 绑定的生产路径，演练验证的是同一套语义的
   直连 pg_dump/pg_restore 实现，不是 docker 路径本身。
 - 回滚镜像不回滚数据库（先扩后缩）；只有回滚到 0006 之前历史版本时才需先

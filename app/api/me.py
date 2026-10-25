@@ -83,6 +83,12 @@ def correct(item_id: str, req: CorrectRequest, db: Session = Depends(get_db), re
     now = datetime.now(UTC)
     old = db.get(m.MemoryFact, item_id)
     if old and old.user_id == u.user_id and old.app_id == u.app_id and old.valid_to is None:
+        # 修复第 2 轮：纠正的新内容若命中内容墓碑，拒绝——否则纠正
+        # 就是一条绕过 _apply 的复活路。
+        from app.tombstone import is_tombstoned
+
+        if is_tombstoned(db, u.app_id, u.user_id, "fact", old.subject, req.content):
+            raise HTTPException(status_code=409, detail={"code": "tombstoned"})
         old.valid_to = now
         new = m.MemoryFact(app_id=u.app_id, user_id=u.user_id, subject=old.subject, content=req.content,
                            version=old.version + 1, valid_from=now, source_session_id=None)
@@ -111,9 +117,20 @@ def clear_all(u: UserContext = Depends(user_from_query), db: Session = Depends(g
     v1 同步执行（单用户数据量小）；id 记入 forgotten_id，备份恢复后据此重删。
     """
     bind_user(db, u)
-    fact_ids = list(db.scalars(select(m.MemoryFact.id).where(*_mine(m.MemoryFact, u))))
-    pref_ids = list(db.scalars(select(m.MemoryPreference.id).where(*_mine(m.MemoryPreference, u))))
-    insight_ids = list(db.scalars(select(m.MemoryInsight.id).where(*_mine(m.MemoryInsight, u))))
+    # 修复第 2 轮：删前先载内容字段（Core delete 后无从取），逐行记内容墓碑；
+    # 此前只载 id，清空后重发同一内容无墓碑可查。
+    fact_rows = list(db.scalars(select(m.MemoryFact).where(*_mine(m.MemoryFact, u))))
+    pref_rows = list(db.scalars(select(m.MemoryPreference).where(*_mine(m.MemoryPreference, u))))
+    insight_rows = list(db.scalars(select(m.MemoryInsight).where(*_mine(m.MemoryInsight, u))))
+    episode_rows = list(db.scalars(select(m.TaskEpisode).where(*_mine(m.TaskEpisode, u))))
+    fact_ids = [r.id for r in fact_rows]
+    pref_ids = [r.id for r in pref_rows]
+    insight_ids = [r.id for r in insight_rows]
+    # 删前快照内容元组：Core delete 后 ORM 对象过期，删后再取会取不到。
+    fact_snap = [(r.subject, r.content) for r in fact_rows]
+    pref_snap = [(r.key, r.value) for r in pref_rows]
+    insight_snap = [(r.subject, r.content) for r in insight_rows]
+    episode_snap = [(r.title, r.steps) for r in episode_rows]
     for model in (m.MemoryFact, m.MemoryPreference, m.SessionSummary, m.SessionMessage, m.MemoryJob,
                   m.MemoryInsight, m.TaskEpisode):
         db.execute(delete(model).where(*_mine(model, u)))
@@ -133,6 +150,16 @@ def clear_all(u: UserContext = Depends(user_from_query), db: Session = Depends(g
         db.merge(m.ForgottenId(id=i, kind="preference"))
     for i in insight_ids:
         db.merge(m.ForgottenId(id=i, kind="insight"))
+    from app.tombstone import record_episode_tombstone, record_tombstone
+
+    for subject, content in fact_snap:
+        record_tombstone(db, u.app_id, u.user_id, "fact", subject, content)
+    for key, value in pref_snap:
+        record_tombstone(db, u.app_id, u.user_id, "preference", key, value)
+    for subject, content in insight_snap:
+        record_tombstone(db, u.app_id, u.user_id, "insight", subject, content)
+    for title, steps in episode_snap:
+        record_episode_tombstone(db, u.app_id, u.user_id, title, steps)
     _audit(db, u, "clear_all", fact_ids + pref_ids + insight_ids)
     db.commit()
 
@@ -365,6 +392,11 @@ def patch_insight(insight_id: str, req: InsightPatch,
     if row is None:
         raise HTTPException(status_code=404, detail="insight not found")
     if req.content is not None and req.content != row.content:
+        # 修复第 2 轮：同 correct，新内容命中内容墓碑时拒绝复活。
+        from app.tombstone import is_tombstoned
+
+        if is_tombstoned(db, u.app_id, u.user_id, "insight", row.subject, req.content):
+            raise HTTPException(status_code=409, detail={"code": "tombstoned"})
         row.content = req.content
         row.embedding = None
         row.embed_model = None

@@ -153,11 +153,12 @@ def parse_memory_markdown(files: dict[str, str]) -> list[dict]:
 def apply_markdown_import(db: Session, u: UserContext, files: dict[str, str]) -> dict:
     """把文件侧的编辑/新增应用回库；删除只报告。自己提交（与 brief 同纪律）。"""
     from app.api.memories import _audit
+    from app.tombstone import block_if_tombstoned
 
     parsed = parse_memory_markdown(files)
     now = datetime.now(UTC)
     report = {"updated": 0, "created": 0, "unchanged": 0, "redacted": 0,
-              "missing_in_files": []}
+              "tombstoned": 0, "missing_in_files": []}
     seen_ids: set[str] = set()
     created_rows: list = []  # 本轮新建的条目不算「不在文件里」，算缺失前要排除
 
@@ -178,6 +179,10 @@ def apply_markdown_import(db: Session, u: UserContext, files: dict[str, str]) ->
                 seen_ids.add(row.id)
                 if row.content == content:
                     report["unchanged"] += 1
+                elif block_if_tombstoned(db, u.app_id, u.user_id, "fact",
+                                         row.subject, content):
+                    # 修复第 2 轮：改向已遗忘内容时挡住，旧行保持原样。
+                    report["tombstoned"] += 1
                 else:
                     row.valid_to = now
                     db.add(m.MemoryFact(app_id=u.app_id, user_id=u.user_id,
@@ -185,6 +190,10 @@ def apply_markdown_import(db: Session, u: UserContext, files: dict[str, str]) ->
                                         version=row.version + 1, valid_from=now))
                     report["updated"] += 1
             elif not it["id"]:
+                if block_if_tombstoned(db, u.app_id, u.user_id, "fact",
+                                       (it["subject"] or "未分类")[:128], content):
+                    report["tombstoned"] += 1
+                    continue
                 row_new = m.MemoryFact(app_id=u.app_id, user_id=u.user_id,
                                        subject=(it["subject"] or "未分类")[:128],
                                        content=content, version=1, valid_from=now)
@@ -199,6 +208,9 @@ def apply_markdown_import(db: Session, u: UserContext, files: dict[str, str]) ->
                 seen_ids.add(row.id)
                 if row.value == value:
                     report["unchanged"] += 1
+                elif block_if_tombstoned(db, u.app_id, u.user_id, "preference",
+                                         row.key, value):
+                    report["tombstoned"] += 1
                 else:
                     row.valid_to = now
                     db.add(m.MemoryPreference(app_id=u.app_id, user_id=u.user_id,
@@ -206,6 +218,10 @@ def apply_markdown_import(db: Session, u: UserContext, files: dict[str, str]) ->
                                               version=row.version + 1, valid_from=now))
                     report["updated"] += 1
             elif not it["id"]:
+                if block_if_tombstoned(db, u.app_id, u.user_id, "preference",
+                                       (it["key"] or "未命名")[:128], value):
+                    report["tombstoned"] += 1
+                    continue
                 row_new = m.MemoryPreference(app_id=u.app_id, user_id=u.user_id,
                                              key=(it["key"] or "未命名")[:128],
                                              value=value, version=1, valid_from=now)
@@ -223,6 +239,9 @@ def apply_markdown_import(db: Session, u: UserContext, files: dict[str, str]) ->
                 applies = _clean(it.get("applies_when", ""))
                 if row.content == content and (row.applies_when or "") == applies:
                     report["unchanged"] += 1
+                elif block_if_tombstoned(db, u.app_id, u.user_id, "insight",
+                                         row.subject, content):
+                    report["tombstoned"] += 1
                 else:
                     row.content = content
                     row.applies_when = applies
@@ -230,6 +249,10 @@ def apply_markdown_import(db: Session, u: UserContext, files: dict[str, str]) ->
                     row.embed_model = None
                     report["updated"] += 1
             elif not it["id"]:
+                if block_if_tombstoned(db, u.app_id, u.user_id, "insight",
+                                       (it["subject"] or "未分类")[:128], content):
+                    report["tombstoned"] += 1
+                    continue
                 kind = it["kind"] if it["kind"] in (
                     "lesson", "strategy", "pitfall", "cost_saver") else "lesson"
                 row_new = m.MemoryInsight(

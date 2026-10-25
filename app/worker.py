@@ -331,6 +331,12 @@ def _apply(db: Session, job: m.MemoryJob, candidate, source_msg_id: str | None, 
     content = redact(candidate.content).strip()
     if not subject or not content or len(subject) > MAX_SUBJECT_LEN or is_injection(subject) or is_injection(content):
         return "noop", None
+    # 修复第 2 轮：内容墓碑检查放在 NOOP bump 之前——旧任务重抽已遗忘内容
+    # 时，若只拦 ADD/UPDATE 不拦 NOOP，support 会被悄悄刷到重建的行上。
+    from app.tombstone import block_if_tombstoned
+
+    if block_if_tombstoned(db, job.app_id, job.user_id, candidate.kind, subject, content):
+        return "tombstoned", None
     if candidate.kind == "preference":
         return _apply_preference(db, job, subject, content, candidate.action, embedder=embedder)
     return _apply_fact(db, job, subject, content, candidate.action, source_msg_id, embedder=embedder)
@@ -341,6 +347,8 @@ def _summarize(decisions: list[str]) -> str:
         return "update"
     if "add" in decisions:
         return "add"
+    if decisions and all(d == "tombstoned" for d in decisions):
+        return "tombstoned"
     return "noop"
 
 
@@ -357,6 +365,17 @@ def _lock_user(db: Session, job: m.MemoryJob) -> None:
 def _extract_and_write(db: Session, job: m.MemoryJob, extractor, embedder=None,
                        linker=None) -> tuple[str, list[str]]:
     if not _memory_on(db, job):
+        return "skip", []
+    # 修复第 2 轮 (c)：创建于用户最近一次删除之前的旧任务整单丢弃——
+    # 删除窗口内的在途任务即使抽的是无关内容也不写库，调用方须重发。
+    # 这是 fail-closed 取舍：正常新任务（创建于删除之后）不受影响。
+    from app.tombstone import _aware, user_forget_watermark
+
+    watermark = user_forget_watermark(db, job.app_id, job.user_id)
+    if watermark is not None and _aware(job.created_at) is not None \
+            and _aware(job.created_at) < watermark:
+        log.info("job=%s user=%s skip: created before forget watermark",
+                 job.id, mask_user_id(job.user_id))
         return "skip", []
     _lock_user(db, job)
     messages = _messages(db, job)
