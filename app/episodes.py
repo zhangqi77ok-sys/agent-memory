@@ -258,12 +258,15 @@ MAX_RENDER_CHARS = 24000
 MAX_STEP_LINE_CHARS = 800
 
 
-def _render_episode(ep: TaskEpisode) -> str:
-    """把轨迹渲染成给提炼器的文本；整体先过一遍 redact，步骤里夹带的 PII 不进 LLM。
+def _render_episode_parts(ep: TaskEpisode) -> tuple[str, str, dict[int, str]]:
+    """渲染轨迹并同时返回小节结构，供证据校验按节核对（第二十九轮）。
 
-    渲染结果不超过 MAX_RENDER_CHARS：短轨迹原样输出；长轨迹先把单步压到
-    MAX_STEP_LINE_CHARS，再优先保留出错步与首尾各三步，其余按原序装到装满为止，
-    被省略的区间用标记行标明步号范围与步数。"""
+    返回 (全文, 题头文本, {步号: 渲染行})。全文与旧 _render_episode 输出
+    字节一致（round9 测试钉住）；渲染行就是全文里的那一行（压行、
+    省略感知：被省略的步不在字典里，省略标记行不是证据，不进字典）。
+    脱敏模式均为单 token（手机号/邮箱/身份证/密钥），不跨行，因此逐节脱敏
+    与整篇脱敏结果一致；校验时各节再各过一次 strip_injection，与提炼器
+    看到的剥离后全文同口径。"""
     header = [f"任务：{ep.title}", f"结果：{ep.outcome}",
               f"成本：{json.dumps(ep.cost or {}, ensure_ascii=False)}", "过程："]
     raw_steps = ep.steps or []
@@ -277,7 +280,8 @@ def _render_episode(ep: TaskEpisode) -> str:
         step_lines.append(line)
     full = "\n".join(header + step_lines)
     if len(full) <= MAX_RENDER_CHARS:
-        return redact(full)
+        return (redact(full), redact("\n".join(header)),
+                {i + 1: redact(line) for i, line in enumerate(step_lines)})
     # 超限：单步按段压缩——动作/观察/错误分别限长，错误段在行尾绝不能被整行截断切掉
     def _cap(s: str, n: int) -> str:
         return s if len(s) <= n else s[:n] + "…"
@@ -319,7 +323,17 @@ def _render_episode(ep: TaskEpisode) -> str:
             if i not in kept and len(render(sorted(kept + [i]))) <= MAX_RENDER_CHARS:
                 kept.append(i)
         kept.sort()
-    return redact(render(kept))
+    return (redact(render(kept)), redact("\n".join(header)),
+            {i + 1: redact(step_lines[i]) for i in kept})
+
+
+def _render_episode(ep: TaskEpisode) -> str:
+    """把轨迹渲染成给提炼器的文本；整体先过一遍 redact，步骤里夹带的 PII 不进 LLM。
+
+    渲染结果不超过 MAX_RENDER_CHARS：短轨迹原样输出；长轨迹先把单步压到
+    MAX_STEP_LINE_CHARS，再优先保留出错步与首尾各三步，其余按原序装到装满为止，
+    被省略的区间用标记行标明步号范围与步数。"""
+    return _render_episode_parts(ep)[0]
 
 
 def _matched_insights(db: Session, app_id: str, user_id: str, subject: str) -> list[MemoryInsight]:
@@ -435,7 +449,14 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
     """
     u = UserContext(ep.app_id, ep.user_id)
     _lock_user(db, ep.app_id, ep.user_id)
-    text = strip_injection(_render_episode(ep)).strip()
+    rendered, sec_header, sec_steps = _render_episode_parts(ep)
+    text = strip_injection(rendered).strip()
+    # 校验用小节与提炼器视野同口径：题头与各渲染行各过一次 strip_injection
+    # （第二十九轮；旧版用原始步骤字段拼 step_texts，与渲染行标记、脱敏、
+    # 压行省略三处都不对齐，见设计草稿）。
+    sec_header = strip_injection(sec_header)
+    sec_steps = {n: strip_injection(line) for n, line in sec_steps.items()}
+    sections = [sec_header, *sec_steps.values()]
     fn = distiller.distill if hasattr(distiller, "distill") else distiller
     candidates = fn(text) if text else []
     decisions: list[str] = []
@@ -456,22 +477,22 @@ def distill_episode(db: Session, ep: TaskEpisode, distiller, embedder: GeminiEmb
             dropped_gate += 1
             log.warning("insight dropped by injection gate episode=%s subject=%s", ep.id, subject[:40])
             continue
-        # 证据校验（第十六轮 verifier + 第十九轮证据链）：提炼声称的经验必须
-        # 能在轨迹原文里指出处。报了步号的，逐字核对那一步——引文对但步号错
-        # （或步号对但引文不在这一步）就是假引用，verified 直接落 False，
-        # 不再靠全文子串蒙混过关；没报步号的退回全文校验（旧提炼器兼容），
-        # 只不给 evidence_chained 标记。验不过不丢弃——标 verified=False 入库，
-        # 简报排序打折、面板上看得见；直接丢弃会把「引文摘抄不规范但经验是真
-        # 的」一并误杀，降权更诚实。
+        # 证据校验（第十六轮 verifier + 第十九轮证据链 + 第二十九轮逐节验）：
+        # 提炼声称的经验必须能在提炼器实际看到的那份渲染里指出处。报了步号
+        # 且该步在渲染里的，逐字核对那一行——引文对但步号错（或步号对但引文
+        # 不在这一行）就是假引用，verified 直接落 False；没报步号、步号非法、
+        # 或步号指向被省略的步时，退回单节容纳：引文必须完整落在某一节
+        # （题头或某步渲染行）里，跨步拼接不再靠全文子串蒙混。回退发现步号
+        # 不等于链上，chained 只给声称且命中的那一路。验不过不丢弃——标
+        # verified=False 入库，简报排序打折、面板上看得见；直接丢弃会把
+        # 「引文摘抄不规范但经验是真的」一并误杀，降权更诚实。
         step_no = getattr(cand, "evidence_step", None)
-        step_texts = [" ".join(str(s.get(k, "") or "") for k in ("action", "observation", "error")).strip()
-                      for s in (ep.steps or [])]
-        if isinstance(step_no, int) and 1 <= step_no <= len(step_texts):
-            chained = _evidence_ok(evidence, step_texts[step_no - 1])
+        if isinstance(step_no, int) and step_no in sec_steps:
+            chained = _evidence_ok(evidence, sec_steps[step_no])
             verified = chained
         else:
             chained = False
-            verified = _evidence_ok(evidence, text)
+            verified = any(_evidence_ok(evidence, sec) for sec in sections)
         if not verified:
             unverified += 1
             log.warning("insight unverified episode=%s subject=%s", ep.id, subject[:40])
