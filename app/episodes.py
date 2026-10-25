@@ -1,7 +1,7 @@
 """经验记忆的服务层：过程提交 → 复盘提炼 → 情境召回。
 
 与事实管线平行但原料不同：事实来自对话文本，经验来自任务轨迹。
-入库纪律与事实一致：脱敏在前、注入闸门在后、decide() 裁决去重/更新、
+入库纪律与事实一致：脱敏在前、注入闸门在后、分桶裁决去重/更新、
 时间失效不真删、向量由 worker/提炼侧补齐且失败只留空不阻塞。
 """
 import json
@@ -20,7 +20,7 @@ from app.edge_learning import (
     strength_on_rejected,
 )
 from app.embeddings import GeminiEmbedder, cosine
-from app.extract import MAX_SUBJECT_LEN, InvalidExtraction, decide, is_injection, norm, same_subject, strip_injection
+from app.extract import MAX_SUBJECT_LEN, InvalidExtraction, is_injection, norm, same_subject, strip_injection
 from app.links import (
     contradiction_pairs,
     create_link,
@@ -336,31 +336,26 @@ def _render_episode(ep: TaskEpisode) -> str:
     return _render_episode_parts(ep)[0]
 
 
-def _matched_insights(db: Session, app_id: str, user_id: str, subject: str) -> list[MemoryInsight]:
-    """与 worker 对事实的预筛同构：先轻量取 (id, subject)，same_subject 命中才载整行，
-    避免每提炼一条经验就把该用户的全部经验拉进内存。"""
+def _matched_insights(db: Session, app_id: str, user_id: str, subject: str,
+                      project: str | None = None) -> list[MemoryInsight]:
+    """与 worker 对事实的预筛同构：先轻量取 (id, subject, project)，same_subject 命中才载整行，
+    避免每提炼一条经验就把该用户的全部经验拉进内存。
+
+    修复第 6 轮（审计 Top 6，A-F02）：写路径按项目分桶——project 明确时只见同项目行与
+    通用行（project is None），project 为 None 的通用写入只见通用行；跨项目行对写操作
+    一律不可见（既不 NOOP 冒领、也不 UPDATE 关行）。默认 None 是 fail-closed：调用方
+    忘记传参时匹配面最小。返回行仍按生效时间倒序（新行在前）。"""
     light = db.execute(
-        select(MemoryInsight.id, MemoryInsight.subject).where(
+        select(MemoryInsight.id, MemoryInsight.subject, MemoryInsight.project).where(
             MemoryInsight.app_id == app_id, MemoryInsight.user_id == user_id,
             MemoryInsight.valid_to.is_(None))).all()
-    ids = [row.id for row in light if same_subject(row.subject, subject)]
+    ids = [row.id for row in light
+           if same_subject(row.subject, subject)
+           and (row.project is None or (project is not None and row.project == project))]
     if not ids:
         return []
-    # 按生效时间倒序：rows[0] 必须是最新一行（_active_content 的语义依赖于此，旧版无排序是任意序）
     return list(db.scalars(select(MemoryInsight).where(MemoryInsight.id.in_(ids))
                            .order_by(MemoryInsight.valid_from.desc())))
-
-
-def _active_content(rows: list[MemoryInsight], new_content: str = "") -> str | None:
-    """同主题现行内容：优先与新内容规范化相等的行（decide 的 NOOP 判定需要它），
-    否则取最新一行（rows 已按 valid_from 倒序）。与 worker._active_value 同一套语义。"""
-    if not rows:
-        return None
-    if new_content:
-        for r in rows:
-            if norm(r.content) == norm(new_content):
-                return r.content
-    return rows[0].content
 
 
 def _embed_insight(embedder: GeminiEmbedder | None, row: MemoryInsight) -> None:
@@ -384,13 +379,23 @@ def _apply_insight(db: Session, u: UserContext, cand, episode_id: str,
                    project: str | None = None,
                    agent: str | None = None,
                    additive: bool = False) -> tuple[str, str | None]:
-    """按 decide() 裁决写入一条经验，返回 (decision, insight_id)。
+    """按分桶裁决写入一条经验，返回 (decision, insight_id)。
+
+    修复第 6 轮（审计 Top 6，A-F02/A-F03）：匹配分两集——可见集 S（project 明确时
+    同项目行 + 通用行，project 为 None 时仅通用行）只用于内容 NOOP 去重；
+    血统集 L（作用域精确相等）才是关闭/继承/版本递增的集合。kind 不是分桶维：
+    同一主题只有一条现行行是既定语义（评测门禁 c09 update_takes_new_kind：
+    新 kind 接管旧行、version 递增），kind 是版本的属性、不是血统的维度——
+    审计 A-F02 的“跨 kind 互不干扰”与该门禁冲突，本轮不采纳（见设计草稿 §4）。
+    跨项目行对写操作一律不可见；项目写入绝不 supersede 通用行（无血统时 fork
+    自己的行，不关通用行）；`project is None` 恒等于通用调用，永不从 matched
+    行继承项目（A-F03 删除点）。
 
     additive（修复第 5 轮，审计 Top 5）：只新增不关闭模式，供原则起草
     点（综合/weave 簇抽象/睡眠簇抽象）使用。原则是新增节点，不是 matched
     行的新版本——旧行还活着时继承计数即双重记账，故新行从默认值起步，
     且不关行、不迁边；新建行一律返回 "add"（没有行被更新）。
-    提炼写入走默认路径（版本滚动语义）不动。
+    提炼写入走默认路径（版本滚动语义）不动，但滚动只在血统集内发生。
     """
     # 修复第 2 轮：内容墓碑检查放在匹配/NOOP 之前——旧任务重提炼已遗忘
     # 经验时，若只拦 ADD/UPDATE 不拦 NOOP，support 会被刷到重建的行上。
@@ -401,19 +406,24 @@ def _apply_insight(db: Session, u: UserContext, cand, episode_id: str,
 
     if block_if_tombstoned(db, u.app_id, u.user_id, "insight", cand.subject, cand.content):
         return "tombstoned", None
-    matched = _matched_insights(db, u.app_id, u.user_id, cand.subject)
-    same = next((r for r in matched if norm(r.content) == norm(cand.content)), None)
-    existing = _active_content(matched, cand.content)
-    decision = decide(existing, cand.content)
-    if decision == "NOOP":
-        return "noop", (same.id if same is not None else (matched[0].id if matched else None))
+    if not cand.content or not cand.content.strip():
+        return "noop", None
+    # 修复第 6 轮：可见集 S（分桶后的 matched）只用于内容去重；血统集 L
+    #（作用域精确相等）才是关闭/继承/版本递增的集合。
+    # NOOP 回答“这份内容是否已存在”，UPDATE 回答“谁是这条经验的上一版本”——
+    # 两问分离：内容一字不差时不建重复行（kind 不影响去重），内容不同时的
+    # 版本滚动只关同作用域的行（kind 是版本的属性，新 kind 接管旧行是既定语义，
+    # 见评测门禁 c09）；跨项目行根本不在 S 里，故既不冒领也不被关。
+    scope_rows = _matched_insights(db, u.app_id, u.user_id, cand.subject, project=project)
+    same = next((r for r in scope_rows if norm(r.content) == norm(cand.content)), None)
+    if same is not None:
+        return "noop", same.id
+    lineage = [r for r in scope_rows if r.project == project]
     if additive:
-        # 修复第 5 轮：原则是新增节点——不关 matched 行（分化双方以条件区分
-        # 共存，综合若关掉双方即自毁）、不迁边、不继承计数（旧行还活着，
-        # 继承即双重记账）。project 继承口径保持现行（Top 6 的匹配语义，
-        # 本轮不动，见 fix5-design-draft.md §4）。
-        if project is None and matched:
-            project = matched[0].project
+        # 修复第 5 轮：原则是新增节点——不关行（分化双方以条件区分共存，
+        # 综合若关掉双方即自毁）、不迁边、不继承计数（旧行还活着，继承即
+        # 双重记账）。修复第 6 轮（A-F03）：project 继承行已删除——通用原则
+        # 起草（project=None）永远产出通用行，不再被某成员项目偷换。
         row = MemoryInsight(app_id=u.app_id, user_id=u.user_id, kind=cand.kind,
                             subject=cand.subject, content=cand.content,
                             applies_when=cand.applies_when,
@@ -425,24 +435,37 @@ def _apply_insight(db: Session, u: UserContext, cand, episode_id: str,
         db.flush()
         _embed_insight(embedder, row)
         return "add", row.id
-    now_version = max((r.version for r in matched), default=0) + 1
+    if not lineage:
+        # 可见但无血统：例如只有通用行（项目写入不得 supersede 通用指导，
+        # 否则全体项目失去共享行——应 fork 自己的行）。
+        # 此时没有行被更新，故返回 "add" 而非 "update"。
+        row = MemoryInsight(app_id=u.app_id, user_id=u.user_id, kind=cand.kind,
+                            subject=cand.subject, content=cand.content,
+                            applies_when=cand.applies_when,
+                            source_episode_id=episode_id, project=project,
+                            verified=bool(getattr(cand, "verified", True)),
+                            agent=agent,
+                            evidence_chained=bool(getattr(cand, "evidence_chained", False)))
+        db.add(row)
+        db.flush()
+        _embed_insight(embedder, row)
+        return "add", row.id
+    now_version = max((r.version for r in lineage), default=0) + 1
     # 反馈声誉属于这条经验的血统，不属于某一行：新版本继承被关闭各行的计数与置信度，
     # 否则每次内容更新都把攒下的信任清零，反馈闭环就白建了（第十轮）。
-    inh_pos = sum(r.feedback_pos or 0 for r in matched)
-    inh_neg = sum(r.feedback_neg or 0 for r in matched)
-    inh_use = sum(r.use_count or 0 for r in matched)
-    inh_succ = sum(r.success_count or 0 for r in matched)
+    # 修复第 6 轮：继承只在血统集 L 内求和，跨项目行的计数不再被吞入。
+    inh_pos = sum(r.feedback_pos or 0 for r in lineage)
+    inh_neg = sum(r.feedback_neg or 0 for r in lineage)
+    inh_use = sum(r.use_count or 0 for r in lineage)
+    inh_succ = sum(r.success_count or 0 for r in lineage)
     # 第十六轮：自动回流信号与应用计数同属血统，一并继承
-    inh_applied = sum(r.applied_count or 0 for r in matched)
-    inh_auto_pos = sum(r.auto_pos or 0 for r in matched)
-    inh_auto_neg = sum(r.auto_neg or 0 for r in matched)
-    if project is None and matched:
-        project = matched[0].project
+    inh_applied = sum(r.applied_count or 0 for r in lineage)
+    inh_auto_pos = sum(r.auto_pos or 0 for r in lineage)
+    inh_auto_neg = sum(r.auto_neg or 0 for r in lineage)
     closed_ids = []
-    for row in matched:
-        if row is not same:
-            row.valid_to = _now()
-            closed_ids.append(row.id)
+    for row in lineage:
+        row.valid_to = _now()
+        closed_ids.append(row.id)
     row = MemoryInsight(app_id=u.app_id, user_id=u.user_id, kind=cand.kind,
                         subject=cand.subject, content=cand.content,
                         applies_when=cand.applies_when, version=now_version,
@@ -461,7 +484,7 @@ def _apply_insight(db: Session, u: UserContext, cand, episode_id: str,
     # 织网（第十五轮）：被关旧版本的关联边迁到新版本（矛盾边在迁移里关掉）
     for old_id in closed_ids:
         migrate_links(db, u.app_id, u.user_id, "insight", old_id, row.id)
-    return decision.lower(), row.id
+    return "update", row.id
 
 
 def _lock_user(db: Session, app_id: str, user_id: str) -> None:
@@ -978,6 +1001,14 @@ def consolidate_insights(db: Session, now: datetime | None = None, linker=None) 
             for j in range(i + 1, len(grows)):
                 a, b = grows[i], grows[j]
                 if a.valid_to is not None or b.valid_to is not None:
+                    continue
+                # 修复第 6 轮：合并只在同一作用域内——项目不同即跳过。
+                # 跨项目配对根本不在同一比较域，不计入 conflicts
+                #（conflicts 是“同域但未达合并线”）；巡检不得借合并关掉
+                # 别项目的行，否则写路径的分桶会被巡检重新打开。
+                # kind 不设门：同主题只有一条现行行是既定语义（评测门禁 c09），
+                # 跨 kind 合并与跨 kind 版本滚动同一口径。
+                if a.project != b.project:
                     continue
                 # 第十九轮：跨主题语义合并——此前合并只认 same_subject，换个词
                 # 说同一件事的经验永远并存。主题不同时只认向量（≥0.98），不认

@@ -154,12 +154,21 @@ def test_weave_abstraction_same_subject_keeps_members_alive(db):
 
 
 def test_weave_abstraction_noop_hangs_no_edges(db):
+    # 修复第 6 轮改写：成员行是项目专属（p1/p2/p3），通用原则起草（project=None）
+    # 的可见集根本看不见它们，故旧 NOOP 不再触发——新行为是 ADD 一枚通用原则行
+    # 并挂 3 条 generalizes 边（挂上的恒为新原则行，A-F10“不把非原则行当原则挂上”
+    # 仍成立）；成员全活。旧断言（generalized == 0）成立依赖的恰恰是第 6 轮
+    # 修掉的“通用写入匹配项目行”。
     ids = _cluster_members(db)
-    # 起草内容与成员完全一致 → NOOP：此前 weave 只查 gid，仍会挂边计数
     fake = _GeneralizeLinker(drafted=("部署端口", "部署前先探测端口与依赖再启动", "部署或上线时"))
     stats = weave_links(db, linker=fake)
-    assert stats["generalized"] == 0
-    assert _live_generalizes(db) == []
+    assert stats["generalized"] == 1
+    principles = _live_principles(db)
+    assert len(principles) == 1 and principles[0].project is None
+    assert principles[0].id not in ids
+    edges = _live_generalizes(db)
+    assert len(edges) == 3 and all(e.src_id == principles[0].id for e in edges)
+    assert {e.dst_id for e in edges} == set(ids)
     db.expire_all()
     assert all(db.get(m.MemoryInsight, i).valid_to is None for i in ids)
 
@@ -196,12 +205,18 @@ def test_sleep_abstraction_same_subject_keeps_members_alive(db):
 
 
 def test_sleep_abstraction_noop_hangs_no_edges(db):
+    # 修复第 6 轮改写：与 weave 用例同理——成员行项目专属，通用原则起草看不见
+    # 它们，旧 NOOP 不再触发；新行为是 ADD 一枚通用原则行并挂边，成员全活。
     ids = _sleep_cluster(db)
-    # 此前 sleep 只以 NOOP 决定计数、不决定挂边，仍会把非原则行当原则挂上
     fake = _GeneralizeLinker(drafted=("部署端口", "部署前先探测端口与依赖再启动", "部署或上线时"))
     stats = sleep_consolidate(db, linker=fake)
-    assert stats["generalized"] == 0
-    assert _live_generalizes(db) == []
+    assert stats["generalized"] == 1
+    principles = _live_principles(db)
+    assert len(principles) == 1 and principles[0].project is None
+    assert principles[0].id not in ids
+    edges = _live_generalizes(db)
+    assert len(edges) == 3 and all(e.src_id == principles[0].id for e in edges)
+    assert {e.dst_id for e in edges} == set(ids)
     db.expire_all()
     assert all(db.get(m.MemoryInsight, i).valid_to is None for i in ids)
 
