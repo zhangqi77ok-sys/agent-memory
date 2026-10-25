@@ -387,9 +387,9 @@ def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
-def _rank_insights(rows, scored, now, project, conf_a: float = 0.7, conf_b: float = 0.6,
-                   proj_same: float = 1.15, proj_diff: float = 0.85,
-                   recency: bool = True, unverified_mult: float = 0.85):
+def _rank_insights(rows, scored, now, project, conf_a: float = 0.5, conf_b: float = 0.9,
+                   proj_same: float = 1.0, proj_diff: float = 0.85,
+                   recency: bool = True, unverified_mult: float = 0.7):
     """经验排序乘子（第十/十一轮）：置信度 × 项目 × 新近性；置顶组恒在前。
 
     返回 [(final, row, reason)]，已按「置顶组内序 + 其余降序」排好待预算裁剪。
@@ -400,6 +400,11 @@ def _rank_insights(rows, scored, now, project, conf_a: float = 0.7, conf_b: floa
     第十九轮：乘子全部参数化（默认值 = 现行口径，生产行为不变），供
     scripts/ranking_sensitivity.py 做敏感性分析——此前乘子是写死的，
     没人知道哪个在裸奔。
+    第二十八轮：默认值改为联合标定值（scripts/ranking_calibration.py，
+    合成基准验证集 NDCG@10 +0.0307，top5 0.560→0.760）：置信乘子
+    0.5+0.9c（更陡）、同项目不再加分（1.0）、未验证折扣 0.7（更严）。
+    注意：这是合成基准上的标定，不是真实反馈数据上的标定；真实反馈
+    标定仍是未测量项，见 docs/eval.md。
     """
     ages: dict = {}
     ranked: list[tuple[float, object, str]] = []

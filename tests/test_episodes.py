@@ -155,7 +155,9 @@ def test_brief_gates_unrelated_and_uses_vector_gate(db):
     assert brief_for_task(db, U, "今天股票行情怎么样", 5, embedder=FakeEmbedder([0.0, 1.0])) == []
     # 零关键词重叠的 query + 向量对齐（cos=1）→ 混合召回命中
     hits = brief_for_task(db, U, "xyzzy plugh", 5, embedder=FakeEmbedder([1.0, 0.0]))
-    assert len(hits) == 1 and hits[0].reason == "hybrid" and hits[0].score == pytest.approx(0.7, abs=0.01)
+    # 分数 = 混合基分 0.7 × 置信乘子：第二十八轮标定后 c=0.5 对应 0.5+0.9×0.5=0.95，
+    # 故 0.665（旧乘子下为 1.0 → 0.7；本断言钉的是标定后的算术，不是旧值）。
+    assert len(hits) == 1 and hits[0].reason == "hybrid" and hits[0].score == pytest.approx(0.665, abs=0.01)
 
 
 def test_mcp_episode_submit_and_brief(client, db, monkeypatch):
