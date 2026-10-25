@@ -2,8 +2,11 @@ import type {
   AdminUserMemories,
   AdminUserRow,
   ConsolidationReport,
+  EpisodeDetail,
   GraphStats,
+  Identity,
   InsightItem,
+  InsightPage,
   Job,
   MemoryItem,
   MemoryKind,
@@ -154,10 +157,26 @@ export function needsConsent(s: Settings): boolean {
   return !s.consent_version || s.consent_version !== s.current_consent_version
 }
 
-// ---------- 经验库（第十七轮前端同步） ----------
+// ---------- 当前身份（第二十五轮） ----------
 
-export function listInsights(): Promise<InsightItem[]> {
-  return request<InsightItem[]>('/v1/me/insights')
+/** 当前身份：bound=true 时面板填的 user_id 已失效，服务端按密钥绑定算 */
+export function identity(): Promise<Identity> {
+  return request<Identity>('/v1/me/identity')
+}
+
+// ---------- 经验库（第十七轮前端同步，第二十五轮改分页） ----------
+
+export function listInsights(opts: { offset?: number; limit?: number } = {}): Promise<InsightPage> {
+  const q = new URLSearchParams()
+  if (opts.offset != null) q.set('offset', String(opts.offset))
+  if (opts.limit != null) q.set('limit', String(opts.limit))
+  const qs = q.toString()
+  return request<InsightPage>(`/v1/me/insights${qs ? `?${qs}` : ''}`)
+}
+
+/** 溯源：一条经验的来源轨迹全文 */
+export function episodeDetail(id: string): Promise<EpisodeDetail> {
+  return request<EpisodeDetail>(`/v1/me/episodes/${encodeURIComponent(id)}`)
 }
 
 /** 网结构统计（第二十轮）：节点/边/密度/孤点/枢纽/社群/桥/矛盾张力 */

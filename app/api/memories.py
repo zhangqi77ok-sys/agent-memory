@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import models as m
-from app.auth import UserContext, bind_user, user_ctx, user_from_query
+from app.auth import UserContext, bind_user, resolve_asserted, user_ctx, user_from_query
 from app.config import settings
 from app.db import SessionLocal
 from app.embeddings import build_embedder
@@ -28,9 +28,10 @@ def _audit(db: Session, u: UserContext, action: str, ids: list[str]) -> None:
 
 
 @router.post("/memories", status_code=202, response_model=WriteAccepted)
-def write(req: WriteRequest, response: Response, idempotency_key: str = Header(...),
-          db: Session = Depends(get_db)):
-    u = bind_user(db, user_ctx(req.user_id))
+def write(req: WriteRequest, response: Response,
+          idempotency_key: str = Header(...),
+          db: Session = Depends(get_db), request: Request = None):
+    u = bind_user(db, user_ctx(resolve_asserted(request, req.user_id)))
     from app.api.me import memory_enabled  # 避免循环导入
     if not memory_enabled(db, u):
         # 未同意或已暂停：不落任何数据（连原始消息都不存），调用方照常继续
@@ -59,8 +60,8 @@ def write(req: WriteRequest, response: Response, idempotency_key: str = Header(.
 
 
 @router.post("/memories/recall", response_model=RecallResponse)
-def recall(req: RecallRequest, db: Session = Depends(get_db)):
-    u = bind_user(db, user_ctx(req.user_id))
+def recall(req: RecallRequest, db: Session = Depends(get_db), request: Request = None):
+    u = bind_user(db, user_ctx(resolve_asserted(request, req.user_id)))
     from app.api.me import memory_enabled
     if not memory_enabled(db, u):
         return RecallResponse(preferences={}, facts=[])

@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     app_env: str = "dev"  # dev | test | prod
     env: str | None = None  # 支持 ENV=prod 环境变量
     service_keys: str = ""  # 逗号分隔的合法服务密钥，支持轮换
+    service_key_users: str = ""  # 逗号分隔 key:user 对（第二十五轮）：绑定后该密钥即身份，自断言失效；为空 = 不绑定
     admin_keys: str = ""  # 管理端密钥（逗号分隔，第十七轮）；为空 = 管理端接口关闭（404）
     database_url: str = "sqlite:///./dev.db"  # 服务运行账号（非 owner/非超级用户）
     worker_database_url: str | None = None  # Worker 账号 memsvc_worker（BYPASSRLS）；为空时用 database_url（仅 SQLite/开发）
@@ -49,6 +50,24 @@ class Settings(BaseSettings):
         if not self.service_keys:
             return []
         return [k.strip() for k in self.service_keys.split(",") if k.strip()]
+
+    @property
+    def service_key_user_map(self) -> dict[str, str]:
+        """SERVICE_KEY_USERS 解析：非法条目（无冒号、空 key/空用户）跳过；
+        同一 key 出现多次时后者覆盖。只收窄不放宽——映射里的 key 仍须先过
+        service_key_list 校验，中间件 401 在前，绑定本身授不了权。"""
+        mapping: dict[str, str] = {}
+        if not self.service_key_users:
+            return mapping
+        for entry in self.service_key_users.split(","):
+            entry = entry.strip()
+            if ":" not in entry:
+                continue
+            key, user = entry.split(":", 1)
+            key, user = key.strip(), user.strip()
+            if key and user:
+                mapping[key] = user
+        return mapping
 
     @property
     def admin_key_list(self) -> list[str]:

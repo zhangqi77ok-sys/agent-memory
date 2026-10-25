@@ -207,6 +207,31 @@ class InsightListItem(BaseModel):
     auto_neg: int = 0
 
 
+class InsightPage(BaseModel):
+    """经验库分页（第二十五轮，与 MemoryPage 同构）：/v1/me/insights 不再返回
+    无界列表，面板按页取，不再静默截断在 100 条。"""
+    items: list["InsightListItem"]
+    total: int
+    offset: int
+    limit: int
+
+
+class EpisodeDetail(BaseModel):
+    """轨迹详情（第二十五轮溯源落点）：面板点一条经验的“溯源”后看到的来源
+    轨迹全文——目标、步骤、结果、提炼状态。用户域读接口，跨用户 404。"""
+    id: str
+    title: str
+    source: str
+    outcome: str
+    project: str | None = None
+    steps: list = []
+    cost: dict = {}
+    distill_status: str = "pending"
+    salience: float = 0.0
+    skeletonized: bool = False
+    created_at: datetime
+
+
 class InsightPatch(BaseModel):
     """经验单条编辑（第十一轮）：改内容/适用情境会作废旧向量（匹配面变了），置顶/禁用是策展开关。"""
     content: str | None = Field(default=None, min_length=1, max_length=4000)

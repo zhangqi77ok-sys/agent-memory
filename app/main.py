@@ -9,7 +9,7 @@ from app.api.episodes import router as episodes_router
 from app.api.me import router as me_router
 from app.api.memories import router as memories_router
 from app.api.reminders import router as reminders_router
-from app.auth import is_valid_service_key
+from app.auth import bound_user, is_valid_service_key
 from app.config import Settings, check_settings, settings
 from app.db import engine
 from app.metrics import metrics_collector
@@ -47,10 +47,13 @@ def create_app(s: Settings = settings) -> FastAPI:
             if not is_valid_service_key(key, s):
                 metrics_collector.record_request(request.method, path, 401)
                 return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+            # 第二十五轮身份绑定：密钥映射到用户时，该请求后续的身份解析
+            # 一律以绑定用户为准（user_from_query / body 端点）；未绑定为 None。
+            request.state.bound_user = bound_user(key, s)
 
-            # 应用层 user_id 限流
+            # 应用层 user_id 限流（绑定用户优先，否则账算到被断言的人头上）
             if s.is_rate_limit_enabled and path.startswith("/v1/"):
-                user_id = request.query_params.get("user_id")
+                user_id = request.state.bound_user or request.query_params.get("user_id")
                 if not user_id and request.method in ("POST", "PUT", "PATCH"):
                     try:
                         body_bytes = await request.body()

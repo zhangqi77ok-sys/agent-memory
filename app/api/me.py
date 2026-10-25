@@ -4,19 +4,21 @@
 """
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app import models as m
 from app.api.memories import _audit, get_db
-from app.auth import UserContext, bind_user, user_ctx, user_from_query
+from app.auth import UserContext, bind_user, resolve_asserted, user_ctx, user_from_query
 from app.graph_stats import compute_graph_stats
 from app.links import neighbors_of
 from app.schemas import (
     CONSENT_VERSION,
     CorrectRequest,
+    EpisodeDetail,
     InsightListItem,
+    InsightPage,
     InsightPatch,
     JobOut,
     MemoryItem,
@@ -75,9 +77,9 @@ def list_memories(kind: str | None = Query(None, pattern="^(fact|preference)$"),
 
 
 @router.patch("/memories/{item_id}", response_model=MemoryItem)
-def correct(item_id: str, req: CorrectRequest, db: Session = Depends(get_db)):
+def correct(item_id: str, req: CorrectRequest, db: Session = Depends(get_db), request: Request = None):
     """纠正：旧版本 valid_to=now 失效，新建 version+1；召回只会看到新版本。"""
-    u = bind_user(db, user_ctx(req.user_id))
+    u = bind_user(db, user_ctx(resolve_asserted(request, req.user_id)))
     now = datetime.now(UTC)
     old = db.get(m.MemoryFact, item_id)
     if old and old.user_id == u.user_id and old.app_id == u.app_id and old.valid_to is None:
@@ -256,15 +258,47 @@ def import_markdown_ep(payload: dict, u: UserContext = Depends(user_from_query),
     return apply_markdown_import(db, u, files)
 
 
-@router.get("/insights", response_model=list[InsightListItem])
-def list_insights(u: UserContext = Depends(user_from_query), db: Session = Depends(get_db)):
+@router.get("/insights", response_model=InsightPage)
+def list_insights(offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200),
+                  u: UserContext = Depends(user_from_query), db: Session = Depends(get_db)):
     """我的经验库（第十一轮）：现行经验全量可见——学到了什么、置信度多少、用过几次，
-    不再是黑盒。含已被禁用的（muted 本人要能看见才能取消禁用）。"""
+    不再是黑盒。含已被禁用的（muted 本人要能看见才能取消禁用）。
+    第二十五轮改为分页（与 /v1/me/memories 同口径）：此前无界列表，面板只能
+    静默截断在前 100 条。"""
     bind_user(db, u)
     rows = db.scalars(select(m.MemoryInsight).where(
         *_mine(m.MemoryInsight, u), m.MemoryInsight.valid_to.is_(None))
         .order_by(m.MemoryInsight.valid_from.desc()))
-    return [_insight_item(i) for i in rows]
+    items = [_insight_item(i) for i in rows]
+    return InsightPage(items=items[offset:offset + limit], total=len(items),
+                       offset=offset, limit=limit)
+
+
+@router.get("/identity")
+def identity(request: Request, u: UserContext = Depends(user_from_query),
+             db: Session = Depends(get_db)):
+    """当前身份（第二十五轮）：面板登录后调用，诚实展示模式——bound=true 表示
+    本次请求的身份来自服务密钥绑定（?user_id= 已失效），false 表示自断言。
+    只回自己的身份，不泄露映射。"""
+    bind_user(db, u)
+    return {"app_id": u.app_id, "user_id": u.user_id,
+            "bound": getattr(request.state, "bound_user", None) is not None}
+
+
+@router.get("/episodes/{episode_id}", response_model=EpisodeDetail)
+def episode_detail(episode_id: str, u: UserContext = Depends(user_from_query),
+                   db: Session = Depends(get_db)):
+    """轨迹详情（第二十五轮溯源落点）：面板点一条经验的“溯源”后看到的来源
+    轨迹全文。跨用户与不存在一律 404（与 insight_links 同形，不泄露存在性）。"""
+    bind_user(db, u)
+    ep = db.scalar(select(m.TaskEpisode).where(
+        *_mine(m.TaskEpisode, u), m.TaskEpisode.id == episode_id))
+    if ep is None:
+        raise HTTPException(status_code=404, detail="episode not found")
+    return EpisodeDetail(id=ep.id, title=ep.title, source=ep.source, outcome=ep.outcome,
+                         project=ep.project, steps=ep.steps or [], cost=ep.cost or {},
+                         distill_status=ep.distill_status, salience=ep.salience or 0.0,
+                         skeletonized=bool(ep.skeletonized), created_at=ep.created_at)
 
 
 @router.get("/insights/{insight_id}/links")
@@ -363,9 +397,9 @@ def read_settings(u: UserContext = Depends(user_from_query), db: Session = Depen
 
 
 @router.put("/settings", response_model=SettingsOut)
-def write_settings(req: SettingsIn, db: Session = Depends(get_db)):
+def write_settings(req: SettingsIn, db: Session = Depends(get_db), request: Request = None):
     """开启记忆必须带当前隐私说明版本（= 用户在授权页点了同意）；关闭随时可以。"""
-    u = bind_user(db, user_ctx(req.user_id))
+    u = bind_user(db, user_ctx(resolve_asserted(request, req.user_id)))
     s = get_setting(db, u)
     if req.memory_enabled:
         if req.consent_version != CONSENT_VERSION:

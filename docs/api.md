@@ -3,6 +3,7 @@
 - Base URL：`http(s)://<host>:8000`，所有业务接口带 `/v1` 前缀。
 - 信任边界与服务密钥：服务仅供内网/业务服务器调用。所有 `/v1/*` 业务接口必须在请求头中携带服务密钥 `X-Service-Key`（取自环境变量 `SERVICE_KEYS`，支持多值轮换），缺失或错误返回 `401`；健康检查 `/healthz`、`/readyz` 不需要密钥。
 - 身份：业务调用方在上游完成身份校验与鉴权后传入 `user_id`（有 JSON body 的接口放 body，GET/DELETE 用 `?user_id=`），本服务不做用户登录。缺失或空串返回 `422`。`app_id` 由服务配置 `APP_ID` 固定（默认 `tiancode`），调用方不能切换；body 里出现 `app_id` 等未定义字段一律 `422`。
+- 身份绑定（第二十五轮，opt-in）：配置 `SERVICE_KEY_USERS`（逗号分隔 `key:user` 对）后，该密钥的请求即以绑定用户为准，查询与 body 里的 `user_id` 断言全部失效；未配置时行为不变。绑定只收窄不放宽——映射里的 key 仍须先过 `SERVICE_KEYS` 校验。面板可用 `GET /v1/me/identity` 查看当前身份与模式（`bound`）。MCP 不受绑定影响（工具传参面，见 architecture.md）。
 - 交互式文档：非 prod 环境或配置 `DOCS_ENABLED=true` 时可访问 `/docs`（Swagger UI）或 `/openapi.json`；prod 默认关闭（返回 `404`）。
 - C 端面板：`/memory/ui/`（Vue 静态站，只调本文 `/v1/me/*`；仅内网可访问；演示填写 `user_id`，也可用 `?user_id=` 预填）。
 - 接入指南与调用代码示例：详见 [tiancode 业务方接入指南](tiancode-integration.md)。
@@ -68,6 +69,10 @@
 ## 查看我的记忆 ✅　`GET /v1/me/memories?user_id=&kind=fact|preference&offset=0&limit=50`
 - v1 先全量查出再在内存里分页（单用户条数有上限，见架构文档）；数据量上来后改成 SQL 分页。
 - 只列当前有效版本，按时间倒序；每条带 `kind`、`subject`、`version`、`valid_from`、`source_session_id`（来源会话）。
+
+## 查看我的经验 ✅　`GET /v1/me/insights?user_id=&offset=0&limit=50`
+- 第二十五轮改为分页（与 `/v1/me/memories` 同口径，默认 50、上限 200），返回 `{"items","total","offset","limit"}`；此前无界列表，面板只能静默截断在前 100 条。含已被禁用的（本人要能看见才能取消禁用）；每条带 `source_episode_id`（来源轨迹，见下）。
+- 溯源：`GET /v1/me/episodes/{episode_id}?user_id=` 返回轨迹详情（目标、步骤、结果、提炼状态、显著性）；跨用户与不存在一律 `404`。事实行只有 `source_session_id`（来源会话），没有轨迹可链，面板只作文本展示。
 
 ## 纠正一条 ✅　`PATCH /v1/me/memories/{id}`　`{"user_id": "alice", "content": "..."}`
 - 事实或偏好都可以。旧版本 `valid_to=now` 失效，新建 `version+1`；召回只会看到新版本。

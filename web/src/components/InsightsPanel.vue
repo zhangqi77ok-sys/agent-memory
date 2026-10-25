@@ -5,6 +5,7 @@ defineProps<{ insights: InsightItem[]; busy?: boolean }>()
 const emit = defineEmits<{
   togglePin: [item: InsightItem]
   toggleMute: [item: InsightItem]
+  trace: [episodeId: string]
 }>()
 
 const KIND_LABEL: Record<string, string> = {
@@ -34,6 +35,17 @@ const KIND_LABEL: Record<string, string> = {
         <span v-if="i.pinned" class="badge">置顶</span>
         <span v-if="i.muted" class="badge badge-pref">已禁用</span>
         <span class="spacer" />
+        <button
+          v-if="i.source_episode_id"
+          type="button"
+          class="btn btn-ghost"
+          :disabled="busy"
+          data-testid="trace-btn"
+          title="查看这条经验的来源任务轨迹"
+          @click="emit('trace', i.source_episode_id as string)"
+        >
+          溯源
+        </button>
         <button type="button" class="btn btn-ghost" :disabled="busy" @click="emit('togglePin', i)">
           {{ i.pinned ? '取消置顶' : '置顶' }}
         </button>

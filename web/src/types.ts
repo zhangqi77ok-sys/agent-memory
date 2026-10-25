@@ -72,6 +72,42 @@ export interface InsightItem {
   last_used_at: string | null
 }
 
+/** 经验库分页（第二十五轮，与 MemoryPage 同构） */
+export interface InsightPage {
+  items: InsightItem[]
+  total: number
+  offset: number
+  limit: number
+}
+
+/** 当前身份（第二十五轮）：bound=true 表示身份来自服务密钥绑定 */
+export interface Identity {
+  app_id: string
+  user_id: string
+  bound: boolean
+}
+
+/** 轨迹详情（第二十五轮溯源落点） */
+export interface EpisodeStep {
+  action?: string
+  observation?: string | null
+  error?: string | null
+}
+
+export interface EpisodeDetail {
+  id: string
+  title: string
+  source: string
+  outcome: string
+  project: string | null
+  steps: EpisodeStep[]
+  cost: Record<string, unknown>
+  distill_status: string
+  salience: number
+  skeletonized: boolean
+  created_at: string
+}
+
 export interface GraphNode {
   kind: string
   id: string

@@ -71,9 +71,11 @@ def test_list_and_patch_insights(client, db):
     row.embedding = [0.1, 0.2]
     row.embed_model = "fake"
     db.commit()
+    # 第二十五轮：/v1/me/insights 改为分页（InsightPage），不再返回无界列表
     body = client.get("/v1/me/insights", params=uid("alice")).json()
-    assert len(body) == 1 and body[0]["subject"] == "部署端口选择"
-    assert body[0]["confidence"] == 0.5 and body[0]["pinned"] is False
+    assert body["total"] == 1 and len(body["items"]) == 1
+    assert body["items"][0]["subject"] == "部署端口选择"
+    assert body["items"][0]["confidence"] == 0.5 and body["items"][0]["pinned"] is False
     # 改内容 → 旧向量作废（匹配面变了）
     r = client.patch(f"/v1/me/insights/{row.id}", params=uid("alice"),
                      json={"content": "改完的新指导", "pinned": True})
@@ -84,7 +86,7 @@ def test_list_and_patch_insights(client, db):
     # 别人的：404
     r = client.patch(f"/v1/me/insights/{row.id}", params=uid("bob"), json={"muted": True})
     assert r.status_code == 404
-    assert client.get("/v1/me/insights", params=uid("bob")).json() == []
+    assert client.get("/v1/me/insights", params=uid("bob")).json()["items"] == []
 
 
 def test_brief_muted_excluded_pinned_forced(db):

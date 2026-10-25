@@ -7,11 +7,13 @@ import {
   createReminder,
   deleteMemory,
   dismissReminder,
+  episodeDetail,
   exportMemories,
   feedbackFact,
   feedbackPreference,
   getServiceKey,
   getSettings,
+  identity,
   listInsights,
   listJobs,
   listMemories,
@@ -22,11 +24,20 @@ import {
   updateSettings,
 } from './api'
 import { clearUserId, getUserId, setUserId } from './user'
-import type { InsightItem, Job, MemoryItem, Reminder, Settings } from './types'
+import type {
+  EpisodeDetail,
+  Identity,
+  InsightItem,
+  Job,
+  MemoryItem,
+  Reminder,
+  Settings,
+} from './types'
 import AdminPanel from './components/AdminPanel.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import ConsentPage from './components/ConsentPage.vue'
 import ConsolidationPanel from './components/ConsolidationPanel.vue'
+import EpisodeDetailPanel from './components/EpisodeDetailPanel.vue'
 import GraphStatsPanel from './components/GraphStatsPanel.vue'
 import InsightsPanel from './components/InsightsPanel.vue'
 import JobsList from './components/JobsList.vue'
@@ -71,7 +82,11 @@ function saveServiceKey() {
 }
 const view = ref<'memories' | 'insights' | 'reminders' | 'graph' | 'sleep' | 'admin'>('memories')
 const insights = ref<InsightItem[]>([])
+const insightsTotal = ref(0)
 const reminders = ref<Reminder[]>([])
+// 第二十五轮：服务端认定的当前身份（绑定模式下与填的 user_id 可能不同）
+const identityState = ref<Identity | null>(null)
+const episode = ref<EpisodeDetail | null>(null)
 
 const showConsent = computed(() => settings.value != null && needsConsent(settings.value))
 
@@ -80,21 +95,70 @@ async function loadAll() {
   busy.value = true
   try {
     settings.value = await getSettings()
+    identityState.value = await identity()
     if (!showConsent.value) {
       const kind = filter.value === 'all' ? undefined : filter.value
       const page = await listMemories({ kind, limit: 100 })
       items.value = page.items
       total.value = page.total
       jobs.value = await listJobs(20)
-      insights.value = await listInsights()
+      const ipage = await listInsights({ limit: 100 })
+      insights.value = ipage.items
+      insightsTotal.value = ipage.total
       reminders.value = await listReminders(true)
     } else {
       items.value = []
       total.value = 0
       jobs.value = []
       insights.value = []
+      insightsTotal.value = 0
       reminders.value = []
     }
+  } catch (e) {
+    error.value = e instanceof ApiError ? e.message : String(e)
+  } finally {
+    busy.value = false
+  }
+}
+
+// 第二十五轮：不再静默截断在前 100 条——“加载更多”按页追加
+async function loadMoreMemories() {
+  if (busy.value || items.value.length >= total.value) return
+  busy.value = true
+  error.value = ''
+  try {
+    const kind = filter.value === 'all' ? undefined : filter.value
+    const page = await listMemories({ kind, offset: items.value.length, limit: 100 })
+    items.value = [...items.value, ...page.items]
+    total.value = page.total
+  } catch (e) {
+    error.value = e instanceof ApiError ? e.message : String(e)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function loadMoreInsights() {
+  if (busy.value || insights.value.length >= insightsTotal.value) return
+  busy.value = true
+  error.value = ''
+  try {
+    const page = await listInsights({ offset: insights.value.length, limit: 100 })
+    insights.value = [...insights.value, ...page.items]
+    insightsTotal.value = page.total
+  } catch (e) {
+    error.value = e instanceof ApiError ? e.message : String(e)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function showEpisode(episodeId: string) {
+  busy.value = true
+  error.value = ''
+  try {
+    episode.value = await episodeDetail(episodeId)
+    view.value = 'insights'
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : String(e)
   } finally {
@@ -224,7 +288,9 @@ async function onTogglePin(item: InsightItem) {
   error.value = ''
   try {
     await patchInsight(item.id, { pinned: !item.pinned })
-    insights.value = await listInsights()
+    const ipage = await listInsights({ limit: 100 })
+    insights.value = ipage.items
+    insightsTotal.value = ipage.total
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : String(e)
   } finally {
@@ -237,7 +303,9 @@ async function onToggleMute(item: InsightItem) {
   error.value = ''
   try {
     await patchInsight(item.id, { muted: !item.muted })
-    insights.value = await listInsights()
+    const ipage = await listInsights({ limit: 100 })
+    insights.value = ipage.items
+    insightsTotal.value = ipage.total
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : String(e)
   } finally {
@@ -294,6 +362,10 @@ function switchUser() {
   settings.value = null
   items.value = []
   jobs.value = []
+  insights.value = []
+  insightsTotal.value = 0
+  identityState.value = null
+  episode.value = null
   error.value = '请填写 user_id'
 }
 
@@ -318,6 +390,10 @@ onMounted(async () => {
     <button type="button" class="btn" data-testid="use-user" @click="useUser">使用</button>
     <button v-if="userId" type="button" class="btn" data-testid="logout" @click="switchUser">切换用户</button>
   </header>
+  <p v-if="identityState" class="muted" data-testid="identity-line" style="margin: -8px 0 16px">
+    当前身份：{{ identityState.user_id }}
+    {{ identityState.bound ? '（密钥绑定，填的 user_id 已失效）' : '（自断言）' }}
+  </p>
 
   <div v-if="error" class="error" data-testid="error">{{ error }}</div>
   <div v-if="notice" class="ok" data-testid="notice">{{ notice }}</div>
@@ -385,6 +461,11 @@ onMounted(async () => {
         @remove="onDelete(item.id)"
         @feedback="(helpful) => onFeedback(item, helpful)"
       />
+      <div v-if="items.length < total" class="row" style="margin-top: 12px">
+        <button type="button" class="btn" :disabled="busy" data-testid="load-more-memories" @click="loadMoreMemories">
+          加载更多（已载 {{ items.length }} / 共 {{ total }} 条）
+        </button>
+      </div>
     </section>
 
     <div class="row" style="gap: 8px; margin: 4px 0 12px">
@@ -414,13 +495,24 @@ onMounted(async () => {
       <button type="button" class="btn" :class="{ 'btn-primary': view === 'admin' }" data-testid="tab-admin" @click="view = 'admin'">管理端</button>
     </div>
 
+    <EpisodeDetailPanel
+      v-if="episode"
+      :episode="episode"
+      @close="episode = null"
+    />
     <InsightsPanel
       v-if="view === 'insights'"
       :insights="filteredInsights"
       :busy="busy"
       @toggle-pin="onTogglePin"
       @toggle-mute="onToggleMute"
+      @trace="showEpisode"
     />
+    <div v-if="view === 'insights' && insights.length < insightsTotal" class="row" style="margin: 4px 0 12px">
+      <button type="button" class="btn" :disabled="busy" data-testid="load-more-insights" @click="loadMoreInsights">
+        加载更多（已载 {{ insights.length }} / 共 {{ insightsTotal }} 条）
+      </button>
+    </div>
     <RemindersPanel
       v-if="view === 'reminders'"
       :reminders="reminders"

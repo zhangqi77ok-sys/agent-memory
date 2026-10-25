@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { getSettings, needsConsent, updateSettings } from '../api'
+import { episodeDetail, getSettings, identity, listInsights, needsConsent, updateSettings } from '../api'
 import type { Settings } from '../types'
 import { setUserId } from '../user'
 
@@ -59,4 +59,37 @@ it('sends X-Service-Key when saved, and reports 401 in plain words', async () =>
   expect(new Headers(calls[0][1].headers).get('X-Service-Key')).toBe('k-123')
   setServiceKey('')
   expect(getServiceKey()).toBe('')
+})
+
+it('listInsights pages and returns total (no silent 100 cap)', async () => {
+  setUserId('alice')
+  const calls: [string, RequestInit][] = []
+  vi.stubGlobal('fetch', vi.fn(async (u: string, i: RequestInit) => {
+    calls.push([u, i])
+    return new Response(JSON.stringify({ items: [], total: 250, offset: 100, limit: 100 }))
+  }))
+  const page = await listInsights({ offset: 100, limit: 100 })
+  expect(calls[0][0]).toContain('/v1/me/insights?offset=100&limit=100')
+  expect(page.total).toBe(250)
+  expect(page.items).toEqual([])
+})
+
+it('identity and episode detail hit the v1/me endpoints', async () => {
+  setUserId('alice')
+  const calls: [string, RequestInit][] = []
+  vi.stubGlobal('fetch', vi.fn(async (u: string, i: RequestInit) => {
+    calls.push([u, i])
+    if (u.includes('/v1/me/identity')) return new Response(JSON.stringify({ app_id: 'tiancode', user_id: 'alice', bound: false }))
+    return new Response(JSON.stringify({
+      id: 'ep1', title: '部署服务', source: 'mcp', outcome: 'success', project: null,
+      steps: [], cost: {}, distill_status: 'done', salience: 1, skeletonized: false,
+      created_at: '2026-10-25T00:00:00Z',
+    }))
+  }))
+  const id = await identity()
+  expect(calls[0][0]).toContain('/v1/me/identity?user_id=alice')
+  expect(id.bound).toBe(false)
+  const ep = await episodeDetail('ep1')
+  expect(calls[1][0]).toContain('/v1/me/episodes/ep1?user_id=alice')
+  expect(ep.title).toBe('部署服务')
 })
