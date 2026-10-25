@@ -216,16 +216,18 @@ def _abstract_couse_clusters(db: Session, app_id: str, user_id: str,
         subject, content, applies_when = drafted
         if not content:
             continue
+        # 修复第 5 轮：簇抽象是加法（不关簇成员）；NOOP 时不挂边（此前只
+        # 以 NOOP 决定计数、不决定挂边，把非原则行当原则挂到簇上，审计
+        # A-F10）——与综合分支统一为“新原则行落成才挂边”。
         decision, gid = _apply_insight(db, UserContext(app_id, user_id),
                                        _Cand("principle", subject, content, applies_when),
-                                       None, None, project=None)
-        if not gid:
+                                       None, None, project=None, additive=True)
+        if not gid or decision == "noop":
             continue
         for r in rows:
             create_link(db, app_id, user_id, ("insight", gid), ("insight", r.id),
                         "generalizes", 0.8, "llm")
-        if decision != "noop":
-            generalized.append({"id": gid, "subject": subject})
+        generalized.append({"id": gid, "subject": subject})
     return generalized
 
 

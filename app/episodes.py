@@ -382,8 +382,16 @@ def _embed_insight(embedder: GeminiEmbedder | None, row: MemoryInsight) -> None:
 def _apply_insight(db: Session, u: UserContext, cand, episode_id: str,
                    embedder: GeminiEmbedder | None,
                    project: str | None = None,
-                   agent: str | None = None) -> tuple[str, str | None]:
-    """按 decide() 裁决写入一条经验，返回 (decision, insight_id)。"""
+                   agent: str | None = None,
+                   additive: bool = False) -> tuple[str, str | None]:
+    """按 decide() 裁决写入一条经验，返回 (decision, insight_id)。
+
+    additive（修复第 5 轮，审计 Top 5）：只新增不关闭模式，供原则起草
+    点（综合/weave 簇抽象/睡眠簇抽象）使用。原则是新增节点，不是 matched
+    行的新版本——旧行还活着时继承计数即双重记账，故新行从默认值起步，
+    且不关行、不迁边；新建行一律返回 "add"（没有行被更新）。
+    提炼写入走默认路径（版本滚动语义）不动。
+    """
     # 修复第 2 轮：内容墓碑检查放在匹配/NOOP 之前——旧任务重提炼已遗忘
     # 经验时，若只拦 ADD/UPDATE 不拦 NOOP，support 会被刷到重建的行上。
     # sleep/links/consolidate 的综合调用点走同一入口，一并收口。
@@ -399,6 +407,24 @@ def _apply_insight(db: Session, u: UserContext, cand, episode_id: str,
     decision = decide(existing, cand.content)
     if decision == "NOOP":
         return "noop", (same.id if same is not None else (matched[0].id if matched else None))
+    if additive:
+        # 修复第 5 轮：原则是新增节点——不关 matched 行（分化双方以条件区分
+        # 共存，综合若关掉双方即自毁）、不迁边、不继承计数（旧行还活着，
+        # 继承即双重记账）。project 继承口径保持现行（Top 6 的匹配语义，
+        # 本轮不动，见 fix5-design-draft.md §4）。
+        if project is None and matched:
+            project = matched[0].project
+        row = MemoryInsight(app_id=u.app_id, user_id=u.user_id, kind=cand.kind,
+                            subject=cand.subject, content=cand.content,
+                            applies_when=cand.applies_when,
+                            source_episode_id=episode_id, project=project,
+                            verified=bool(getattr(cand, "verified", True)),
+                            agent=agent,
+                            evidence_chained=bool(getattr(cand, "evidence_chained", False)))
+        db.add(row)
+        db.flush()
+        _embed_insight(embedder, row)
+        return "add", row.id
     now_version = max((r.version for r in matched), default=0) + 1
     # 反馈声誉属于这条经验的血统，不属于某一行：新版本继承被关闭各行的计数与置信度，
     # 否则每次内容更新都把攒下的信任清零，反馈闭环就白建了（第十轮）。
@@ -1037,7 +1063,7 @@ def consolidate_insights(db: Session, now: datetime | None = None, linker=None) 
                     u = UserContext(winner.app_id, winner.user_id)
                     decision, gid = _apply_insight(
                         db, u, _Cand("principle", subject, content, applies_when),
-                        None, None, project=None)
+                        None, None, project=None, additive=True)
                     # NOOP 表示同主题同内容已有一行：不再重复挂边，免得把
                     # 一条非原则行当成原则挂到两边之上。
                     if gid and decision != "noop":

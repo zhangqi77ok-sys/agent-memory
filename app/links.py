@@ -562,9 +562,12 @@ def weave_links(db: Session, linker=None) -> dict:
             if not content:
                 continue
             u = UserContext(app_id, user_id)
-            _, gid = _apply_insight(db, u, _Cand("principle", subject, content, applies_when),
-                                    None, None, project=None)
-            if gid:
+            # 修复第 5 轮：簇抽象是加法（原则是新增节点，不关簇成员）；且与
+            # 综合分支统一 NOOP 门——撞上现行同主题同内容行时不挂边、不计数
+            #（此前 NOOP 也挂边计数，把非原则行当原则挂到簇上，审计 A-F10）。
+            decision, gid = _apply_insight(db, u, _Cand("principle", subject, content, applies_when),
+                                           None, None, project=None, additive=True)
+            if gid and decision != "noop":
                 stats["generalized"] += 1
                 for r in cluster:
                     create_link(db, app_id, user_id, ("insight", gid), ("insight", r.id),
