@@ -1023,7 +1023,10 @@ def consolidate_insights(db: Session, now: datetime | None = None, linker=None) 
                         ((b.confidence or 0.5), b.valid_from) else (b, a)
                     # 第十八轮：败者内容不再静默丢弃——以附录形式并入保留行，
                     # 面板与导出仍能看到被合并掉的那份表述；适用情境去重拼接。
-                    appendix = f"\n\n[合并自同类经验：{loser.subject}] {loser.content or ''}"
+                    # 修复第 8 轮：附录段首打 merged-from 标记（审计 B-F6）——
+                    # 忘掉败者时可按 id 精确剥离该段，不靠主题猜测。
+                    appendix = (f"\n\n[合并自同类经验：{loser.subject} "
+                                f"<!-- merged-from:{loser.id} -->] {loser.content or ''}")
                     keeper.content = (keeper.content + appendix)[:MERGE_CONTENT_CAP]
                     if loser.applies_when and loser.applies_when not in (keeper.applies_when or ""):
                         keeper.applies_when = (

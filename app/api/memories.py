@@ -78,7 +78,9 @@ def recall(req: RecallRequest, db: Session = Depends(get_db), request: Request =
 @router.delete("/me/memories/{item_id}", status_code=204)
 def forget(item_id: str, u: UserContext = Depends(user_from_query), db: Session = Depends(get_db)):
     """删除一条记忆：事实/偏好/经验按同 subject（key）全部版本删，轨迹（episode）按行删。
-    不属于当前用户一律 404。"""
+    不属于当前用户一律 404。删除同时清派生账：经验分支剥交付 JSON、删交付边、
+    scrub 巩固报告、剥离合并附录；事实分支条件清来源消息（见 app/deletion）。
+    派生出的经验不随轨迹联动删（已文档化设计）。"""
     bind_user(db, u)
     fact = db.get(m.MemoryFact, item_id)
     if fact and fact.user_id == u.user_id and fact.app_id == u.app_id:
@@ -103,7 +105,14 @@ def forget(item_id: str, u: UserContext = Depends(user_from_query), db: Session 
 
         for subject, content in snap:
             record_tombstone(db, u.app_id, u.user_id, "fact", subject, content)
-        # TODO(v1): 受影响的 session_summary 重新生成、来源 session_message 删除（Worker 任务）
+        # 修复第 8 轮：来源清理落地（审计 TODO）——只删已无任何版本事实引用
+        # 的会话的消息与摘要（同会话其它事实的来源不受影响）；巩固报告里
+        # 引用已删事实的合并对一并 scrub。
+        from app.deletion import delete_orphan_source_messages, scrub_reports
+
+        delete_orphan_source_messages(
+            db, u.app_id, u.user_id, {v.source_session_id for v in versions})
+        scrub_reports(db, u.app_id, u.user_id, ids)
         _audit(db, u, "forget", ids)
         db.commit()
         return
@@ -142,6 +151,14 @@ def forget(item_id: str, u: UserContext = Depends(user_from_query), db: Session 
 
         for subject, content in snap:
             record_tombstone(db, u.app_id, u.user_id, "insight", subject, content)
+        # 修复第 8 轮：交付清账——删交付边、剥交付 JSON 里的已删 id（变空的
+        # 交付行保留空列表，不抹简报历史）；巩固报告 scrub；存活经验行里
+        # 含已删败者的合并附录段剥离并作废向量。
+        from app.deletion import scrub_reports, strip_deliveries_for_insights, strip_merged_appendices
+
+        strip_deliveries_for_insights(db, u.app_id, u.user_id, ids)
+        scrub_reports(db, u.app_id, u.user_id, ids)
+        strip_merged_appendices(db, u.app_id, u.user_id, ids)
         _audit(db, u, "forget", ids)
         db.commit()
         return

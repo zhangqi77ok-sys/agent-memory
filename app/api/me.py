@@ -133,9 +133,12 @@ def correct(item_id: str, req: CorrectRequest, db: Session = Depends(get_db), re
 @router.delete("/memories", status_code=204)
 def clear_all(u: UserContext = Depends(user_from_query), db: Session = Depends(get_db)):
     """全部清空：事实（含历史版本和向量）、偏好、摘要、原始消息、未完成的写入任务、
-    经验与任务轨迹（第七轮补：此前清空后经验侧会残留，与「全部」二字不符）。
+    经验与任务轨迹（第七轮补：此前清空后经验侧会残留，与「全部」二字不符）、
+    简报交付账与交付边、巩固报告（第八轮补：此前清空后边与报告残留）。
 
     v1 同步执行（单用户数据量小）；id 记入 forgotten_id，备份恢复后据此重删。
+    同意状态（UserSetting）与删除审计（AuditLog）、墓碑（ForgottenId/Content）
+    刻意保留：前者是同意不是数据，后两者是删除本身的证据与机制。
     """
     bind_user(db, u)
     # 修复第 4 轮：任务行最先删（审计 F1c 的 PG 一半）。PG 下在途 worker
@@ -165,19 +168,12 @@ def clear_all(u: UserContext = Depends(user_from_query), db: Session = Depends(g
     insight_snap = [(r.subject, r.content) for r in insight_rows]
     episode_snap = [(r.title, r.steps) for r in episode_rows]
     reminder_snap = [(r.condition_text, r.action_text) for r in reminder_rows]
-    for model in (m.MemoryFact, m.MemoryPreference, m.SessionSummary, m.SessionMessage,
-                  m.MemoryInsight, m.TaskEpisode):
-        db.execute(delete(model).where(*_mine(model, u)))
-    # 倒排索引随父行清（Core delete 不触发 ORM 事件；按本用户的父 id 精确删）
-    if fact_ids:
-        db.execute(delete(m.MemoryFactToken).where(m.MemoryFactToken.fact_id.in_(fact_ids)))
-    if insight_ids:
-        db.execute(delete(m.MemoryInsightToken).where(m.MemoryInsightToken.insight_id.in_(insight_ids)))
-    # 关联边（第十五轮）全清：节点都没了，网自然不留
-    db.execute(delete(m.MemoryLink).where(*_mine(m.MemoryLink, u)))
-    # 第十六/十七轮的新表同清：简报交付账与前瞻记忆也是「全部」的一部分
-    db.execute(delete(m.BriefDelivery).where(*_mine(m.BriefDelivery, u)))
-    db.execute(delete(m.MemoryReminder).where(*_mine(m.MemoryReminder, u)))
+    # 修复第 8 轮：删除清单收口到 app/deletion（任务行已在上一步先删，
+    # 修复第 4 轮顺序不动）。此前手写清单漏了交付边与巩固报告——新增用户域
+    # 表只改 helper + 注册表测试，不再各入口补漏。
+    from app.deletion import delete_user_memory_data
+
+    delete_user_memory_data(db, u.app_id, u.user_id, fact_ids, insight_ids)
     for i in fact_ids:
         db.merge(m.ForgottenId(id=i, kind="fact"))
     for i in pref_ids:

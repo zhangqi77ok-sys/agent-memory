@@ -74,10 +74,19 @@ def _strengthen_coused(db: Session, app_id: str, user_id: str,
 
 def _link_coused(db: Session, app_id: str, user_id: str,
                  all_counts: Counter) -> list[str]:
-    """全量同现 ≥ 2 次、无任何有效边的对连 related 边；返回新建边 id。"""
+    """全量同现 ≥ 2 次、无任何有效边的对连 related 边；返回新建边 id。
+
+    修复第 8 轮：端点现行性检查——死 id（已删经验）哪怕仍出现在交付 JSON
+    里也不建边。根因在 forget 侧已除（交付 JSON 剥 id），此处是纵深关口。
+    """
+    live = {i for i in db.scalars(select(MemoryInsight.id).where(
+        MemoryInsight.app_id == app_id, MemoryInsight.user_id == user_id,
+        MemoryInsight.valid_to.is_(None)))}
     linked: list[str] = []
     for (a, b), n in sorted(all_counts.items(), key=lambda kv: -kv[1]):
         if n < COUSE_CREATE_MIN or len(linked) >= MAX_NEW_COUSE_EDGES:
+            continue
+        if a not in live or b not in live:
             continue
         existing = db.scalar(select(MemoryLink).where(
             MemoryLink.app_id == app_id, MemoryLink.user_id == user_id,
@@ -263,6 +272,16 @@ def sleep_consolidate(db: Session, linker=None,
             BriefDelivery.app_id == app_id, BriefDelivery.user_id == user_id)))
         window_counts = _couse_counts(window_deliveries)
         all_counts = _couse_counts(all_deliveries)
+        # 修复第 8 轮：共用统计先滤死 id——交付 JSON 即便残留已删 id
+        # （如 fix8 之前产生的交付），强化/建边/抽象三路也不见死节点。
+        # 抽象路本身已用现行行映射过滤，此处统一前置过滤。
+        live_ids = {i for i in db.scalars(select(MemoryInsight.id).where(
+            MemoryInsight.app_id == app_id, MemoryInsight.user_id == user_id,
+            MemoryInsight.valid_to.is_(None)))}
+        window_counts = Counter({p: n for p, n in window_counts.items()
+                                 if p[0] in live_ids and p[1] in live_ids})
+        all_counts = Counter({p: n for p, n in all_counts.items()
+                              if p[0] in live_ids and p[1] in live_ids})
         strengthened = _strengthen_coused(db, app_id, user_id, window_counts)
         linked = _link_coused(db, app_id, user_id, all_counts)
         pruned = _prune_dead_edges(db, app_id, user_id, now)
