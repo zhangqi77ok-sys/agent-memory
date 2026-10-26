@@ -934,9 +934,12 @@ def consolidate_insights(db: Session, now: datetime | None = None, linker=None) 
     - 衰减（第二十二轮遗忘曲线）：基线 = max(最后使用, 衰减锚点 decayed_until)；
       首扣（锚点为空或锚点 ≤ 最后使用）用宽限公式，续扣每满 30 天 exactly 一块，
       扣完锚点记到 now——同一段闲置只扣一次（此前无锚点时每小时巡检重复计费）。
-      月因子随复述变慢：1 - 0.05/(1 + applied_count + feedback_pos)，0 次复述即
-      旧的 0.95。只压置信度、不动反馈计数——新反馈进来时 record_feedback 按计数
-      重算，等于用新证据覆盖衰减，这正是想要的语义。
+      月因子随复述变慢：1 - 0.05/(1 + applied_count + feedback_pos + success_count)，
+      0 次复述即旧的 0.95。只压置信度、不动反馈计数——新反馈进来时 record_feedback 按计数
+      重算，等于用新证据覆盖衰减，这正是想要的语义。第 35 轮补上 success_count：
+      人工上报的任务成功是旧公式漏掉的唯一 outcome 信号（applied_count 含回流应用、
+      feedback_pos 是人工意见，两者都不等于“任务成了”）；success 与好评是
+      record_feedback 里独立传入的两路信号，各计一次不是同一事件计两次。
     - 合并：同用户内 same_subject 且（内容规范化相同，或向量余弦 ≥ 0.95）的现行
       经验对，保留置信度高者（并列取更新的），另一行关行、计数并入保留行、留审计。
       第十九轮：主题不同但内容向量 ≥ 0.98 的对也合并（换个词说同一件事的经验
@@ -968,7 +971,8 @@ def consolidate_insights(db: Session, now: datetime | None = None, linker=None) 
         # 最后使用（被用上刷新了时钟，宽限重算）时用宽限公式；锚点新于最后
         # 使用（续扣）时每满 30 天 exactly 一块，宽限不再重算——两式在总额上
         # 与旧单次口径一致，只修每小时重复计费。复述计数 = 任务回流证实应用
-        # + 人工好评（曝光不算，auto_pos 已含在 applied_count 里不重复计）；
+        # + 人工好评 + 人工上报的任务成功（曝光不算，auto_pos 已含在
+        # applied_count 里不重复计；第 35 轮补 success_count，见上）；
         # 复述越多月因子越近 1，0 次复述即旧的 0.95。
         anchor = _aware(row.decayed_until)
         last_use = _aware(row.last_used_at or row.valid_from)
@@ -977,7 +981,7 @@ def consolidate_insights(db: Session, now: datetime | None = None, linker=None) 
         else:
             blocks = (now - anchor).days // DECAY_GRACE_DAYS
         if blocks >= 1:
-            rehearsals = (row.applied_count or 0) + (row.feedback_pos or 0)
+            rehearsals = (row.applied_count or 0) + (row.feedback_pos or 0) + (row.success_count or 0)
             factor = 1.0 - (1.0 - DECAY_FACTOR) / (1 + rehearsals)
             new_conf = max(CONFIDENCE_FLOOR, conf * (factor ** blocks))
             if new_conf < conf - 1e-9:

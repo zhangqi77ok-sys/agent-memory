@@ -26,6 +26,7 @@ from app.edge_learning import STRENGTH_FLOOR, _aware, find_spread_edge, strength
 from app.extract import norm, same_subject
 from app.links import SPREAD_RELATIONS, create_link, migrate_links, view_of
 from app.models import AuditLog, BriefDelivery, BriefDeliveryEdge, ConsolidationReport, MemoryFact, MemoryInsight, MemoryLink, _now
+from app.reward import reward_from_counts, reward_score
 
 COUSE_CREATE_MIN = 2        # 共用建边：全量同现至少这么多次才连边
 MAX_NEW_COUSE_EDGES = 50    # 每轮新建共用边上限（按同现次数降序）
@@ -72,18 +73,44 @@ def _strengthen_coused(db: Session, app_id: str, user_id: str,
     return strengthened
 
 
+def _pair_rewards(db: Session, app_id: str, user_id: str,
+                  pairs) -> dict[str, float]:
+    """合格对的端点奖励分（第 35 轮）：只查对端点 id，不扫全表——
+    工作量由交付驱动的对数决定，与存量总行数无关。死端点查不到，
+    默认 0，反正随后被现行检查挡掉。"""
+    ids = {i for pair in pairs for i in pair}
+    if not ids:
+        return {}
+    rewards: dict[str, float] = {}
+    for row in db.execute(select(
+            MemoryInsight.id, MemoryInsight.feedback_pos, MemoryInsight.feedback_neg,
+            MemoryInsight.success_count, MemoryInsight.auto_pos, MemoryInsight.auto_neg,
+    ).where(MemoryInsight.app_id == app_id, MemoryInsight.user_id == user_id,
+            MemoryInsight.valid_to.is_(None), MemoryInsight.id.in_(ids))):
+        rewards[row[0]] = reward_from_counts(row[1], row[2], row[3], row[4], row[5])
+    return rewards
+
+
 def _link_coused(db: Session, app_id: str, user_id: str,
                  all_counts: Counter) -> list[str]:
     """全量同现 ≥ 2 次、无任何有效边的对连 related 边；返回新建边 id。
 
     修复第 8 轮：端点现行性检查——死 id（已删经验）哪怕仍出现在交付 JSON
     里也不建边。根因在 forget 侧已除（交付 JSON 剥 id），此处是纵深关口。
+
+    第 35 轮：队列按（对奖励降序，同现次数降序）排——门槛（≥2 次）
+    不动，容量 50 不动；次数量的是曝光，奖励量的是 outcome，证据
+    合格之后按 outcome 排才是在奖励“真的管用”。超容顺延下轮，
+    不是排除；负奖励对排队尾（降权），容量有余仍建边。
     """
     live = {i for i in db.scalars(select(MemoryInsight.id).where(
         MemoryInsight.app_id == app_id, MemoryInsight.user_id == user_id,
         MemoryInsight.valid_to.is_(None)))}
+    rewards = _pair_rewards(db, app_id, user_id, all_counts.keys())
     linked: list[str] = []
-    for (a, b), n in sorted(all_counts.items(), key=lambda kv: -kv[1]):
+    for (a, b), n in sorted(
+            all_counts.items(),
+            key=lambda kv: (-(rewards.get(kv[0][0], 0.0) + rewards.get(kv[0][1], 0.0)), -kv[1])):
         if n < COUSE_CREATE_MIN or len(linked) >= MAX_NEW_COUSE_EDGES:
             continue
         if a not in live or b not in live:
@@ -197,7 +224,13 @@ def _abstract_couse_clusters(db: Session, app_id: str, user_id: str,
         MemoryInsight.app_id == app_id, MemoryInsight.user_id == user_id,
         MemoryInsight.valid_to.is_(None)))}
     generalized: list[dict] = []
-    ordered = sorted(clusters.values(), key=len, reverse=True)
+    # 第 35 轮：队列按（簇奖励降序，簇规模降序）排——门槛（≥3 条、
+    # 跨项目 ≥2 个、无现成原则覆盖）不动，容量 5 不动；簇奖励是
+    # 成员奖励分之和（现行成员才计，死成员不在 by_id 里）。
+    ordered = sorted(
+        clusters.values(),
+        key=lambda members: (-sum(reward_score(by_id[i]) for i in members if i in by_id),
+                             -len(members)))
     for members in ordered:
         if len(generalized) >= MAX_NEW_PRINCIPLES or len(members) < CLUSTER_MIN_SIZE:
             continue
