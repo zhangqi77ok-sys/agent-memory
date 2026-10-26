@@ -30,5 +30,5 @@
 
 - `cd web && npm ci && npm test && npm run build`
 - Playwright：`npm run test:e2e`（mock `/memory/v1/me/*`，不依赖真后端）
-- 镜像：`web/Dockerfile` → `ghcr.io/zhangqi77ok-sys/agent-memory-web`；compose 服务名 `web`，宿主机默认 `127.0.0.1:8091`
+- 镜像：`web/Dockerfile` → `ghcr.io/zhangqi77ok-sys/brainweave-memory-web`；compose 服务名 `web`，宿主机默认 `127.0.0.1:8091`
 - 外层 Nginx 把 `/memory/ui/` 转到 web 容器，`/memory/` 转到 api（由 Docker运维 配置）

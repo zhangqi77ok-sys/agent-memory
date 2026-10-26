@@ -50,7 +50,7 @@ from app.recall import recall_facts
 from app.schemas import CONSENT_VERSION, Message, WriteRequest
 
 mcp = FastMCP(
-    "agent-memory",
+    "brainweave-memory",
     instructions=(
         "这是用户的跨工具共享记忆。涉及用户的偏好、背景、既往决定时，先用 memory_search 查；"
         "对话中出现值得长期记住的事实或偏好时，用 memory_write 存下。记忆写入是异步的："

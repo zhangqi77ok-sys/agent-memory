@@ -1,4 +1,4 @@
-# agent-memory 系统架构（v1）
+# BrainWeave Memory 系统架构（v1）
 
 ## 变更记录
 | 日期 | 变更 |
@@ -325,7 +325,7 @@ sequenceDiagram
 - **资源**：无 GPU，LLM/embedding 走 API；4C8G 单机即可。
 
 ## 7. 部署
-- 镜像：GHCR `ghcr.io/zhangqi77ok-sys/agent-memory:<git-sha>`。
+- 镜像：GHCR `ghcr.io/zhangqi77ok-sys/brainweave-memory:<git-sha>`。
 - 迁移规则：只做向后兼容变更（先加列，下个版本再删列），保证回滚镜像时旧代码能跑在新表结构上。
 - Jenkins→proxy-4 连通方式待 Docker运维 实测：SSH 不通则在 proxy-4 跑 Jenkins agent，或 proxy-4 定时拉新 tag 自部署。
 - 运行单元：`memsvc` 一个镜像，启动参数区分 `api` / `worker`；`postgres`（pgvector 镜像）。共两类容器。

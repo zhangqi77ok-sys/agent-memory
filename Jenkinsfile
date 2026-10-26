@@ -1,4 +1,4 @@
-// agent-memory CI/CD（Jenkins 在固定 IP 的部署机上，见 docs/adr/0002、docs/deploy.md）
+// BrainWeave Memory CI/CD（Jenkins 在固定 IP 的部署机上，见 docs/adr/0002、docs/deploy.md）
 // 凭据（Jenkins Credentials，仓库里只出现 ID）：
 //   deploy-ssh  SSH 私钥，登录部署机 deploy 用户
 //   deploy-env  Secret file，部署机 /opt/agent-memory/.env 的内容
@@ -19,10 +19,10 @@ pipeline {
     booleanParam(name: 'CONFIRM_ROLLBACK', defaultValue: false, description: '手动回滚确认：当指定 ROLLBACK_TAG 时，必须勾选此项才执行回滚')
   }
   environment {
-    GHCR_IMAGE = 'ghcr.io/zhangqi77ok-sys/agent-memory'
-    WEB_GHCR_IMAGE = 'ghcr.io/zhangqi77ok-sys/agent-memory-web'
-    LOCAL_IMAGE = 'agent-memory'
-    WEB_LOCAL_IMAGE = 'agent-memory-web'
+    GHCR_IMAGE = 'ghcr.io/zhangqi77ok-sys/brainweave-memory'
+    WEB_GHCR_IMAGE = 'ghcr.io/zhangqi77ok-sys/brainweave-memory-web'
+    LOCAL_IMAGE = 'brainweave-memory'
+    WEB_LOCAL_IMAGE = 'brainweave-memory-web'
     APP_DIR = '/opt/agent-memory'
     CI_NET = 'jenkins_default'   // Jenkins 容器所在网络，CI 临时 Postgres 也挂这里
   }

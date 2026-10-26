@@ -75,7 +75,7 @@ def main() -> None:  # pragma: no cover - 真入口，靠冒烟实跑验证
     else:
         ui_note = "未构建前端（纯 API）：先在 web/ 里执行 npm install && npm run build 再重启"
     port = int(os.environ.get("PORT", "8000"))
-    print(f"agent-memory lite 已启动\n"
+    print(f"BrainWeave Memory lite 已启动\n"
           f"  数据目录：{home}\n"
           f"  服务地址：http://127.0.0.1:{port}（{ui_note}）\n"
           f"  服务密钥：{key}（已存 {home}/service_key.txt，MCP/脚本用它连接）\n"

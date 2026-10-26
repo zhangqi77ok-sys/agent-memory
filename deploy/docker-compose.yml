@@ -24,7 +24,7 @@ services:
     restart: unless-stopped
 
   api:
-    image: ${IMAGE:-ghcr.io/zhangqi77ok-sys/agent-memory}:${TAG:-latest}
+    image: ${IMAGE:-ghcr.io/zhangqi77ok-sys/brainweave-memory}:${TAG:-latest}
     env_file: .env
     environment:
       APP_ENV: prod
@@ -39,7 +39,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: ${IMAGE:-ghcr.io/zhangqi77ok-sys/agent-memory}:${TAG:-latest}
+    image: ${IMAGE:-ghcr.io/zhangqi77ok-sys/brainweave-memory}:${TAG:-latest}
     deploy:
       replicas: 2
     env_file: .env
@@ -57,7 +57,7 @@ services:
 
   web:
     # C 端「我的记忆」面板；静态资源路径 /memory/ui/。与 api 同 TAG、同一次回滚；外层 Nginx /memory/ui/ → 127.0.0.1:8091
-    image: ${WEB_IMAGE:-ghcr.io/zhangqi77ok-sys/agent-memory-web}:${WEB_TAG:-${TAG:-latest}}
+    image: ${WEB_IMAGE:-ghcr.io/zhangqi77ok-sys/brainweave-memory-web}:${WEB_TAG:-${TAG:-latest}}
     build:
       context: ../web
       dockerfile: Dockerfile

@@ -1,4 +1,4 @@
-# 运维手册（agent-memory）
+# 运维手册（BrainWeave Memory）
 
 所有命令在部署机上以 `deploy` 用户执行，目录 `/opt/agent-memory`，compose 项目名 `agent-memory`。
 
@@ -65,8 +65,8 @@ docker compose -p agent-memory exec -T db psql -U memory -d memory -c "DROP DATA
   ```bash
   cd /opt/agent-memory
   cat .last_tag  # 查看上一版本 TAG
-  IMAGE=ghcr.io/zhangqi77ok-sys/agent-memory TAG=<目标TAG> \
-  WEB_IMAGE=ghcr.io/zhangqi77ok-sys/agent-memory-web WEB_TAG=<目标TAG> \
+  IMAGE=ghcr.io/zhangqi77ok-sys/brainweave-memory TAG=<目标TAG> \
+  WEB_IMAGE=ghcr.io/zhangqi77ok-sys/brainweave-memory-web WEB_TAG=<目标TAG> \
   docker compose -p agent-memory up -d
   curl -s 127.0.0.1:8090/readyz
   ```
@@ -87,7 +87,7 @@ docker compose -p agent-memory exec -T db psql -U memory -d memory -c "DROP DATA
    （`0006_drop_...` 的 downgrade 会自动加回历史标识列并从 `app_id` 回填数据）。
 3. 降级成功后，再启动 0006 之前的目标镜像：
    ```bash
-   IMAGE=ghcr.io/zhangqi77ok-sys/agent-memory TAG=<目标旧TAG> docker compose -p agent-memory up -d
+   IMAGE=ghcr.io/zhangqi77ok-sys/brainweave-memory TAG=<目标旧TAG> docker compose -p agent-memory up -d
    ```
 4. 验证服务：`curl -s 127.0.0.1:8090/readyz` 确认返回 200。
 

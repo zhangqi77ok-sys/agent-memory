@@ -1,10 +1,10 @@
-# agent-memory
+# BrainWeave Memory
 
 > 一句话：**主流记忆系统让 agent 记住你是谁；这个系统让 agent 记住活是怎么干的——并且能证明下一次干得更省。**
 
 ## 一、项目介绍
 
-`agent-memory` 是一个自托管的远程记忆服务（Python / FastAPI / Postgres + pgvector），给多个 AI 编程工具提供同一份可插拔的记忆后端。
+`BrainWeave Memory` 是一个自托管的远程记忆服务（Python / FastAPI / Postgres + pgvector），给多个 AI 编程工具提供同一份可插拔的记忆后端。
 
 它的原料不是闲聊，而是**任务轨迹**：目标、步骤、出错点、重试与成本整份入库，提炼成可复用的经验；新任务开工前以**情境简报**递回。失败的任务同样是原料——栽过的跟头会被结构化地存下来，下次主动递到手边。
 

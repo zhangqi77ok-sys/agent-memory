@@ -23,7 +23,7 @@ def create_app(s: Settings = settings) -> FastAPI:
     docs_on = s.docs_enabled if s.docs_enabled is not None else not s.is_prod
     # 反向代理前缀（如 /memory）由 uvicorn --root-path 传入，openapi.json 地址随之正确
     application = FastAPI(
-        title="agent-memory",
+        title="BrainWeave Memory",
         version="0.1.0",
         docs_url="/docs" if docs_on else None,
         redoc_url=None,
