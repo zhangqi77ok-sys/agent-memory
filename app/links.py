@@ -23,13 +23,13 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-from sqlalchemy import or_, select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, settings
 from app.embeddings import cosine
 from app.extract import norm, same_subject
-from app.models import MemoryFact, MemoryInsight, MemoryLink, _now
+from app.models import MemoryFact, MemoryFactToken, MemoryInsight, MemoryInsightToken, MemoryLink, _now
 from app.tokenize import tokens_of
 
 log = logging.getLogger(__name__)
@@ -43,6 +43,7 @@ WEAVE_COS_RELATED = 0.88    # 跨主题规则连 related 的余弦线（写入�
 WEAVE_COS_SUPPORTS = 0.80   # 同主题规则连 supports 的余弦线
 GENERALIZE_COS = 0.90       # 抽象聚类的同构余弦线
 MAX_WEAVE_CANDIDATES = 8    # 写入时织网的候选上限：写路径不能为织网付出无界成本
+WEAVE_ANCHOR_PEER_BUDGET = 200  # 写入时织网锚点 peer 上限：倒排命中再多，打分也只看共享 token 最多的前 200 行
 
 # 否定/禁止标记与指令标记：同主题、高重叠、一边禁止一边要求 → 规则判矛盾。
 # 这是启发式，只认最明确的对撞；拿不准的一律降为 related，等判定器或用户裁决。
@@ -440,15 +441,85 @@ def _active_rows(db: Session, model, app_id: str, user_id: str):
         model.app_id == app_id, model.user_id == user_id, model.valid_to.is_(None))))
 
 
+def _weave_anchor_peers(db: Session, model, token_model, id_key: str,
+                        app_id: str, user_id: str, row, keys: set[str]):
+    """锚点 peer 行（第 32 轮）：倒排里共享 ≥1 个 token 的现行同桶行，
+    按共享 token 数倒序取前 WEAVE_ANCHOR_PEER_BUDGET 个。
+
+    倒排与召回同口径（tokens_of，ORM 事件全仓写路径同事务维护），
+    查询本身走 (token, id) 索引，不载全量行。经验行再按 project 分桶
+    （NULL 对 NULL）；事实无 project 列，只按 (app, user, kind) 分桶。
+    同主题对一定共享 token（norm 相等 → 同 token 集；包含合并 →
+    短侧 token ⊆ 长侧 token；bigram Jaccard ≥ 0.5 → 共享 CJK bigram
+    token），唯一理论漏网是只共享含空白 bigram 的病态主题——那类对
+    巡检在 Python 侧算 bigram 时仍能补上。跨主题高余弦对与巡检同口径：
+    零 token 重叠的纯换词对可能漏连，只意味着“未连边”，不丢数据。"""
+    if not keys:
+        return []
+    id_col = token_model.__table__.c[id_key]
+    stmt = (select(id_col, func.count().label("shared"))
+            .where(token_model.token.in_(sorted(keys)),
+                   token_model.app_id == app_id,
+                   token_model.user_id == user_id)
+            .group_by(id_col)
+            .order_by(desc("shared"), id_col)
+            .limit(WEAVE_ANCHOR_PEER_BUDGET))
+    peer_ids = [r[0] for r in db.execute(stmt).all()]
+    if not peer_ids:
+        return []
+    q = select(model).where(model.id.in_(peer_ids), model.app_id == app_id,
+                             model.user_id == user_id, model.valid_to.is_(None),
+                             model.id != row.id)
+    if isinstance(row, MemoryInsight):
+        q = q.where(model.project == row.project)
+    rows = list(db.scalars(q))
+    order = {pid: i for i, pid in enumerate(peer_ids)}
+    rows.sort(key=lambda r: order.get(r.id, len(order)))
+    return rows
+
+
 def weave_on_write(db: Session, app_id: str, user_id: str, row, linker=None) -> int:
-    """新节点落库后织网：找候选邻居（同主题 + 向量最近若干），逐对分类连边。
-    返回新建边数；只 flush 不 commit（调用方事务里顺带提交）。候选有界
-    （MAX_WEAVE_CANDIDATES），写路径不为织网做无界扫描——存量关系靠巡检补。"""
-    model = MemoryInsight if isinstance(row, MemoryInsight) else MemoryFact
-    view = view_of(row)
-    peers = [r for r in _active_rows(db, model, app_id, user_id) if r.id != row.id]
+    """新节点落库后织网：锚点候选 + 分类连边，返回新建边数；
+    只 flush 不 commit（调用方事务里顺带提交）。
+
+    第 32 轮：候选从全量扫描改成倒排锚点查询（见 _weave_anchor_peers），
+    打分只看前 WEAVE_ANCHOR_PEER_BUDGET 个 peer，建边仍卡
+    MAX_WEAVE_CANDIDATES。失败隔离：全程包在 SAVEPOINT 里，任一环节
+    抛错只回滚到 SAVEPOINT、记日志、返回 0——写入本身不受影响，
+    漏连的对由巡检兜底补上（不另建重试队列，边缺失不是数据丢失）。
+    门禁：新行自身内容已墓碑 → 直接返回 0；候选 peer 内容已墓碑 →
+    跳过该 peer；分桶见 _weave_anchor_peers；同意/开关门不新设，
+    织只跑在调用方已过门的事务里，且织本身不产生新节点。"""
+    try:
+        with db.begin_nested():
+            return _weave_on_write_inner(db, app_id, user_id, row, linker)
+    except Exception as e:
+        log.warning("weave_on_write failed, write unaffected: %s", e)
+        return 0
+
+
+def _weave_on_write_inner(db: Session, app_id: str, user_id: str, row, linker=None) -> int:
+    from app.tombstone import is_tombstoned
+
+    if isinstance(row, MemoryInsight):
+        model, token_model, id_key, kind = (MemoryInsight, MemoryInsightToken,
+                                            "insight_id", "insight")
+        text = f"{row.subject} {row.content} {row.applies_when or ''}"
+    elif isinstance(row, MemoryFact):
+        model, token_model, id_key, kind = (MemoryFact, MemoryFactToken,
+                                            "fact_id", "fact")
+        text = f"{row.subject} {row.content}"
+    else:
+        return 0
+    if getattr(row, "id", None) is None:
+        return 0
+    if is_tombstoned(db, app_id, user_id, kind, row.subject, row.content):
+        return 0
+    peers = _weave_anchor_peers(db, model, token_model, id_key,
+                                app_id, user_id, row, tokens_of(text))
     if not peers:
         return 0
+    view = view_of(row)
     scored: list[tuple[float, object]] = []
     for p in peers:
         if same_subject(p.subject, row.subject):
@@ -461,12 +532,15 @@ def weave_on_write(db: Session, app_id: str, user_id: str, row, linker=None) -> 
     made = 0
     judge = linker.judge if linker is not None else None
     for _, peer in scored[:MAX_WEAVE_CANDIDATES]:
-        verdict = classify_pair(view, view_of(peer), _pair_cosine_rows(row, peer), judge=judge)
+        if is_tombstoned(db, app_id, user_id, kind, peer.subject, peer.content):
+            continue
+        peer_view = view_of(peer)
+        verdict = classify_pair(view, peer_view, _pair_cosine_rows(row, peer), judge=judge)
         if verdict is None:
             continue
         relation, strength, origin = verdict
-        a, b = (view.kind, view.id), (peer_kind(peer), peer.id)
-        if relation == "generalizes" and (view.project is None) != (peer.project is None):
+        a, b = (view.kind, view.id), (peer_view.kind, peer.id)
+        if relation == "generalizes" and (view.project is None) != (peer_view.project is None):
             # 方向摆正：通用侧（无项目）→ 专属侧；两侧项目状态相同时尊重判定原序
             a, b = (a, b) if view.project is None else (b, a)
         if create_link(db, app_id, user_id, a, b, relation, strength, origin) is not None:

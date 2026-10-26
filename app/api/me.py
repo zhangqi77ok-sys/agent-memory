@@ -115,6 +115,11 @@ def correct(item_id: str, req: CorrectRequest, db: Session = Depends(get_db), re
                            version=old.version + 1, valid_from=now, source_session_id=None)
         # 用户手动纠正没有来源会话；向量由 Worker 后续补（embedding 为空时召回走关键词）
         db.add(new)
+        # 第 32 轮：纠正的新版本行落库即织网（weave_on_write 永不抛错）。
+        from app.links import weave_on_write
+
+        db.flush()
+        weave_on_write(db, u.app_id, u.user_id, new)
         _audit(db, u, "correct", [old.id, new.id])
         db.commit()
         return _fact_item(new)

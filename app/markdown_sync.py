@@ -161,6 +161,7 @@ def apply_markdown_import(db: Session, u: UserContext, files: dict[str, str]) ->
               "tombstoned": 0, "missing_in_files": []}
     seen_ids: set[str] = set()
     created_rows: list = []  # 本轮新建的条目不算「不在文件里」，算缺失前要排除
+    weave_rows: list = []  # 第 32 轮：本轮新建的事实/经验行 + 事实新版本行，导回后即织网
 
     def _clean(text: str) -> str:
         out = redact(text or "")
@@ -185,9 +186,11 @@ def apply_markdown_import(db: Session, u: UserContext, files: dict[str, str]) ->
                     report["tombstoned"] += 1
                 else:
                     row.valid_to = now
-                    db.add(m.MemoryFact(app_id=u.app_id, user_id=u.user_id,
-                                        subject=row.subject, content=content,
-                                        version=row.version + 1, valid_from=now))
+                    row_new = m.MemoryFact(app_id=u.app_id, user_id=u.user_id,
+                                           subject=row.subject, content=content,
+                                           version=row.version + 1, valid_from=now)
+                    db.add(row_new)
+                    weave_rows.append(row_new)
                     report["updated"] += 1
             elif not it["id"]:
                 if block_if_tombstoned(db, u.app_id, u.user_id, "fact",
@@ -199,6 +202,7 @@ def apply_markdown_import(db: Session, u: UserContext, files: dict[str, str]) ->
                                        content=content, version=1, valid_from=now)
                 db.add(row_new)
                 created_rows.append(row_new)
+                weave_rows.append(row_new)
                 report["created"] += 1
         elif it["type"] == "preference":
             value = _clean(it["value"])
@@ -261,10 +265,19 @@ def apply_markdown_import(db: Session, u: UserContext, files: dict[str, str]) ->
                     applies_when=_clean(it.get("applies_when", "")))
                 db.add(row_new)
                 created_rows.append(row_new)
+                weave_rows.append(row_new)
                 report["created"] += 1
     if created_rows:
         db.flush()
         seen_ids.update(r.id for r in created_rows)
+    if weave_rows:
+        # 第 32 轮：导回的新行落库即织网（原地更新的经验行无新节点，不织）。
+        # weave_on_write 永不抛错，织失败不影响导回提交，漏连的对由巡检补。
+        from app.links import weave_on_write
+
+        db.flush()
+        for r in weave_rows:
+            weave_on_write(db, u.app_id, u.user_id, r)
     # 删除只报告：现行条目里没在文件出现的 id 列出来，删不删由用户走正式路径决定
     for model in (m.MemoryFact, m.MemoryPreference, m.MemoryInsight):
         rows = db.scalars(select(model).where(

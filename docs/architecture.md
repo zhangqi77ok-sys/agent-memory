@@ -314,7 +314,41 @@ sequenceDiagram
 - **残留**：F3c（API 写路径咨询锁 + 计数器原子 UPDATE）不在 Top 10
   摘要的五项内，留给后续轮次；SQLite 多 worker 双领（claim 的先查后改
   在 SQLite 下无行锁）与事实 NOOP 重复处理虚增 support 仍是残留；
-  `weave_on_write` 写路径 O(n) 扫描不在 Top 10 定义内，留残留。
+  `weave_on_write` 写路径 O(n) 扫描由第 32 轮收口（见 §5.11）。
+
+## 5.11 写时织网有界化（第 32 轮）
+
+15 轮接在提炼/抽取两处写路径上的 `weave_on_write`，候选是全量扫描
+（`MAX_WEAVE_CANDIDATES=8` 卡的只是建边数，不是扫描成本），且无
+分桶过滤、无织内墓碑门、失败可向上传播拖垮整批；Markdown 导回与
+纠正端点则全程不织网。本轮五项收口，分类口径与巡检锚点哲学不动：
+
+- **锚点候选**：新行 keys = `tokens_of(subject + content [+ applies_when])`
+  （与 14 轮倒排同一口径），查 `memory_fact_token` /
+  `memory_insight_token` 的 `(token, id)` 索引，按共享 token 数倒序取
+  前 `WEAVE_ANCHOR_PEER_BUDGET`（默认 200）个 peer 行打分；同主题
+  2.0 优先、余弦次之，取前 8 个分类建边。完备性与巡检同理：
+  同主题对一定共享 token（norm 相等 → 同 token 集；包含合并 → 短侧
+  token ⊆ 长侧 token；bigram Jaccard ≥ 0.5 → 共享 CJK bigram token），
+  唯一理论漏网是只共享含空白 bigram 的病态主题，巡检在 Python 侧
+  算 bigram 时仍能补上；零 token 重叠的纯换词跨主题对可能漏连，
+  只是“未连边”，不丢数据。
+- **分桶**：经验行只连同 project 行（NULL 对 NULL），事实只按
+  (app, user, kind) 分桶——项目写不跨桶连边。注意与 §5.7 的分工：
+  巡检的跨项目抽象（generalizes）不受影响，仍是巡检的职责；
+  写时跨项目不连边，不等于巡检跨项目不连边。
+- **墓碑门**：新行自身内容已墓碑 → 返回 0；候选 peer 内容已墓碑 →
+  跳过该 peer（调用点的墓碑门仍在，织里的是第二道）。
+- **失败隔离**：全程包在 SAVEPOINT 里，任一环节抛错只回滚到
+  SAVEPOINT、记日志、返回 0，写入照常提交；重试机制 = 巡检
+  （漏连的对下一轮巡检按同一锚点哲学补上，不另建重试队列）。
+- **接线补齐**：Markdown 导回的新事实/新经验行与事实新版本行、
+  纠正的新事实版本行，落库即织网（原地更新的经验行无新节点，不织；
+  sleep/consolidate 起草的原则行由巡检手动挂边，不重复织）。
+  延迟口径：内联（1 次索引 GROUP BY + ≤200 行打分 + ≤8 次分类，
+  规则路径零网络；配了 LLM 判定器时与巡检同成本，判定器异常已兜），
+  无 LLM 判定器、N=2000 peer、SQLite 下 p95 < 200ms（测试预算，
+  实测数见第 32 轮报告）。
 
 ## 6. 非功能
 - **隔离**：每条 SQL 带 `app_id + user_id`，Postgres RLS 兜底；C 端最怕的是用户 A 看到用户 B 的记忆，评测集里“串用户”为硬门禁。
