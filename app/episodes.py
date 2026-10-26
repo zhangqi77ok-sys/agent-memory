@@ -991,62 +991,82 @@ def consolidate_insights(db: Session, now: datetime | None = None, linker=None) 
             retired += 1
             db.add(AuditLog(app_id=row.app_id, user_id=row.user_id, action="consolidate",
                             fact_ids=[row.id], decision="retire"))
+    # 修复第 10 轮：衰减阶段先提交一次（分片提交，见下方）——衰减有锚点
+    # 防重复计费，提交后下轮不再重算；合并阶段每用户组提交一次。
+    db.commit()
     groups: dict[tuple[str, str], list[MemoryInsight]] = {}
     for row in rows:
         groups.setdefault((row.app_id, row.user_id), []).append(row)
     merged = 0
     conflict_pairs = 0
+    deferred_pairs = 0
     for (app_id, user_id), grows in groups.items():
-        for i in range(len(grows)):
-            for j in range(i + 1, len(grows)):
-                a, b = grows[i], grows[j]
-                if a.valid_to is not None or b.valid_to is not None:
-                    continue
-                # 修复第 6 轮：合并只在同一作用域内——项目不同即跳过。
-                # 跨项目配对根本不在同一比较域，不计入 conflicts
-                #（conflicts 是“同域但未达合并线”）；巡检不得借合并关掉
-                # 别项目的行，否则写路径的分桶会被巡检重新打开。
-                # kind 不设门：同主题只有一条现行行是既定语义（评测门禁 c09），
-                # 跨 kind 合并与跨 kind 版本滚动同一口径。
-                if a.project != b.project:
-                    continue
-                # 第十九轮：跨主题语义合并——此前合并只认 same_subject，换个词
-                # 说同一件事的经验永远并存。主题不同时只认向量（≥0.98），不认
-                # 词面相等（词面相等但主题不同，更可能是两回事）。
-                pc = _pair_cosine(a, b)
-                if same_subject(a.subject, b.subject):
-                    merge = norm(a.content) == norm(b.content) or (pc is not None and pc >= MERGE_COSINE)
+        # 修复第 10 轮：全配对 → 锚点候选对（app/patrol.py 证明：主题 bigram
+        # 倒排包含全部 same_subject 真对，同主题分支语义逐字不变；跨主题
+        # 高余弦对靠内容 token 锚点，纯换词零重叠对可能漏合并——行还在，
+        # 不是数据丢失）。向量每行归一化一次，配对只算点积。
+        from app.patrol import PATROL_PAIR_BUDGET, candidate_pairs, normalized_vecs, pair_cos
+
+        cand, deferred = candidate_pairs(grows, budget=PATROL_PAIR_BUDGET, now=now.timestamp())
+        deferred_pairs += deferred
+        vecs = normalized_vecs(grows)
+        for i, j in cand:
+            a, b = grows[i], grows[j]
+            if a.valid_to is not None or b.valid_to is not None:
+                continue
+            # 修复第 6 轮：合并只在同一作用域内——项目不同即跳过。
+            # 跨项目配对根本不在同一比较域，不计入 conflicts
+            #（conflicts 是“同域但未达合并线”）；巡检不得借合并关掉
+            # 别项目的行，否则写路径的分桶会被巡检重新打开。
+            # kind 不设门：同主题只有一条现行行是既定语义（评测门禁 c09），
+            # 跨 kind 合并与跨 kind 版本滚动同一口径。
+            if a.project != b.project:
+                continue
+            # 第十九轮：跨主题语义合并——此前合并只认 same_subject，换个词
+            # 说同一件事的经验永远并存。主题不同时只认向量（≥0.98），不认
+            # 词面相等（词面相等但主题不同，更可能是两回事）。
+            # 修复第 10 轮：内容规范化相等时直接合并，不算余弦（旧代码
+            # 每对先算余弦是纯浪费）；余弦只在需要时算。
+            if same_subject(a.subject, b.subject):
+                if norm(a.content) == norm(b.content):
+                    merge = True
                 else:
-                    merge = pc is not None and pc >= CROSS_SUBJECT_MERGE_COSINE
-                if merge:
-                    keeper, loser = (a, b) if ((a.confidence or 0.5), a.valid_from) >= \
-                        ((b.confidence or 0.5), b.valid_from) else (b, a)
-                    # 第十八轮：败者内容不再静默丢弃——以附录形式并入保留行，
-                    # 面板与导出仍能看到被合并掉的那份表述；适用情境去重拼接。
-                    # 修复第 8 轮：附录段首打 merged-from 标记（审计 B-F6）——
-                    # 忘掉败者时可按 id 精确剥离该段，不靠主题猜测。
-                    appendix = (f"\n\n[合并自同类经验：{loser.subject} "
-                                f"<!-- merged-from:{loser.id} -->] {loser.content or ''}")
-                    keeper.content = (keeper.content + appendix)[:MERGE_CONTENT_CAP]
-                    if loser.applies_when and loser.applies_when not in (keeper.applies_when or ""):
-                        keeper.applies_when = (
-                            (keeper.applies_when or "") + "；另见：" + loser.applies_when
-                        )[:MERGE_APPLIES_CAP]
-                    loser.valid_to = now
-                    keeper.use_count = (keeper.use_count or 0) + (loser.use_count or 0)
-                    keeper.success_count = (keeper.success_count or 0) + (loser.success_count or 0)
-                    keeper.feedback_pos = (keeper.feedback_pos or 0) + (loser.feedback_pos or 0)
-                    keeper.feedback_neg = (keeper.feedback_neg or 0) + (loser.feedback_neg or 0)
-                    keeper.applied_count = (keeper.applied_count or 0) + (loser.applied_count or 0)
-                    keeper.auto_pos = (keeper.auto_pos or 0) + (loser.auto_pos or 0)
-                    keeper.auto_neg = (keeper.auto_neg or 0) + (loser.auto_neg or 0)
-                    keeper.confidence = _confidence(keeper.feedback_pos, keeper.feedback_neg,
-                                                    keeper.auto_pos, keeper.auto_neg)
-                    db.add(AuditLog(app_id=app_id, user_id=user_id, action="consolidate",
-                                    fact_ids=[keeper.id, loser.id], decision="merge"))
-                    merged += 1
-                else:
-                    conflict_pairs += 1
+                    pc = pair_cos(vecs, a.id, b.id)
+                    merge = pc is not None and pc >= MERGE_COSINE
+            else:
+                pc = pair_cos(vecs, a.id, b.id)
+                merge = pc is not None and pc >= CROSS_SUBJECT_MERGE_COSINE
+            if merge:
+                keeper, loser = (a, b) if ((a.confidence or 0.5), a.valid_from) >= \
+                    ((b.confidence or 0.5), b.valid_from) else (b, a)
+                # 第十八轮：败者内容不再静默丢弃——以附录形式并入保留行，
+                # 面板与导出仍能看到被合并掉的那份表述；适用情境去重拼接。
+                # 修复第 8 轮：附录段首打 merged-from 标记（审计 B-F6）——
+                # 忘掉败者时可按 id 精确剥离该段，不靠主题猜测。
+                appendix = (f"\n\n[合并自同类经验：{loser.subject} "
+                            f"<!-- merged-from:{loser.id} -->] {loser.content or ''}")
+                keeper.content = (keeper.content + appendix)[:MERGE_CONTENT_CAP]
+                if loser.applies_when and loser.applies_when not in (keeper.applies_when or ""):
+                    keeper.applies_when = (
+                        (keeper.applies_when or "") + "；另见：" + loser.applies_when
+                    )[:MERGE_APPLIES_CAP]
+                loser.valid_to = now
+                keeper.use_count = (keeper.use_count or 0) + (loser.use_count or 0)
+                keeper.success_count = (keeper.success_count or 0) + (loser.success_count or 0)
+                keeper.feedback_pos = (keeper.feedback_pos or 0) + (loser.feedback_pos or 0)
+                keeper.feedback_neg = (keeper.feedback_neg or 0) + (loser.feedback_neg or 0)
+                keeper.applied_count = (keeper.applied_count or 0) + (loser.applied_count or 0)
+                keeper.auto_pos = (keeper.auto_pos or 0) + (loser.auto_pos or 0)
+                keeper.auto_neg = (keeper.auto_neg or 0) + (loser.auto_neg or 0)
+                keeper.confidence = _confidence(keeper.feedback_pos, keeper.feedback_neg,
+                                                keeper.auto_pos, keeper.auto_neg)
+                db.add(AuditLog(app_id=app_id, user_id=user_id, action="consolidate",
+                                fact_ids=[keeper.id, loser.id], decision="merge"))
+                merged += 1
+            else:
+                conflict_pairs += 1
+        # 修复第 10 轮：每用户组提交一次（分片提交，崩溃后已处理组不丢）。
+        db.commit()
     # 矛盾裁决（第十六轮）：只认织网留下的 contradicts 边——那是判定器/规则
     # 明确表过态的矛盾；同主题共存但没有边的（见上方 conflicts 计数）仍只上报。
     # 第二十轮「条件分化」：裁决前先看输家——有与胜家不同的适用情境、且
@@ -1121,7 +1141,7 @@ def consolidate_insights(db: Session, now: datetime | None = None, linker=None) 
     db.commit()
     return {"decayed": decayed, "merged": merged, "conflicts": conflict_pairs,
             "adjudicated": adjudicated, "differentiated": differentiated, "retired": retired,
-            "synthesized": synthesized}
+            "synthesized": synthesized, "deferred": deferred_pairs}
 
 
 def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,

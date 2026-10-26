@@ -273,6 +273,49 @@ sequenceDiagram
 - **残留**：关键词路高重叠异意图 FP（“查看运行状态”）仍消耗 once
   提醒；两处新阈值均为临时值，正式标定需 ≥100 探针 + 真实反馈数据。
 
+## 5.10 巡检性能与健壮性（修复第 10 轮）
+
+巡检（每小时跑 consolidate / weave / sleep / skeletonize / TTL）曾是
+全配对 + 任务前置 + 失败热重试：审计实测 consolidate N=160 已 6.25s，
+外推 N=5000 单轮约 1.9h，期间任务处理完全停滞。本轮五项收口：
+
+- **锚点候选对**（`app/patrol.py`）：巡检配对循环只对锚点候选对算
+  余弦/判主题。主题锚点是完备的——same_subject 为真 ⟹ 两主题规范化
+  后相等、或包含子串、或 bigram Jaccard ≥ 0.5，三者都蕴含“共享 ≥1 个
+  主题 bigram”，故主题 bigram 倒排包含全部 same_subject 真对，同主题
+  分支语义逐字不变；内容锚点是启发式的——跨主题高余弦对（合并 ≥0.98、
+  连边 ≥0.88、聚类 ≥0.90）可能零 token 重叠（纯换词/跨语言），漏掉
+  只是“未合并/未连边”，行与边都还在。向量每行归一化一次，配对只算
+  点积。单用户单函数候选对预算 PATROL_PAIR_BUDGET（默认 10 万），
+  超限时按 (id_a, id_b) 排序取随 UTC 小时旋转的窗口，剩余进 deferred，
+  靠多轮轮转覆盖。`conflicts` 口径随之收窄为“实际比较过但未达合并线”
+  的对（旧口径把未比较的无关对也计入，纯噪音）。
+- **任务优先 + 失败退避**：主循环抽出 `run_cycle`——先处理 1 job + 至多
+  5 episode，后跑巡检；巡检成功或失败都把 next_patrol 推后一小时，
+  失败不再 2s 热重试，且失败不阻塞下一循环的任务处理。
+- **分片提交**：consolidate（衰减提交 + 每用户组提交 + 最终提交）、
+  weave（每用户提交）、sleep（每用户提交）；入口快照语义不变
+  （off 集合只在入口算一次，轮内翻转仍下一轮起效）。
+- **巡检咨询锁**：PG 会话级咨询锁 `pg_try_advisory_lock(hashtext('patrol'))`
+  （全局单锁，因 _close_dead_links 与边衰减是跨用户全局步；不用事务级
+  锁，分片提交会中途释放它）。抢不到整轮跳过并记 warning，
+  next_patrol 照常 +3600（另一副本正在跑，不是失败）。SQLite 与
+  _lock_user 同口径跳过。
+- **现行边部分唯一索引**：`ix_link_current_unique`（app_id, user_id,
+  src_kind, src_id, dst_kind, dst_id, relation，WHERE valid_to IS NULL；
+  迁移 0025，先去重——同键多现行行留 strength 最大者——后建索引）。
+  `create_link` 先查后插 + SAVEPOINT 回查：并发撞索引时回查既有行返回，
+  不抛错、不重复建边；回查不到返回 None（SQLite 快照下并发行可能
+  暂不可见），调用方按无新建处理。
+- **租约续租**：`LeaseRenewer` 后台线程每 60s 用独立短会话续租
+  （`renew_lease` 原子 UPDATE，只续仍 running 且未过期的任务；已过期
+  不续，防旧持有者抢回已被重领的任务）。续不上即静默停线程。
+  `run_once` 接 `lease_interval` 参数（测试默认不续租，主循环传 60s）。
+- **残留**：F3c（API 写路径咨询锁 + 计数器原子 UPDATE）不在 Top 10
+  摘要的五项内，留给后续轮次；SQLite 多 worker 双领（claim 的先查后改
+  在 SQLite 下无行锁）与事实 NOOP 重复处理虚增 support 仍是残留；
+  `weave_on_write` 写路径 O(n) 扫描不在 Top 10 定义内，留残留。
+
 ## 6. 非功能
 - **隔离**：每条 SQL 带 `app_id + user_id`，Postgres RLS 兜底；C 端最怕的是用户 A 看到用户 B 的记忆，评测集里“串用户”为硬门禁。
 - **规模与成本**：C 端用户多，按用户限流（写入/召回 QPS、每日抽取次数）；抽取按会话结束或每 N 轮批量触发，控制 LLM 成本；记录每用户 token 用量。

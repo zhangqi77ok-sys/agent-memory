@@ -6,10 +6,11 @@
 缺 LLM 配置时进程直接退出，不用假抽取器。
 """
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_, select, text
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.orm import Session
 
 from app import models as m
@@ -42,6 +43,58 @@ def claim_job(db: Session) -> m.MemoryJob | None:
     job.status, job.attempts, job.locked_until = "running", job.attempts + 1, now + timedelta(seconds=LOCK_SECONDS)
     db.commit()
     return job
+
+
+def renew_lease(db: Session, job_id: str) -> bool:
+    """续租（修复第 10 轮，审计 F4）：单条原子 UPDATE，只续“仍 running 且
+    租约未过期”的任务。已过期不续——过期意味着可能已被另一 worker 重领，
+    旧持有者不得把租约抢回来。返回是否续上。"""
+    now = datetime.now(timezone.utc)
+    result = db.execute(
+        update(m.MemoryJob)
+        .where(m.MemoryJob.id == job_id,
+               m.MemoryJob.status == "running",
+               m.MemoryJob.locked_until > now)
+        .values(locked_until=now + timedelta(seconds=LOCK_SECONDS)))
+    db.commit()
+    return result.rowcount == 1
+
+
+class LeaseRenewer:
+    """租约续租后台线程（修复第 10 轮，审计 F4 推荐方案 a）。
+
+    处理耗时超过 LOCK_SECONDS 时，每 interval 秒用独立短会话续租一次；
+    续不上（任务已 done/被删/租约已过期）即静默停线程，不干扰主处理。
+    interval 默认 LOCK_SECONDS // 2（60s）。"""
+
+    def __init__(self, db: Session, job_id: str, interval: float = LOCK_SECONDS // 2):
+        self._engine = db.get_bind()
+        self._job_id = job_id
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> "LeaseRenewer":
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        from sqlalchemy.orm import sessionmaker
+
+        Session = sessionmaker(bind=self._engine)
+        while not self._stop.wait(self._interval):
+            try:
+                with Session() as s:
+                    if not renew_lease(s, self._job_id):
+                        return
+            except Exception:
+                return  # 续租失败即停：任务按原租约过期后可被重领，不拖垮主处理
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
 
 
 def fail_job(db: Session, job: m.MemoryJob, err: str) -> None:
@@ -480,12 +533,17 @@ def process_job(db: Session, job: m.MemoryJob, extractor, embedder=None, linker=
     return _finish(db, current, decision, fact_ids)
 
 
-def run_once(db: Session, extractor, embedder=None, linker=None) -> m.MemoryJob | None:
-    """领一条并处理。没有待处理任务时返回 None。失败写入 last_error，超限后 status=dead。"""
+def run_once(db: Session, extractor, embedder=None, linker=None,
+             lease_interval: float | None = None) -> m.MemoryJob | None:
+    """领一条并处理。没有待处理任务时返回 None。失败写入 last_error，超限后 status=dead。
+    lease_interval 非空时处理期间起续租线程（修复第 10 轮；测试默认不续租，
+    主循环传 LOCK_SECONDS // 2）。"""
     job = claim_job(db)
     if not job:
         return None
     job_id = job.id
+    renewer = LeaseRenewer(db, job_id, interval=lease_interval).start() \
+        if lease_interval else None
     try:
         process_job(db, job, extractor, embedder=embedder, linker=linker)
     except Exception as e:
@@ -498,6 +556,9 @@ def run_once(db: Session, extractor, embedder=None, linker=None) -> m.MemoryJob 
             return None
         fail_job(db, failed, str(e))
         log.warning("job=%s attempts=%s status=%s error=%s", job_id, failed.attempts, failed.status, failed.last_error)
+    finally:
+        if renewer is not None:
+            renewer.stop()
     return db.get(m.MemoryJob, job_id)
 
 
@@ -512,12 +573,88 @@ def _post_run_wait(job, ep) -> float:
     return 2.0
 
 
+PATROL_INTERVAL_SECONDS = 3600  # 巡检节拍：成功与失败都按此间隔推后（失败不再热重试）
+
+
+def run_patrol(db: Session, linker=None, ttl_days: int = 0,
+               skeleton_days: int = 90) -> dict:
+    """巡检五步（worker 每小时节拍），各步内部分片提交。
+    抢不到全局巡检锁时整轮跳过，返回 {"skipped": "patrol_lock"}（另一副本
+    正在跑，不是失败）。"""
+    from app.patrol import release_patrol_lock, try_patrol_lock
+
+    if not try_patrol_lock(db):
+        log.warning("patrol skipped: another worker holds the patrol lock")
+        return {"skipped": "patrol_lock"}
+    try:
+        stats: dict = {}
+        if ttl_days > 0:
+            stats["expired"] = expire_memories(db, ttl_days)
+        # 经验生命周期巡检与 TTL 同一个小时节拍（第十一轮）：衰减/合并/矛盾计数
+        from app.episodes import consolidate_insights
+        cstats = consolidate_insights(db, linker=linker)
+        stats["consolidate"] = cstats
+        if cstats["decayed"] or cstats["merged"] or cstats["conflicts"] \
+                or cstats["synthesized"]:
+            log.info("consolidate_insights: %s", cstats)
+        # 织网巡检（第十五轮）：补边、矛盾落边、跨项目抽象，与生命周期同节拍
+        from app.links import weave_links
+        wstats = weave_links(db, linker=linker)
+        stats["weave"] = wstats
+        if wstats["linked"] or wstats["generalized"] or wstats["pruned"]:
+            log.info("weave_links: %s", wstats)
+        # 睡眠巩固（第二十一轮）：从使用证据重组——共用强化/建边、
+        # 死边剪除、事实合并、共用簇抽象；各项自带门限，每小时跑安全
+        from app.sleep import sleep_consolidate
+        sstats = sleep_consolidate(db, linker=linker)
+        stats["sleep"] = sstats
+        if any(sstats[k] for k in ("merged", "pruned", "strengthened",
+                                   "linked", "generalized")):
+            log.info("sleep_consolidate: %s", sstats)
+        # 轨迹骨架化（第十七轮）：提炼完的旧轨迹只留骨架，与巡检同节拍
+        from app.episodes import skeletonize_episodes
+        sk = skeletonize_episodes(db, retention_days=skeleton_days)
+        stats["skeletonized"] = sk
+        if sk:
+            log.info("skeletonize_episodes: %s", sk)
+        return stats
+    finally:
+        release_patrol_lock(db)
+
+
+def run_cycle(db: Session, extractor, embedder, linker, distiller, patrol_state: dict,
+              lease_interval: float | None = None) -> dict:
+    """一轮主循环（修复第 10 轮，审计 F2）：先处理任务，后跑巡检。
+    patrol_state: {"next_patrol": float}——到点才跑巡检；巡检成功或失败都把
+    next_patrol 推后一小时（失败不再 2s 热重试，且失败不阻塞下一循环的
+    任务处理——任务在本函数前半已处理）。返回 {"job", "episode", "patrol"}，
+    patrol 为 None 表示本轮未到巡检点。"""
+    from app.episodes import run_episode_once
+
+    job = run_once(db, extractor, embedder=embedder, linker=linker,
+                   lease_interval=lease_interval)
+    ep = None
+    for _ in range(5):  # 一轮最多连提 5 条：历史回放批量导入时不至于一条一轮慢慢磨（第八轮补）
+        ep = run_episode_once(db, distiller, embedder=embedder, linker=linker)
+        if ep is None:
+            break
+    patrol = None
+    if time.time() >= patrol_state["next_patrol"]:
+        try:
+            from app.config import settings
+            patrol = run_patrol(db, linker=linker, ttl_days=settings.memory_ttl_days,
+                                skeleton_days=settings.episode_skeleton_days)
+        except Exception as e:
+            log.warning("cleanup error: %s", e)
+            patrol = {"error": str(e)}
+        patrol_state["next_patrol"] = time.time() + PATROL_INTERVAL_SECONDS
+    return {"job": job, "episode": ep, "patrol": patrol}
+
+
 def main() -> None:  # pragma: no cover
     logging.basicConfig(level=logging.INFO)
-    from app.config import settings
     from app.distill import build_distiller
     from app.embeddings import build_embedder
-    from app.episodes import run_episode_once
     from app.extract import build_extractor
 
     extractor = build_extractor()
@@ -529,46 +666,12 @@ def main() -> None:  # pragma: no cover
     log.info("worker started prompt=%s embedding=%s linker=%s", PROMPT_VERSION,
              embedder.model if embedder is not None else "off",
              "llm" if linker is not None else "rule")
-    last_cleanup = 0.0
+    patrol_state = {"next_patrol": 0.0}
     while True:
         with WorkerSession() as db:
-            if time.time() - last_cleanup > 3600:
-                try:
-                    if settings.memory_ttl_days > 0:
-                        expire_memories(db, settings.memory_ttl_days)
-                    # 经验生命周期巡检与 TTL 同一个小时节拍（第十一轮）：衰减/合并/矛盾计数
-                    from app.episodes import consolidate_insights
-                    stats = consolidate_insights(db, linker=linker)
-                    if stats["decayed"] or stats["merged"] or stats["conflicts"] \
-                            or stats["synthesized"]:
-                        log.info("consolidate_insights: %s", stats)
-                    # 织网巡检（第十五轮）：补边、矛盾落边、跨项目抽象，与生命周期同节拍
-                    from app.links import weave_links
-                    wstats = weave_links(db, linker=linker)
-                    if wstats["linked"] or wstats["generalized"] or wstats["pruned"]:
-                        log.info("weave_links: %s", wstats)
-                    # 睡眠巩固（第二十一轮）：从使用证据重组——共用强化/建边、
-                    # 死边剪除、事实合并、共用簇抽象；各项自带门限，每小时跑安全
-                    from app.sleep import sleep_consolidate
-                    sstats = sleep_consolidate(db, linker=linker)
-                    if any(sstats[k] for k in ("merged", "pruned", "strengthened",
-                                               "linked", "generalized")):
-                        log.info("sleep_consolidate: %s", sstats)
-                    # 轨迹骨架化（第十七轮）：提炼完的旧轨迹只留骨架，与巡检同节拍
-                    from app.episodes import skeletonize_episodes
-                    sk = skeletonize_episodes(db, retention_days=settings.episode_skeleton_days)
-                    if sk:
-                        log.info("skeletonize_episodes: %s", sk)
-                    last_cleanup = time.time()
-                except Exception as e:
-                    log.warning("cleanup error: %s", e)
-            job = run_once(db, extractor, embedder=embedder, linker=linker)
-            ep = None
-            for _ in range(5):  # 一轮最多连提 5 条：历史回放批量导入时不至于一条一轮慢慢磨（第八轮补）
-                ep = run_episode_once(db, distiller, embedder=embedder, linker=linker)
-                if ep is None:
-                    break
-        time.sleep(_post_run_wait(job, ep))
+            result = run_cycle(db, extractor, embedder, linker, distiller, patrol_state,
+                               lease_interval=LOCK_SECONDS // 2)
+        time.sleep(_post_run_wait(result["job"], result["episode"]))
 
 
 if __name__ == "__main__":  # pragma: no cover

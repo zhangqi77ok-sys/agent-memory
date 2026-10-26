@@ -345,6 +345,15 @@ class MemoryLink(UserScoped, Base):
     __table_args__ = (
         Index("ix_link_src", "src_kind", "src_id"),
         Index("ix_link_dst", "dst_kind", "dst_id"),
+        # 修复第 10 轮：现行边部分唯一索引——同一用户同一端点同一关系的
+        # 现行边只能有一行（并发检查-插入的兜底；已关闭边不受限，版本
+        # 滚动/关闭历史可并存）。对称关系由 create_link 的 _canon 规范化
+        # 端点序，故无需再规范化。测试用 create_all 直接带上该索引
+        # （测试不跑迁移）；存量库由迁移 0025 补（先去重后建索引）。
+        Index("ix_link_current_unique", "app_id", "user_id", "src_kind", "src_id",
+              "dst_kind", "dst_id", "relation", unique=True,
+              postgresql_where=text("valid_to IS NULL"),
+              sqlite_where=text("valid_to IS NULL")),
     )
 
 

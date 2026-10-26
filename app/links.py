@@ -104,7 +104,11 @@ def create_link(db: Session, app_id: str, user_id: str,
                 a: tuple[str, str], b: tuple[str, str], relation: str,
                 strength: float, origin: str) -> MemoryLink | None:
     """落一条边（只 flush 不 commit）。已有同端点同关系的现行边则不重复建，
-    返回既有行；自环与非法关系直接返回 None。"""
+    返回既有行；自环与非法关系直接返回 None。
+    修复第 10 轮：先查后插 + 现行边部分唯一索引（模型层）+ SAVEPOINT 回查
+    ——并发事务同查为空、同插入时，后到者撞唯一索引后回查返回既有行，
+    不抛错、不重复建边（与 submit_episode 的幂等模式一致）。SAVEPOINT 只
+    包插入本身，不影响调用方事务的其余写入。"""
     if relation not in RELATIONS or a == b:
         return None
     (ak, ai), (bk, bi) = _canon(relation, a, b)
@@ -118,8 +122,30 @@ def create_link(db: Session, app_id: str, user_id: str,
     link = MemoryLink(app_id=app_id, user_id=user_id, src_kind=ak, src_id=ai,
                       dst_kind=bk, dst_id=bi, relation=relation,
                       strength=max(0.0, min(1.0, float(strength))), origin=origin)
-    db.add(link)
-    db.flush()
+    return _insert_link(db, link)
+
+
+def _insert_link(db: Session, link: MemoryLink) -> MemoryLink | None:
+    """SAVEPOINT 插入：撞现行边唯一索引时回查既有行返回。
+    回查不到时返回 None（SQLite 快照下并发行可能暂不可见；调用方按无新建
+    处理，不抛错）。失败的插入只回滚到 SAVEPOINT，调用方事务的其余写入
+    不受影响；回查前先把失败行 expunge 掉，避免回查的 autoflush 重试插入。"""
+    from sqlalchemy.exc import IntegrityError
+
+    try:
+        with db.begin_nested():
+            db.add(link)
+            db.flush()
+    except IntegrityError:
+        try:
+            db.expunge(link)
+        except Exception:
+            pass
+        return db.scalar(select(MemoryLink).where(
+            MemoryLink.app_id == link.app_id, MemoryLink.user_id == link.user_id,
+            MemoryLink.src_kind == link.src_kind, MemoryLink.src_id == link.src_id,
+            MemoryLink.dst_kind == link.dst_kind, MemoryLink.dst_id == link.dst_id,
+            MemoryLink.relation == link.relation, MemoryLink.valid_to.is_(None)))
     return link
 
 
@@ -497,12 +523,14 @@ def weave_links(db: Session, linker=None) -> dict:
     # （入口快照语义，轮内翻转下一轮起效，见 fix4-design-draft.md §5）。
     off = switched_off_users(db)
     stats = {"pruned": _close_dead_links(db, skip_users=off), "linked": 0, "contradicts": 0,
-             "generalized": 0, "decayed_edges": 0}
+             "generalized": 0, "decayed_edges": 0, "deferred": 0}
     judge = linker.judge if linker is not None else None
     users = db.execute(select(MemoryInsight.app_id, MemoryInsight.user_id).distinct()).all()
     users += [u for u in db.execute(select(MemoryFact.app_id, MemoryFact.user_id).distinct()).all()
               if u not in users]
     users = [u for u in users if tuple(u) not in off]
+    from app.patrol import PATROL_PAIR_BUDGET, candidate_pairs, normalized_vecs, pair_cos
+
     for app_id, user_id in users:
         linked_pairs: set[frozenset] = set()
         for link in db.scalars(select(MemoryLink).where(
@@ -514,40 +542,49 @@ def weave_links(db: Session, linker=None) -> dict:
             rows = _active_rows(db, model, app_id, user_id)
             if kind == "insight":
                 insight_rows = rows
-            for i in range(len(rows)):
-                for j in range(i + 1, len(rows)):
-                    a, b = rows[i], rows[j]
-                    key = frozenset(((kind, a.id), (kind, b.id)))
-                    if key in linked_pairs:
-                        continue
-                    cos = _pair_cosine_rows(a, b)
-                    if not same_subject(a.subject, b.subject) and \
-                            (cos is None or cos < WEAVE_COS_RELATED):
-                        continue
-                    verdict = classify_pair(view_of(a), view_of(b), cos, judge=judge)
-                    if verdict is None:
-                        continue
-                    relation, strength, origin = verdict
-                    x, y = (kind, a.id), (kind, b.id)
-                    va, vb = view_of(a), view_of(b)
-                    if relation == "generalizes" and (va.project is None) != (vb.project is None):
-                        x, y = (x, y) if va.project is None else (y, x)
-                    # 这对端点此前无任何现行边（linked_pairs 已过滤），建出来即真新建
-                    if create_link(db, app_id, user_id, x, y, relation, strength, origin):
-                        stats["linked"] += 1
-                        if relation == "contradicts":
-                            stats["contradicts"] += 1
-                        linked_pairs.add(key)
+            # 修复第 10 轮：全配对 → 锚点候选对（主题 bigram 倒排包含全部
+            # same_subject 真对；跨主题高余弦对靠内容 token 锚点，纯换词
+            # 零重叠对可能漏连边——边不在，不丢数据）。向量每行归一化一次。
+            cand, deferred = candidate_pairs(rows, budget=PATROL_PAIR_BUDGET)
+            stats["deferred"] += deferred
+            vecs = normalized_vecs(rows)
+            for i, j in cand:
+                a, b = rows[i], rows[j]
+                key = frozenset(((kind, a.id), (kind, b.id)))
+                if key in linked_pairs:
+                    continue
+                cos = pair_cos(vecs, a.id, b.id)
+                if not same_subject(a.subject, b.subject) and \
+                        (cos is None or cos < WEAVE_COS_RELATED):
+                    continue
+                verdict = classify_pair(view_of(a), view_of(b), cos, judge=judge)
+                if verdict is None:
+                    continue
+                relation, strength, origin = verdict
+                x, y = (kind, a.id), (kind, b.id)
+                va, vb = view_of(a), view_of(b)
+                if relation == "generalizes" and (va.project is None) != (vb.project is None):
+                    x, y = (x, y) if va.project is None else (y, x)
+                # 这对端点此前无任何现行边（linked_pairs 已过滤），建出来即真新建
+                if create_link(db, app_id, user_id, x, y, relation, strength, origin):
+                    stats["linked"] += 1
+                    if relation == "contradicts":
+                        stats["contradicts"] += 1
+                    linked_pairs.add(key)
         # 抽象：同构跨项目簇 → 通用原则（需判定器起草；簇用并查集按余弦连通）
+        # 修复第 10 轮：簇连通也走锚点候选对（内容 token 锚点；纯换词零重叠
+        # 的簇可能漏聚类——只是不起草原则，不丢数据）。
         members = [r for r in insight_rows if r.project]
         parent = list(range(len(members)))
-        for i in range(len(members)):
-            for j in range(i + 1, len(members)):
-                c = _pair_cosine_rows(members[i], members[j])
-                if c is not None and c >= GENERALIZE_COS:
-                    ri, rj = _uf_find(parent, i), _uf_find(parent, j)
-                    if ri != rj:
-                        parent[ri] = rj
+        cluster_cand, cluster_deferred = candidate_pairs(members, budget=PATROL_PAIR_BUDGET)
+        stats["deferred"] += cluster_deferred
+        cluster_vecs = normalized_vecs(members)
+        for i, j in cluster_cand:
+            c = pair_cos(cluster_vecs, members[i].id, members[j].id)
+            if c is not None and c >= GENERALIZE_COS:
+                ri, rj = _uf_find(parent, i), _uf_find(parent, j)
+                if ri != rj:
+                    parent[ri] = rj
         clusters: dict[int, list] = {}
         for i, r in enumerate(members):
             clusters.setdefault(_uf_find(parent, i), []).append(r)
@@ -572,6 +609,8 @@ def weave_links(db: Session, linker=None) -> dict:
                 for r in cluster:
                     create_link(db, app_id, user_id, ("insight", gid), ("insight", r.id),
                                 "generalizes", 0.8, "llm")
+        # 修复第 10 轮：每用户提交一次（分片提交，崩溃后已处理用户不丢）。
+        db.commit()
     # 第二十轮「边学习」：闲置衰减结清。每月节拍但顺带调用安全——不足整月
     # 的边直接跳过，锚点保证同一段闲置只扣一次（见 decay_idle_edges）。
     # 局部导入：edge_learning 反向 import 本模块的 SPREAD_RELATIONS。

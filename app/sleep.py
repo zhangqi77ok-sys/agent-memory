@@ -131,35 +131,38 @@ def _prune_dead_edges(db: Session, app_id: str, user_id: str,
 def _merge_facts(db: Session, app_id: str, user_id: str,
                  now: datetime) -> list[dict]:
     """事实合并（睡眠档）：同主题近重复事实合并，佐证相加、置信重算、边迁移。"""
-    from app.links import _pair_cosine_rows
-
     rows = list(db.scalars(select(MemoryFact).where(
         MemoryFact.app_id == app_id, MemoryFact.user_id == user_id,
         MemoryFact.valid_to.is_(None))))
     merged: list[dict] = []
-    for i in range(len(rows)):
-        for j in range(i + 1, len(rows)):
-            a, b = rows[i], rows[j]
-            if a.valid_to is not None or b.valid_to is not None:
-                continue
-            if not same_subject(a.subject, b.subject):
-                continue
-            cos = _pair_cosine_rows(a, b)
-            if norm(a.content) != norm(b.content) and \
-                    (cos is None or cos < FACT_MERGE_COSINE):
-                continue
-            keeper, loser = (a, b) if ((a.confidence or 0.5), (a.support_count or 1),
-                                       a.valid_from) >= \
-                ((b.confidence or 0.5), (b.support_count or 1), b.valid_from) else (b, a)
-            keeper.support_count = (keeper.support_count or 1) + (loser.support_count or 1)
-            keeper.confidence = round(_support_confidence(keeper.support_count), 4)
-            loser.valid_to = now
-            migrate_links(db, app_id, user_id, "fact", loser.id, keeper.id)
-            db.add(AuditLog(app_id=app_id, user_id=user_id, action="sleep",
-                            fact_ids=[keeper.id, loser.id], decision="merge"))
-            merged.append({"keeper_id": keeper.id, "loser_id": loser.id,
-                           "keeper_subject": keeper.subject,
-                           "loser_subject": loser.subject})
+    # 修复第 10 轮：全配对 → 主题 bigram 锚点候选对（该函数只认 same_subject，
+    # 锚点完备，无启发式损失）；余弦仍只对同主题对算。
+    from app.patrol import PATROL_PAIR_BUDGET, candidate_pairs, normalized_vecs, pair_cos
+
+    cand, _deferred = candidate_pairs(rows, budget=PATROL_PAIR_BUDGET)
+    vecs = normalized_vecs(rows)
+    for i, j in cand:
+        a, b = rows[i], rows[j]
+        if a.valid_to is not None or b.valid_to is not None:
+            continue
+        if not same_subject(a.subject, b.subject):
+            continue
+        cos = pair_cos(vecs, a.id, b.id)
+        if norm(a.content) != norm(b.content) and \
+                (cos is None or cos < FACT_MERGE_COSINE):
+            continue
+        keeper, loser = (a, b) if ((a.confidence or 0.5), (a.support_count or 1),
+                                   a.valid_from) >= \
+            ((b.confidence or 0.5), (b.support_count or 1), b.valid_from) else (b, a)
+        keeper.support_count = (keeper.support_count or 1) + (loser.support_count or 1)
+        keeper.confidence = round(_support_confidence(keeper.support_count), 4)
+        loser.valid_to = now
+        migrate_links(db, app_id, user_id, "fact", loser.id, keeper.id)
+        db.add(AuditLog(app_id=app_id, user_id=user_id, action="sleep",
+                        fact_ids=[keeper.id, loser.id], decision="merge"))
+        merged.append({"keeper_id": keeper.id, "loser_id": loser.id,
+                       "keeper_subject": keeper.subject,
+                       "loser_subject": loser.subject})
     return merged
 
 
@@ -300,6 +303,9 @@ def sleep_consolidate(db: Session, linker=None,
         stats["strengthened"] += len(strengthened)
         stats["linked"] += len(linked)
         stats["generalized"] += len(generalized)
+        # 修复第 10 轮：每用户提交一次（分片提交，崩溃后已处理用户不丢，
+        # 下轮从已落盘的报告断点续跑窗口）。
+        db.commit()
     db.commit()
     return stats
 
