@@ -471,6 +471,33 @@ class MemoryInsightMove(Base):
     )
 
 
+class MemoryWorkingEntry(UserScoped, Base):
+    """工作记忆缓冲条目（第 34 轮）：会话内“还热着”的经验。
+
+    只存 id + 项目 + 版本快照，不存正文——缓冲是存量记忆上的视图，
+    不是第二份事实；读时按 id 回表取现行行，行不存在/已关闭/被禁/
+    版本变化时条目作废（删条目，不端旧内容）。rehearsal_count 只用于
+    缓冲内淘汰与填充排序，不进存量行（第 16/22 轮口径：曝光类信号
+    不刷新 last_used_at、不计 applied_count，衰减因子不动）。
+    每会话行数 ≤ WORKING_CAP，由 record 步强制；last_touched 超
+    TTL 未碰的条目读时 purge。
+    """
+
+    __tablename__ = "memory_working_entry"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    insight_id: Mapped[str] = mapped_column(String(32))
+    project: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    rehearsal_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_touched: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    __table_args__ = (
+        Index("ix_working_session", "app_id", "user_id", "session_id"),
+        UniqueConstraint("app_id", "user_id", "session_id", "insight_id",
+                         name="uq_working_session_insight"),
+    )
+
+
 def _move_sync(connection, target) -> None:
     """把某经验行在动作表里的序列同步为 extract_moves(文本 + 轨迹动作)。
 

@@ -139,6 +139,8 @@ class BriefRequest(UserScopedRequest):
     k: int = Field(default=5, ge=1, le=20)
     token_budget: int = Field(default=1500, ge=100, le=8000)  # 简报正文的 token 上限，与事实召回对齐
     project: str | None = Field(default=None, max_length=128)  # 当前项目（第十轮）：同项目经验加权
+    # 会话标识（第 34 轮）：与事实行 source_session_id 同一命名空间；不传则缓冲不启用
+    session_id: str | None = Field(default=None, max_length=64)
 
 
 class FeedbackRequest(UserScopedRequest):

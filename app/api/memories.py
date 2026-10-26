@@ -155,8 +155,10 @@ def forget(item_id: str, u: UserContext = Depends(user_from_query), db: Session 
         # 交付行保留空列表，不抹简报历史）；巩固报告 scrub；存活经验行里
         # 含已删败者的合并附录段剥离并作废向量。
         from app.deletion import scrub_reports, strip_deliveries_for_insights, strip_merged_appendices
+        from app.working_memory import purge_for_insights
 
         strip_deliveries_for_insights(db, u.app_id, u.user_id, ids)
+        purge_for_insights(db, u.app_id, u.user_id, ids)
         scrub_reports(db, u.app_id, u.user_id, ids)
         strip_merged_appendices(db, u.app_id, u.user_id, ids)
         _audit(db, u, "forget", ids)

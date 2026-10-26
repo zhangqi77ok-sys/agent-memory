@@ -242,11 +242,14 @@ def memory_episode_submit(title: str, outcome: str = "success", steps: list[dict
 
 
 @mcp.tool()
-def memory_brief(task: str, k: int = 5, project: str = "") -> dict:
+def memory_brief(task: str, k: int = 5, project: str = "", session_id: str = "") -> dict:
     """开始一个新任务之前调用：按任务情境从经验库捞出适用的历史教训、打法、避坑与省钱招。
 
     经验来自以往任务过程的复盘提炼，照着做能跳过过去踩过的坑。返回 insights
     （含 kind/subject/content/applies_when/score/confidence/project/source_episode_id）；
+    session_id 是本次会话标识（第 34 轮，与事实行 source_session_id 同一命名空间）：
+    传了才启用工作记忆缓冲——同会话上轮递出的经验在名额未满时以 reason="working_memory"
+    补位；不传则缓冲不启用，简报行为不变；
     没有匹配经验时为空列表。任务做完后请对用过的经验调用 memory_feedback 回报效果。
     project 是当前项目/仓库名（不传时读环境变量 MEMORY_PROJECT）：同项目经验加权、
     跨项目降权，防串扰。
@@ -260,7 +263,8 @@ def memory_brief(task: str, k: int = 5, project: str = "") -> dict:
         meta: dict = {}
         insights = brief_for_task(db, u, task, k,
                                   embedder=embedder,
-                                  project=proj, meta=meta)
+                                  project=proj, meta=meta,
+                                  session_id=session_id or None)
         # 前瞻记忆（第十七轮）：武装中的意图拿这次任务撞一遍
         from app.reminders import check_triggers
         from app.schemas import reminder_out

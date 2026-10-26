@@ -36,6 +36,7 @@
 - **织网与扩散**：事实与经验落库即织网——互相佐证、细化、泛化、相关、矛盾，都连成带类型与出身（规则推出 / 语义判定）的边；简报沿边扩散激活，捞到一条能带出字面不像但强相关的另一条；互相矛盾的经验在同一份简报里会被明确标出，不再并排沉默；巡检会把跨项目反复出现的同构经验抽象成通用原则。写时织网走倒排锚点（同桶、有界 200 peer、失败不拖垮写入），Markdown 导回与纠正的新行同样落库即织网。
 - **睡眠巩固与遗忘曲线**：巡检定期做共用强化、死边清理、事实合并、聚类抽象；闲置且从未被用过的经验按遗忘曲线衰减、关行退出召回——会真遗忘的记忆，才值得信任。
 - **类比召回**：简报第三臂，按“动作序列”找结构相同的活（失败→定位→切换→重建→验证的骨架），不看领域名词和工具名——上次修 Jenkins 流水线的套路，这次修 GitHub Actions 时能想起来；表面词重叠低但骨架相同的行也能进简报，原因标为 `analogical`。
+- **工作记忆**：简报传 `session_id` 时启用会话缓冲（每会话 20 条）：上轮递出的经验还热着，名额未满时以 `working_memory` 原因补位，复用提升热度、容量满时沉降；缓冲只存 id 不存正文，存量行变化后不端旧内容，遗忘与开关全穿透。
 
 ### 信任、删除与审计
 
@@ -88,12 +89,14 @@ python -m app.lite              # 单进程全套：SQLite + 自动迁移 + 自�
 cd deploy && cp .env.example .env   # 按 docs/deploy.md 填好密钥与模型地址
 docker compose -p agent-memory up -d
 curl -s 127.0.0.1:8090/readyz        # 就绪探针
-alembic current                       # 应为 0025_link_current_unique
+alembic current                       # 应为 0027_working_memory
 ```
 
 第 32 轮部署注意：无新迁移（仍到 0025）、无新环境变量，拉代码即生效；写时织网失败不影响写入，漏连的边由巡检补。
 
 第 33 轮部署注意：新迁移 0026（经验动作序列倒排表），拉代码后跑一次 `python3 scripts/rebuild_moves.py` 回填存量行（未回填的旧行类比探针看不见，不报错）；无新环境变量。
+
+第 34 轮部署注意：新迁移 0027（工作记忆缓冲表），无回填——缓冲从空开始，旧会话无热条目是正常态；无新环境变量；不传 `session_id` 的简报行为不变。
 
 拓扑：`deploy/docker-compose.yml`（api + worker + pgvector + web），Postgres 不对外暴露端口；api 启动时先 `alembic upgrade head` 再起服务；worker 2 副本，用独立账号 `memsvc_worker`（BYPASSRLS、非超级用户、非 owner）；api 运行账号 `memsvc_app` 受行级安全策略约束；外层 Nginx 把 `/memory/` 转到 api、`/memory/ui/` 转到 web（模板见 `deploy/nginx/gateway-memory.conf.example`）。
 

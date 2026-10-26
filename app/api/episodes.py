@@ -65,7 +65,8 @@ def brief(req: BriefRequest, db: Session = Depends(get_db), request: Request = N
     meta: dict = {}
     insights = brief_for_task(db, u, req.task, req.k,
                               embedder=embedder,
-                              token_budget=req.token_budget, project=req.project, meta=meta)
+                              token_budget=req.token_budget, project=req.project, meta=meta,
+                              session_id=req.session_id)
     # 前瞻记忆（第十七轮）：武装中的意图拿这次任务撞一遍，命中的单独列出
     from app.reminders import check_triggers
     from app.schemas import reminder_out

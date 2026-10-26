@@ -1146,7 +1146,8 @@ def consolidate_insights(db: Session, now: datetime | None = None, linker=None) 
 
 def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
                    embedder: GeminiEmbedder | None = None, token_budget: int = 1500,
-                   project: str | None = None, meta: dict | None = None) -> list[InsightOut]:
+                   project: str | None = None, meta: dict | None = None,
+                   session_id: str | None = None) -> list[InsightOut]:
     """情境召回：新任务开始前，按任务描述捞出适用的历史经验。
 
     排序与门槛完全沿用事实混合召回（0.7 向量 + 0.3 关键词；入选需关键词命中
@@ -1192,7 +1193,7 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
             MemoryInsight.pinned, MemoryInsight.valid_from,
             MemoryInsight.last_used_at, MemoryInsight.source_episode_id,
             MemoryInsight.verified, MemoryInsight.agent,
-            MemoryInsight.evidence_chained]
+            MemoryInsight.evidence_chained, MemoryInsight.version]
     if qvec is not None:
         cols += [MemoryInsight.embedding, MemoryInsight.embed_model]
     scope = (MemoryInsight.app_id == u.app_id, MemoryInsight.user_id == u.user_id,
@@ -1211,9 +1212,15 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
 
     ana = analogy_candidates(db, cols, scope, extract_moves(task))
     ana_by_id = {r.id: sim for r, sim in ana}
+    # 工作记忆（第 34 轮）：会话缓冲是否启用只算一次；空简报时缓冲
+    # 仍可能补位（“继续/下一步”类无匹配任务），故 sid 有效时不走旧空返回。
+    from app import working_memory as _wm
+
+    sid = _wm.buffer_enabled(db, u.app_id, u.user_id, session_id)
     if not rows and not ana:
-        db.commit()  # 与旧行为对齐：简报顺带结清会话（见下方曝光计数注释）
-        return []
+        if sid is None:
+            db.commit()  # 与旧行为对齐：简报顺带结清会话（见下方曝光计数注释）
+            return []
     now = _now()
     _scored = _score_rows(rows, plan, qvec, getattr(embedder, "model", None),
                           pinned_of=lambda r: bool(r.pinned),
@@ -1270,6 +1277,20 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
                 used += cost
                 winners.append((dscore, r, "linked"))
                 linked_from[nid] = via
+    # 工作记忆补位（第 34 轮）：名额未满时按热度从本会话缓冲取行补位，
+    # reason="working_memory"，同受 token 预算约束；主排序不动。
+    # 补位行同样进 winners（记 use_count、进交付、参与矛盾标记），
+    # 与 linked 补位先例同口径；分 0.0——不冒充检索分。
+    if sid is not None and len(winners) < k:
+        buf_rows = _wm.fill_candidates(
+            db, u.app_id, u.user_id, sid, project,
+            {row.id for _, row, _ in winners}, k - len(winners), now)
+        for r in buf_rows:
+            cost = _est_tokens(r.content)
+            if used + cost > token_budget:
+                continue
+            used += cost
+            winners.append((0.0, r, "working_memory"))
     # 矛盾标记（第十五轮）：同份简报里若有经验对被 contradicts 边连着，双方都标出来，
     # 不再像从前那样两条相反指导一声不吭地并排递给 agent。
     conflicts = contradiction_pairs(db, u.app_id, u.user_id,
@@ -1364,6 +1385,11 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
             db.add(BriefDeliveryEdge(app_id=u.app_id, user_id=u.user_id,
                                      delivery_id=delivery.id, link_id=edge.id,
                                      insight_id=row.id))
+    # 工作记忆记账（第 34 轮）：本次递出的行进本会话缓冲——已在缓冲的
+    # 复述 +1，新行编码；随后强制删到 CAP。只动缓冲条目，不碰存量行。
+    if sid is not None and winners:
+        _wm.record_deliveries(db, u.app_id, u.user_id, sid,
+                              [row for _, row, _ in winners], now)
     # 曝光计数当场提交：brief 从第十轮起是「读 + 记账」，若只 flush 不 commit，
     # 调用方会话会一直攥着写事务——REST 与直调在同一进程交替出现时能把库锁死
     # （SQLite 实测 database is locked；PG 上则是行锁干等）。简报的账自己结清，

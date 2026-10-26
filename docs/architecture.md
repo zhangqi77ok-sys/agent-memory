@@ -388,6 +388,67 @@ sequenceDiagram
   经验/轨迹）；InsightOut.reason 本来就是自由字符串，
   "analogical" 随 API 输出，面板不渲染 reason，故无前端改动。
 
+## 5.13 工作记忆（第 34 轮）
+
+简报相当于当前任务的工作记忆，但此前没有会话级的短期缓冲：
+一次会话里刚递出过的经验，下一次简报要重新从存量里捞，捞不到
+就丢了上下文连续性。本轮给简报加一个有界的会话缓冲：
+
+- **会话定义**：客户端传入的 `session_id`，与事实行
+  `source_session_id` 同一命名空间（MCP 的 `session_id`，如
+  `mcp-codex`，就是这一系），不发明新身份体系。REST
+  `BriefRequest.session_id`（≤64）与 MCP `memory_brief` 的
+  `session_id` 参数都透传进 `brief_for_task`；不传或非法
+  （空/空白/超长）时缓冲不启用，简报行为不变。
+- **模型**：新表 memory_working_entry（迁移 0027），UserScoped
+  子类（进 fix-8 删除注册表，clear_all 连带清）。条目只存
+  id + 项目 + 版本快照，不存正文——缓冲是存量记忆上的视图，
+  不是第二份事实；读时按 id 回表取现行行。
+- **容量与沉降**：每会话 20 条（条数是唯一诚实的容量单位，
+  正文 token 预算在简报装包时另算）。淘汰序
+  (rehearsal_count asc, last_touched asc)——最少复述 + 最久未碰
+  的先沉降；填充序 last_touched desc, rehearsal_count desc。
+  每会话行数 ≤ CAP 由 record 步强制；last_touched 超 24 小时
+  未碰的条目读时 purge（会话失活 TTL，不是神经科学主张）。
+- **复用与衰减的分界**：同会话后续简报再次递出该行即一次复用
+  （rehearsal_count +1，last_touched 刷新）；首次递出是编码
+  （计数 0）。复述是曝光类信号，不刷新存量行的 last_used_at、
+  不计 applied_count，第 22 轮衰减因子口径一个字不动；
+  缓冲自己的计数只用于缓冲内淘汰与填充排序。
+- **进简报的唯一机制：补位**：主排序（关键词/向量/类比/置顶）
+  一个字不动；扩散补位之后、名额未满时按热度从本会话缓冲取行
+  补位，reason="working_memory"，同受 token 预算约束，分记
+  0.0（不冒充检索分）。补位行同样进 winners：记 use_count、
+  进交付记录、参与矛盾标记，与 linked 补位先例同口径。正常
+  候选与类比都为空时缓冲仍可补位（“继续/下一步”类无匹配任务
+  正是工作记忆该兜底的情形）；无可补位时旧行为不变。
+- **分桶**：补位只取缓冲时项目为空或等于本次简报 project 的
+  条目；简报 project 为空时不过滤（与召回同口径）。跨项目
+  缓冲条目留在缓冲里，等它自己项目的简报——会话缓冲比分桶
+  召回更严，这是刻意的：工作记忆是任务上下文的，不跨项目串味。
+- **存量变化时的态度**：读时逐条校验——行不存在/已关闭/
+  被禁/版本变化 → 删条目，不端旧内容。人工反馈不 bump
+  version，不会误杀缓冲条目；删除一律走 Core 表删除
+  （SQLite 读回 naive datetime，ORM 批量删除会在会话内对已
+  加载对象做 Python 侧条件求值，naive 与 aware 相减直接
+  TypeError；Core 删除只在 SQL 侧比较两侧 UTC 墙钟串）。
+- **删除与开关穿透**：forget(insight) 在交付清账同列清掉该 id
+  在全部会话里的缓冲条目（行已硬删 + 条目已清，双层）；
+  forget(fact/preference/episode) 无动作（缓冲只存 insight，
+  episode 遗忘不联动删派生经验是 F-16 既定设计）；端点已有
+  memory_enabled 全闸，缓冲自身另设 explicit-off 后备闸
+  （switched_off_users 里的用户不读写缓冲），无设置行用户不拦
+  （fix-4 巡检语义）。
+- **成本**：每简报缓冲操作 = 索引加载（≤CAP）+ id IN 回表验证
+  （≤CAP）+ upsert（≤k）+ 超量删除（≤k），全部 O(CAP)，
+  与存量总行数无关；测试用查询计数钉住，不用易抖的时间断言。
+- **持久化选型**：DB 表而非纯内存——api 与 worker 是两个进程，
+  MCP 有 in-process 调用，纯内存缓冲在多进程下各自为政；
+  DB 表是唯一跨进程一致的载体。重启后缓冲不丢，但失活条目
+  不复活（读时 purge）。
+- **前端**：面板不渲染 reason，reason="working_memory" 只走
+  API 输出，无新展示语义 → 前端无改动。
+
 ## 6. 非功能
 - **隔离**：每条 SQL 带 `app_id + user_id`，Postgres RLS 兜底；C 端最怕的是用户 A 看到用户 B 的记忆，评测集里“串用户”为硬门禁。
 - **规模与成本**：C 端用户多，按用户限流（写入/召回 QPS、每日抽取次数）；抽取按会话结束或每 N 轮批量触发，控制 LLM 成本；记录每用户 token 用量。
