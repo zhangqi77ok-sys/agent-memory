@@ -31,7 +31,9 @@ embedContent，凭证走连接器自己的 dynamic_credentials 代理流程（�
 
 诚实边界：
 - 14 组探针是方向性样本，不是标定级样本；数字不外推为生产误触率。
-- COS_MIN 是召回与提醒共用的阈值（app/recall.py），仅凭本批数字不移动它；
+- 提醒触发线自第九轮起已与召回线拆分（app/recall.py 的 COS_MIN_REMINDER，
+  初始值 0.66，行为不变）；本脚本仍以 0.66 档度量提醒臂，即提醒线初始值，
+  数字与第 31 轮可比。仅凭本批数字不移动任何一侧的线；
   采纳门槛见设计草稿 round31-design-draft.md。
 - API 量：6 条条件 DOCUMENT + 14 个任务 QUERY = 20 次单条调用。
 

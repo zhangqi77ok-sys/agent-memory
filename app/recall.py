@@ -8,6 +8,11 @@
 原因是 Gemini 向量的余弦整体偏高（不相关句对也有 0.48–0.65），融合分 0.7·cos 随手就能
 越过 0.10，只看融合分会把不相关的事实大批放进来。
 
+第九轮修复（审计 Top 9）：纯向量行另设高线——kw < MIN_SCORE 且无关键词佐证的
+行需 cos ≥ COS_MIN_PURE 才入选，否则零重叠的向量行会以 0.7·cos 压过真关键词
+命中（审计复现 A：cos=0.77、kw=0 的行以 0.539 压过 kw=0.333 的真命中）。
+提醒触发线另拆 COS_MIN_REMINDER（初始同值），召回与提醒不再锁死在同一常数上。
+
 第十四轮（索引化召回）：门槛与打分语义一个字不改，改的是「候选从哪来」。
 旧实现把作用域内的每一行都搬进 Python 逐行分词打分，耗时随行数线性增长
 （简报在 5000 条经验时 p50 约 186ms，几乎全花在重复分词上）。现在分三步：
@@ -60,6 +65,19 @@ VECTOR_WEIGHT = 0.7  # 融合时向量占权；关键词只作辅助，避免字
 # 余弦门槛：2026-10-23 用真实 Gemini 向量小样本校准（5 条事实 × 5 条查询，1536 维）：
 # 命中对余弦 0.675–0.751，未命中对 0.476–0.647，分界取 0.66。小样本结论，后续用评测集复校。
 COS_MIN = 0.66
+# 提醒触发线（第九轮修复，审计 A6 拆分）：初始与召回入选线同值，行为不变，
+# 但此后可独立重标——此前两路共用 COS_MIN，第 31 轮证明 0.66 对提醒路已是
+# 误触线（FPR 0.857）却因耦合无法单侧移动。提醒侧引用此常数，召回侧三处
+# （SQL 向量臂、入选门）仍用 COS_MIN。
+COS_MIN_REMINDER = 0.66
+# 纯向量入选线（第九轮修复，审计 A1 方案一）：kw < MIN_SCORE 的行（零关键词
+# 佐证）需 cos ≥ 此线才入选召回。临时值：第 31 轮提醒批负例最高 0.769 +
+# 裕量（2026-10-26 重跑确认负例最高仍是 0.769）；它锚在提醒批上，不是召回批
+# 的标定，正式标定需更大探针集（尤其召回形长文本）。代价：0.66–0.78 区间、
+# 无关键词佐证的纯向量行不再入选（换说法召回在该区间内损失）；有任一关键词
+# 佐证（kw ≥ MIN_SCORE）的行仍走 COS_MIN。SQL 向量臂仍用 COS_MIN 捞候选，
+# Python 侧复核时执行此线（候选多捞、门内过滤，不改 SQL、不改索引）。
+COS_MIN_PURE = 0.78
 _COS_EPS = 1e-3  # 向量通道 SQL 阈值的浮点余量：宁可多捞一行，不能漏掉压线命中
 
 _CJK_LO, _CJK_HI = CJK_LO, CJK_HI
@@ -355,6 +373,8 @@ def _score_rows(rows, plan: "_QueryPlan", qvec, embedder_model,
     门槛只看原始相关性（kw ≥ MIN_SCORE 或 cos ≥ COS_MIN），融合分 0.7·cos +
     0.3·kw 只决定排序（reason=hybrid）——2026-10-23 真实向量校准的口径：
     Gemini 余弦整体偏高，只看融合分会把不相关的条目大批放进来。
+    第九轮修复：纯向量行（kw < MIN_SCORE）另设高线 cos ≥ COS_MIN_PURE——
+    零佐证的向量行不配以 0.7·cos 压过真关键词命中。
     kw 优先用探针带回的精确命中数（kw_hits，与 kw_score 分子同口径）；
     向量不可用（没存向量/模型或维度对不上，vector_usable 判）时退纯关键词。
     pinned_of(row) 决定「垫底必达」资格（事实侧恒 False）；fields_of(row)
@@ -371,7 +391,10 @@ def _score_rows(rows, plan: "_QueryPlan", qvec, embedder_model,
                                               embedder_model):
             cos = cosine(qvec, list(row.embedding))
         if cos is not None:
-            gated = kw < MIN_SCORE and cos < COS_MIN
+            # 分层门：有关键词佐证的行走 COS_MIN；零佐证的纯向量行走高线，
+            # 否则 cos=0.77、kw=0 的行以 0.539 压过 kw=0.333 的真命中（审计复现 A）。
+            gate_cos = COS_MIN if kw >= MIN_SCORE else COS_MIN_PURE
+            gated = kw < MIN_SCORE and cos < gate_cos
             final, reason = VECTOR_WEIGHT * cos + (1 - VECTOR_WEIGHT) * kw, "hybrid"
         else:
             gated = kw < MIN_SCORE
