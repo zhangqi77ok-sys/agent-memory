@@ -1088,6 +1088,20 @@ def consolidate_insights(db: Session, now: datetime | None = None, linker=None) 
         a, b = by_id.get(link.src_id), by_id.get(link.dst_id)
         if a is None or b is None or a.valid_to is not None or b.valid_to is not None:
             continue
+        # 第 36 轮（审计 F-11）：裁决循环只处理同桶对。跨用户边理论上
+        # 不存在，防御性跳过；project 精确相等（含 None == None，即
+        # 通用桶内两行）走原同桶裁决；一行为通用、一行为显式项目时
+        # 跳过（通用指导不是某项目的对手）；两项目都显式且不同时交
+        # 对决步裁决（胜负只记记录、不关行）。
+        if (a.app_id, a.user_id) != (b.app_id, b.user_id):
+            continue
+        if a.project != b.project:
+            if a.project is None or b.project is None:
+                continue
+            from app.duels import decide_pair
+
+            decide_pair(db, a, b, linker, now)
+            continue
         winner, loser = (a, b) if (a.confidence or 0.5) >= (b.confidence or 0.5) else (b, a)
         gap = abs((a.confidence or 0.5) - (b.confidence or 0.5))
         evidence = ((winner.feedback_pos or 0) + (winner.feedback_neg or 0)
@@ -1239,7 +1253,14 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
         if r.id not in have_ids:
             merged_rows.append(r)
             merged_scored.append((sim, "analogical", False))
-    scored = _rank_insights(merged_rows, merged_scored, now, project)
+    # 第 36 轮对决降权：候选集里现行对决记录的败方 id，一条 IN 查询；
+    # 降权语义（跨项目读才降、本方与置顶不降）见 _rank_insights。
+    from app.duels import current_loser_ids
+
+    duel_losers = current_loser_ids(db, u.app_id, u.user_id,
+                                    [r.id for r in merged_rows])
+    scored = _rank_insights(merged_rows, merged_scored, now, project,
+                            duel_losers=duel_losers)
     winners: list[tuple[float, object, str]] = []
     used = 0
     for score, row, reason in scored:

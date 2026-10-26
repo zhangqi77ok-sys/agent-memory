@@ -218,6 +218,31 @@ class InsightPage(BaseModel):
     limit: int
 
 
+class DuelOut(BaseModel):
+    """跨项目对决记录（第 36 轮）：一对分属不同项目的现行经验行的胜负
+    裁决。胜负只活在这里——contradicts 边是对称标记，不承载方向。"""
+    a_id: str
+    b_id: str
+    a_subject: str
+    b_subject: str
+    a_project: str
+    b_project: str
+    winner_id: str | None = None
+    loser_id: str | None = None
+    verdict: str  # win|tie
+    scores: dict = {}
+    criteria: str = "duel-v1"
+    valid_from: datetime
+
+
+class DuelPage(BaseModel):
+    """对决记录分页（第 36 轮，与 InsightPage 同构）：只列现行记录。"""
+    items: list[DuelOut]
+    total: int
+    offset: int
+    limit: int
+
+
 class EpisodeDetail(BaseModel):
     """轨迹详情（第二十五轮溯源落点）：面板点一条经验的“溯源”后看到的来源
     轨迹全文——目标、步骤、结果、提炼状态。用户域读接口，跨用户 404。"""

@@ -158,6 +158,10 @@ def forget(item_id: str, u: UserContext = Depends(user_from_query), db: Session 
         from app.working_memory import purge_for_insights
 
         strip_deliveries_for_insights(db, u.app_id, u.user_id, ids)
+        # 第 36 轮：对决记录随行走——节点硬删，涉及该行的裁决不留
+        from app.duels import delete_duels_for_insights
+
+        delete_duels_for_insights(db, u.app_id, u.user_id, ids)
         purge_for_insights(db, u.app_id, u.user_id, ids)
         scrub_reports(db, u.app_id, u.user_id, ids)
         strip_merged_appendices(db, u.app_id, u.user_id, ids)

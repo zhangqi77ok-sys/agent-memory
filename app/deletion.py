@@ -38,6 +38,7 @@ CLEAR_ALL_MODELS = (
     m.ConsolidationReport,
     m.MemoryLink,
     m.MemoryWorkingEntry,
+    m.MemoryDuel,  # 第 36 轮：跨项目对决记录（用户域派生账，随行走）
 )
 
 # 保留项：UserSetting 是同意状态，不是记忆数据；清空是“删数据”，撤回同意

@@ -603,6 +603,13 @@ def run_patrol(db: Session, linker=None, ttl_days: int = 0,
         stats["weave"] = wstats
         if wstats["linked"] or wstats["generalized"] or wstats["pruned"]:
             log.info("weave_links: %s", wstats)
+        # 跨项目矛盾对决（第三十六轮，审计 F-11）：织网之后、睡眠之前——
+        # 本轮新织的 contradicts 边对对决步可见；对决只记记录、不关行。
+        from app.duels import duel_cross_project
+        dstats = duel_cross_project(db, linker=linker)
+        stats["duels"] = dstats
+        if dstats["duels"] or dstats["differentiated"]:
+            log.info("duel_cross_project: %s", dstats)
         # 睡眠巩固（第二十一轮）：从使用证据重组——共用强化/建边、
         # 死边剪除、事实合并、共用簇抽象；各项自带门限，每小时跑安全
         from app.sleep import sleep_consolidate

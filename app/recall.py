@@ -410,9 +410,17 @@ def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
+DUEL_LOSER_MULT = 0.7  # 第 36 轮：跨项目简报里对决败方行的排序乘子（只动排序，不动门槛）
+
+
 def _rank_insights(rows, scored, now, project, conf_a: float = 0.5, conf_b: float = 0.9,
                    proj_same: float = 1.0, proj_diff: float = 0.85,
-                   recency: bool = True, unverified_mult: float = 0.7):
+                   recency: bool = True, unverified_mult: float = 0.7,
+                   duel_losers: set | None = None):
+    """duel_losers（第 36 轮）：现行对决记录的败方 id 集。败方行在
+    “跨项目读”时（简报 project 与败方行 project 不同，含简报 project
+    为空）乘 DUEL_LOSER_MULT；本方项目简报与置顶行不受影响——
+    自家项目信任自家行，用户策展高于自动裁决。None 时行为逐字不变。"""
     """经验排序乘子（第十/十一轮）：置信度 × 项目 × 新近性；置顶组恒在前。
 
     返回 [(final, row, reason)]，已按「置顶组内序 + 其余降序」排好待预算裁剪。
@@ -444,6 +452,11 @@ def _rank_insights(rows, scored, now, project, conf_a: float = 0.5, conf_b: floa
                 final *= proj_same
             elif row.project:
                 final *= proj_diff
+        if duel_losers and row.id in duel_losers and not row.pinned:
+            # 第 36 轮对决降权：只在跨项目读时生效——简报 project 为空
+            # （无归属）或与败方行 project 不同时降权；本方项目不降。
+            if project is None or row.project != project:
+                final *= DUEL_LOSER_MULT
         stamp = row.last_used_at or row.valid_from
         mult = ages.get(stamp)
         if mult is None:

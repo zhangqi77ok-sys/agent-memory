@@ -357,6 +357,41 @@ class MemoryLink(UserScoped, Base):
     )
 
 
+class MemoryDuel(UserScoped, Base):
+    """跨项目矛盾对决记录（第 36 轮，审计 F-11）：两条分属不同项目的
+    现行经验行被判定为内容冲突时，胜负裁决的审计留痕。
+
+    与 contradicts 边分工：边是对称标记（“这两条矛盾”，方向经
+    create_link 规范化后不承载语义），胜负只活在这张表里。对决结果
+    永远不关行、不改写对方桶的行——只影响跨项目简报排序（败方降权）
+    与本表可查的裁决历史。无序对按 id 排序存 a/b，同一对的现行
+    记录只能有一行（部分唯一索引，修复第 10 轮现行边索引同款写法）；
+    胜负变化时旧记录关 valid_to、新记录接任；对不再符合参战条件
+    （行关闭/被禁/情境变成分化）时旧记录关 valid_to。行硬删时
+    forget 入口硬删涉及该行的记录（与 delete_links_touching 同口径）。
+    """
+
+    __tablename__ = "memory_duel"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
+    a_id: Mapped[str] = mapped_column(String(32))  # 无序对排序后的第一位
+    b_id: Mapped[str] = mapped_column(String(32))  # 第二位
+    a_project: Mapped[str] = mapped_column(String(128))
+    b_project: Mapped[str] = mapped_column(String(128))
+    winner_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    loser_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    verdict: Mapped[str] = mapped_column(String(16))  # win|tie（tie 时胜负为空）
+    scores: Mapped[dict] = mapped_column(JSON, default=dict)  # {行id: {total, confidence, reward, recent}}
+    criteria: Mapped[str] = mapped_column(String(32), default="duel-v1")
+    valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    __table_args__ = (
+        Index("ix_duel_current_unique", "app_id", "user_id", "a_id", "b_id", unique=True,
+              postgresql_where=text("valid_to IS NULL"),
+              sqlite_where=text("valid_to IS NULL")),
+        Index("ix_duel_loser", "app_id", "user_id", "loser_id"),
+    )
+
+
 class MemoryFactToken(Base):
     """事实的关键词倒排索引（第十四轮补完）：一行一个 (事实, token)。
 

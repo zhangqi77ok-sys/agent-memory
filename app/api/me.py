@@ -16,6 +16,8 @@ from app.links import neighbors_of
 from app.schemas import (
     CONSENT_VERSION,
     CorrectRequest,
+    DuelOut,
+    DuelPage,
     EpisodeDetail,
     InsightListItem,
     InsightPage,
@@ -345,6 +347,35 @@ def list_insights(offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=
     items = [_insight_item(i) for i in rows]
     return InsightPage(items=items[offset:offset + limit], total=len(items),
                        offset=offset, limit=limit)
+
+
+@router.get("/duels", response_model=DuelPage)
+def list_duels(offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200),
+               u: UserContext = Depends(user_from_query), db: Session = Depends(get_db)):
+    """跨项目对决记录（第 36 轮，审计 F-11）：只列现行裁决——哪两条
+    经验在对决、各自属于哪个项目、谁胜谁负、判据分。行已不在现行集
+    的记录由巡检失活扫尾关闭，不会留在这里；面板暂不渲染本表，
+    本接口即“可查”的落点。"""
+    bind_user(db, u)
+    recs = list(db.scalars(select(m.MemoryDuel).where(
+        *_mine(m.MemoryDuel, u), m.MemoryDuel.valid_to.is_(None))
+        .order_by(m.MemoryDuel.valid_from.desc())))
+    ids = {i for r in recs for i in (r.a_id, r.b_id)}
+    subjects = {}
+    if ids:
+        for row in db.scalars(select(m.MemoryInsight).where(
+                *_mine(m.MemoryInsight, u), m.MemoryInsight.id.in_(ids))):
+            subjects[row.id] = row.subject
+    items = [DuelOut(a_id=r.a_id, b_id=r.b_id,
+                     a_subject=subjects.get(r.a_id, ""),
+                     b_subject=subjects.get(r.b_id, ""),
+                     a_project=r.a_project, b_project=r.b_project,
+                     winner_id=r.winner_id, loser_id=r.loser_id,
+                     verdict=r.verdict, scores=r.scores or {},
+                     criteria=r.criteria, valid_from=r.valid_from)
+             for r in recs]
+    return DuelPage(items=items[offset:offset + limit], total=len(items),
+                    offset=offset, limit=limit)
 
 
 @router.get("/identity")
