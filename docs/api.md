@@ -93,7 +93,7 @@
 - 任务结束后提交全过程，供复盘提炼经验：`{"user_id","title","outcome":"success|failure|partial","steps":[{"action","observation?","error?"}],"cost":{...}}`。返回 202 + `episode_id`；未同意/已暂停返回 `skipped=true` 且不落数据。Worker 随后提炼为经验条目（`memory_insight`），坏输出整批丢弃、瞬时故障重试 3 次。
 
 ## 任务简报（情境召回）✅　`POST /v1/brief`
-- 新任务开始前按情境捞经验：`{"user_id","task","k"=5}` → `{"insights":[{"insight_id","kind","subject","content","applies_when","score","reason"}]}`。kind 为 lesson/strategy/pitfall/cost_saver；打分与事实混合召回同构（0.7 向量 + 0.3 关键词，余弦门槛 0.66），无向量时退化关键词。MCP 侧对应 `memory_episode_submit` / `memory_brief`。
+- 新任务开始前按情境捞经验：`{"user_id","task","k"=5}` → `{"insights":[{"insight_id","kind","subject","content","applies_when","score","reason"}]}`。kind 为 lesson/strategy/pitfall/cost_saver；打分与事实混合召回同构（0.7 向量 + 0.3 关键词，余弦门槛 0.66），无向量时退化关键词；另有类比臂（第 33 轮）：动作序列 LCS ≥ 0.45 且共享动作 ≥ 2 时，表面词不像但骨架相同的经验也能进简报（reason=analogical）。MCP 侧对应 `memory_episode_submit` / `memory_brief`。
 
 ## 🚧 待实现（v1 范围内）
 | 接口 | 说明 |

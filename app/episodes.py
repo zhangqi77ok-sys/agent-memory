@@ -1203,14 +1203,32 @@ def brief_for_task(db: Session, u: UserContext, task: str, k: int = 5,
     _ch = _candidates(db, MemoryInsight, MemoryInsightToken, "insight_id", cols,
                       scope, plan, qvec, embedder, with_pinned=True)
     rows = _ch[0] if _ch is not None else []
-    if not rows:
+    # 类比臂（第 33 轮）：补充臂，只加行不改行。已被关键词/向量臂准入的
+    # 行保留原 reason 与原分；被旧臂门槛挡掉但类比过线的行由类比臂救回；
+    # 旧臂候选集之外的行由类比探针新捞。类比不进提醒触发（reminders.py
+    # 不动），不碰 scope/muted/valid_to（探针取行时同口径过滤）。
+    from app.analogy import analogy_candidates, extract_moves
+
+    ana = analogy_candidates(db, cols, scope, extract_moves(task))
+    ana_by_id = {r.id: sim for r, sim in ana}
+    if not rows and not ana:
         db.commit()  # 与旧行为对齐：简报顺带结清会话（见下方曝光计数注释）
         return []
     now = _now()
     _scored = _score_rows(rows, plan, qvec, getattr(embedder, "model", None),
                           pinned_of=lambda r: bool(r.pinned),
                           fields_of=lambda r: f"{r.subject} {r.content} {r.applies_when}")
-    scored = _rank_insights(rows, _scored, now, project)
+    merged_rows, merged_scored = list(rows), list(_scored)
+    have_ids = {r.id for r in rows}
+    for idx, (r, (_final, _reason, gated)) in enumerate(zip(rows, _scored, strict=True)):
+        if gated and not r.pinned and r.id in ana_by_id:
+            # 旧臂挡掉、类比救回：只换分与原因，行本身不动。
+            merged_scored[idx] = (ana_by_id[r.id], "analogical", False)
+    for r, sim in ana:
+        if r.id not in have_ids:
+            merged_rows.append(r)
+            merged_scored.append((sim, "analogical", False))
+    scored = _rank_insights(merged_rows, merged_scored, now, project)
     winners: list[tuple[float, object, str]] = []
     used = 0
     for score, row, reason in scored:

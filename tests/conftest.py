@@ -41,6 +41,12 @@ def fresh_db():
         engine.dispose()
         from app.db import worker_engine
         worker_engine.dispose()
+        # db fixture 走 admin_engine：上轮 DROP SCHEMA CASCADE 会删掉
+        # vector 扩展再重建（类型 OID 变化），池里残留的连接若带着旧
+        # OID 的参数类型缓存，下一次 INSERT 会报 cache lookup failed。
+        # 其余引擎已 dispose，admin_engine 同样要清，否则是时序性
+        # 随机失败（PG 全量偶发一例属此机制）。
+        admin_engine.dispose()
         with admin_engine.begin() as c:
             c.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
             c.execute(text(

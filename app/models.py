@@ -451,6 +451,95 @@ _register_posting_events(MemoryInsight, MemoryInsightToken.__table__, "insight_i
                          lambda t: f"{t.subject} {t.content} {t.applies_when}")
 
 
+class MemoryInsightMove(Base):
+    """经验的动作序列倒排（第 33 轮类比召回）：一行一个 (经验, 位置, 动作)。
+
+    位置保留序列顺序，探针按动作取 posting 后在 Python 侧按位置拼回
+    序列算 LCS。动作类别见 app.analogy.MOVE_LEXICON；签名在行写入/
+    更新时冻结（与倒排冻结文本同一哲学），之后 episode 再被骨架化
+    不回写行签名。
+    """
+
+    __tablename__ = "memory_insight_move"
+    insight_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    move: Mapped[str] = mapped_column(String(32))
+    app_id: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped[str] = mapped_column(String(64))
+    __table_args__ = (
+        Index("ix_insight_move_move", "move", "insight_id"),
+    )
+
+
+def _move_sync(connection, target) -> None:
+    """把某经验行在动作表里的序列同步为 extract_moves(文本 + 轨迹动作)。
+
+    文本 = subject + content + applies_when（与简报打分文本同口径）；
+    有 source_episode_id 时把来源 episode 的 steps 的 action 字符串
+    拼进同一提取器（骨架复用：有序动作名即结构），跨边界连续重复
+    去重。现存序列一致时只花一次查询，不写。
+    """
+    from app.analogy import extract_moves
+
+    moves = extract_moves(f"{target.subject} {target.content} {target.applies_when}")
+    if target.source_episode_id:
+        steps = connection.execute(
+            select(TaskEpisode.__table__.c.steps).where(
+                TaskEpisode.__table__.c.id == target.source_episode_id)).scalar()
+        if steps:
+            actions = " ".join(str(st.get("action", "")) for st in steps
+                               if isinstance(st, dict))
+            for mv in extract_moves(actions):
+                if not moves or moves[-1] != mv:
+                    moves.append(mv)
+    table = MemoryInsightMove.__table__
+    existing = [r[0] for r in connection.execute(
+        select(table.c.move).where(table.c.insight_id == target.id)
+        .order_by(table.c.position))]
+    if existing == moves:
+        return
+    connection.execute(delete(table).where(table.c.insight_id == target.id))
+    if moves:
+        connection.execute(insert(table), [
+            {"insight_id": target.id, "position": i, "move": mv,
+             "app_id": target.app_id, "user_id": target.user_id}
+            for i, mv in enumerate(moves)])
+
+
+def _register_move_events() -> None:
+    """经验行 ORM 增删改 → 动作序列同事务同步（与倒排事件同哲学）。
+
+    after_update 只看文本属性与 source_episode_id 是否变化：简报记账、
+    反馈计数这类非文本更新占绝大多数，文本没动时序列必然没变，
+    跳过那次比对查询；判定失败时回落同步（宁可多查，不可漏同步）。
+    """
+
+    @event.listens_for(MemoryInsight, "after_insert")
+    def _mins(mapper, connection, target):
+        _move_sync(connection, target)
+
+    @event.listens_for(MemoryInsight, "after_update")
+    def _mupd(mapper, connection, target):
+        try:
+            state = inspect(target)
+            attrs = [a for a in ("subject", "content", "applies_when",
+                                 "source_episode_id") if a in mapper.attrs.keys()]
+            if attrs and not any(
+                    state.attrs[a].history.has_changes() for a in attrs):
+                return
+        except Exception:
+            pass
+        _move_sync(connection, target)
+
+    @event.listens_for(MemoryInsight, "after_delete")
+    def _mdel(mapper, connection, target):
+        connection.execute(delete(MemoryInsightMove.__table__).where(
+            MemoryInsightMove.__table__.c.insight_id == target.id))
+
+
+_register_move_events()
+
+
 class MemoryJob(UserScoped, Base):
     __tablename__ = "memory_job"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
