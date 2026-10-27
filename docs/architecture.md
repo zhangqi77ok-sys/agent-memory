@@ -574,6 +574,51 @@ sequenceDiagram
   hold_count > 0 时显示“暂缓 N 次”，last_timing 为 context 时显示
   “由会话上下文触发”；星图不渲染提醒，不动）。
 
+## 5.17 提醒 TTL 与投递账本（第 38 轮，审计 F-13 提醒部分）
+
+核实：提醒此前没有任何 TTL 字段（连 `valid_from` 都没有），巡检
+`expire_memories` 只覆盖事实 / 偏好 / 经验 + 删旧轨迹，armed 提醒
+只要不被触发落幕、不被 dismiss 就是永生的；投递只有行上计数器
+（fire_count / hold_count / last_timing），答不出每次展示 / 暂缓 /
+救援是何时、何种结论。本轮补齐两处，不改内容判定阈值：
+
+- **TTL = 显式截止，不搞年龄过期**：`memory_reminder.expires_at`
+  （nullable，NULL = 永不过期；迁移 0030），`status` 增加终态
+  `"expired"`。全局 `memory_ttl_days` 不碰提醒——提醒是面向将来的
+  意图，立意长期武装，按年龄悄悄过期会丢用户意图（与“清空不静默
+  撤回同意”同款错误）。默认 NULL，全部旧调用点与旧行行为不变。
+- **强制执行点两个**：读时惰性过期（`check_triggers` 内评分前，
+  已到截止时间的 armed 行标 expired 并记账，排除出候选池——巡检
+  一小时一跑，截止落在两次巡检之间时不能继续触发；与第 34 轮
+  工作记忆“24h 失活读时 purge”同款模式）+ 巡检过期步
+  （`reminders.expire_reminders`，在 `expire_memories` 之后跑，
+  不依赖 `ttl_days > 0`；显式关掉记忆的用户按 fix4 §5 口径跳过）。
+  过期是终态：永不触发、永不救援、不占同动作去重名额。
+- **投递账本（新表 `memory_reminder_delivery`，迁移 0030）**：
+  一次检查对一行提醒的最终结论记一条——shown（内容命中展示，含
+  灰区展示，用 kind/score 区分）/ consumed（once 强命中落幕，展示 +
+  落幕一次记一条，不 double-count）/ rescued（上下文救援展示）/
+  held（灰区暂缓）/ expired（过期）。未命中行、被同动作去重掉的
+  行不记（简报里没出现的提醒，账上不能“展示过”）。字段：
+  reminder_id、event、task（截断 500 字、仅作溯源，与
+  BriefDelivery.task 同款口径）、timing、kind、score、created_at；
+  索引 (reminder_id, created_at)。保留：每提醒上限 200 条（论证值，
+  未按真实提醒量标定），写账同事务内裁剪最旧行；无回填（旧展示
+  不补账，不编造历史）。
+- **读路径**：`list_reminder_deliveries`（先确权提醒行归属，他人 /
+  不存在 → 404，与 dismiss 同形）+ REST
+  `GET /v1/reminders/{id}/deliveries?limit=`（默认 100，上限 100；
+  开关关闭用户返回 []，与 list_ 同形）。`ReminderOut` 只加
+  `expires_at`，不加 delivery_count（列表每行 COUNT 一次是 N+1）。
+- **门禁与删除**：检查入口 `memory_enabled` 不动；账本一切查询带
+  (app_id, user_id)；`clear_all` 清单加 `MemoryReminderDelivery`
+  （fix8 注册表测试钉住）；提醒无单条硬删（dismiss 是状态变更），
+  账本随 dismiss 保留（与 fired 行保留 fire_count 同理）；账本是
+  派生审计，不进墓碑（墓碑防内容复活，账本不复活内容）。
+- **前端**：小改（`Reminder` 类型加 `expires_at` 可选字段，提醒行
+  显示“到期 <日期>”，status=expired 显示“已过期”徽标；星图不动；
+  账本页不做，API 已有）。
+
 ## 6. 非功能
 - **隔离**：每条 SQL 带 `app_id + user_id`，Postgres RLS 兜底；C 端最怕的是用户 A 看到用户 B 的记忆，评测集里“串用户”为硬门禁。
 - **规模与成本**：C 端用户多，按用户限流（写入/召回 QPS、每日抽取次数）；抽取按会话结束或每 N 轮批量触发，控制 LLM 成本；记录每用户 token 用量。

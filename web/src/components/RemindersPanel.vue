@@ -32,6 +32,7 @@ const STATUS_LABEL: Record<string, string> = {
   armed: '武装中',
   fired: '已触发',
   dismissed: '已解除',
+  expired: '已过期', // 第 38 轮：截止时间到期的终态
 }
 </script>
 
@@ -73,6 +74,7 @@ const STATUS_LABEL: Record<string, string> = {
         <span v-if="r.project"> · 项目 {{ r.project }}</span>
         <span v-if="r.hold_count"> · 暂缓 {{ r.hold_count }} 次</span>
         <span v-if="r.last_timing === 'context'"> · 由会话上下文触发</span>
+        <span v-if="r.expires_at"> · 到期 {{ new Date(r.expires_at).toLocaleString() }}</span>
       </div>
     </article>
   </section>

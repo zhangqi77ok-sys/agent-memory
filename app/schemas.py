@@ -293,7 +293,9 @@ class InsightOut(BaseModel):
 class ReminderOut(BaseModel):
     """前瞻记忆（第十七轮）：触发条件 + 要做的事 + 武装状态。
     第 37 轮加时机审计：hold_count（灰区暂缓次数）、last_timing
-    （最近一次检查结论 content/context/held），均为可选，后向兼容。"""
+    （最近一次检查结论 content/context/held），均为可选，后向兼容。
+    第 38 轮加 expires_at（可选截止时间，None = 永不过期）；status 增加
+    expired 终态。账本数不进列表（防 N+1），由 deliveries 接口查。"""
     reminder_id: str
     condition: str
     action: str
@@ -303,6 +305,7 @@ class ReminderOut(BaseModel):
     fire_count: int = 0
     hold_count: int = 0
     last_timing: str | None = None
+    expires_at: datetime | None = None
 
 
 def reminder_out(row) -> ReminderOut:
@@ -311,7 +314,8 @@ def reminder_out(row) -> ReminderOut:
                        once=bool(row.once), status=row.status,
                        fire_count=row.fire_count or 0,
                        hold_count=row.hold_count or 0,
-                       last_timing=row.last_timing)
+                       last_timing=row.last_timing,
+                       expires_at=row.expires_at)
 
 
 class ReminderCreateRequest(UserScopedRequest):
@@ -319,6 +323,26 @@ class ReminderCreateRequest(UserScopedRequest):
     action: str = Field(min_length=1, max_length=1000)
     project: str | None = Field(default=None, max_length=128)
     once: bool = True
+    expires_at: datetime | None = None  # 第 38 轮：可选截止时间，None = 永不过期
+
+
+class ReminderDeliveryOut(BaseModel):
+    """提醒投递账本行（第 38 轮）：一次检查对一行提醒的最终结论。"""
+    delivery_id: str
+    reminder_id: str
+    event: str  # shown|consumed|rescued|held|expired
+    task: str
+    timing: str | None = None
+    kind: str | None = None
+    score: float | None = None
+    created_at: datetime
+
+
+def reminder_delivery_out(row) -> ReminderDeliveryOut:
+    return ReminderDeliveryOut(delivery_id=row.id, reminder_id=row.reminder_id,
+                               event=row.event, task=row.task or "",
+                               timing=row.timing, kind=row.kind,
+                               score=row.score, created_at=row.created_at)
 
 
 class ReminderDismissRequest(UserScopedRequest):

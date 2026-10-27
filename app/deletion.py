@@ -33,6 +33,7 @@ CLEAR_ALL_MODELS = (
     m.MemoryInsight,
     m.TaskEpisode,
     m.MemoryReminder,
+    m.MemoryReminderDelivery,  # 第 38 轮：提醒投递账本（用户域派生账，随行走）
     m.BriefDelivery,
     m.BriefDeliveryEdge,
     m.ConsolidationReport,

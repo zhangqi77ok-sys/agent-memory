@@ -155,6 +155,7 @@ export interface Reminder {
   fire_count: number
   hold_count?: number // 第 37 轮：灰区暂缓次数
   last_timing?: string | null // 第 37 轮：最近一次检查结论 content/context/held
+  expires_at?: string | null // 第 38 轮：可选截止时间，null = 永不过期
 }
 
 /** 管理端（第十七轮）：跨用户总览，只读 */

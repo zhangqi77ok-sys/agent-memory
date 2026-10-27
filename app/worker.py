@@ -590,6 +590,11 @@ def run_patrol(db: Session, linker=None, ttl_days: int = 0,
         stats: dict = {}
         if ttl_days > 0:
             stats["expired"] = expire_memories(db, ttl_days)
+        # 提醒过期（第三十八轮，审计 F-13 提醒部分）：截止是显式的，不依赖
+        # ttl_days；开关关闭用户在 expire_reminders 内按 fix4 §5 口径跳过。
+        # 读时惰性过期（check_triggers 内）是另一执行点，两处语义一致。
+        from app.reminders import expire_reminders
+        stats["reminders_expired"] = expire_reminders(db)["expired"]
         # 经验生命周期巡检与 TTL 同一个小时节拍（第十一轮）：衰减/合并/矛盾计数
         from app.episodes import consolidate_insights
         cstats = consolidate_insights(db, linker=linker)

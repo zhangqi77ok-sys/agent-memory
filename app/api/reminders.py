@@ -10,8 +10,8 @@ from app.api.me import memory_enabled
 from app.auth import UserContext, bind_user, resolve_asserted, user_ctx, user_from_query
 from app.db import get_db
 from app.embeddings import build_embedder
-from app.reminders import check_triggers, create_reminder, dismiss_reminder, list_reminders
-from app.schemas import ReminderCreateRequest, ReminderDismissRequest, ReminderOut, reminder_out
+from app.reminders import check_triggers, create_reminder, dismiss_reminder, list_reminder_deliveries, list_reminders
+from app.schemas import ReminderCreateRequest, ReminderDeliveryOut, ReminderDismissRequest, ReminderOut, reminder_delivery_out, reminder_out
 
 router = APIRouter(prefix="/v1")
 
@@ -23,7 +23,7 @@ def create(req: ReminderCreateRequest, db: Session = Depends(get_db), request: R
         raise HTTPException(status_code=404, detail="reminder not found")
     row = create_reminder(db, u, condition=req.condition, action=req.action,
                           project=req.project, once=req.once,
-                          embedder=build_embedder())
+                          embedder=build_embedder(), expires_at=req.expires_at)
     return reminder_out(row)
 
 
@@ -47,6 +47,21 @@ def dismiss(reminder_id: str, req: ReminderDismissRequest,
     except ValueError:
         raise HTTPException(status_code=404, detail="reminder not found") from None
     return reminder_out(row)
+
+
+@router.get("/reminders/{reminder_id}/deliveries", response_model=list[ReminderDeliveryOut])
+def deliveries(reminder_id: str, limit: int = Query(100, ge=1, le=100),
+               u: UserContext = Depends(user_from_query), db: Session = Depends(get_db)):
+    """查一条提醒的投递账本（第 38 轮）：开关关闭用户返回 []（与 list_ 同形，
+    不泄露）；他人/不存在的提醒 404（归属检查在开关检查之后，见设计稿）。"""
+    u = bind_user(db, u)
+    if not memory_enabled(db, u):
+        return []
+    try:
+        rows = list_reminder_deliveries(db, u, reminder_id, limit=limit)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="reminder not found") from None
+    return [reminder_delivery_out(r) for r in rows]
 
 
 @router.get("/reminders/check", response_model=list[ReminderOut])

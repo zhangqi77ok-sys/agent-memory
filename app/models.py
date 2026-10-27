@@ -224,7 +224,8 @@ class MemoryReminder(UserScoped, Base):
     此前 applies_when 只是被动文本，要等简报按主题相似度捞经验时顺带命中；
     前瞻记忆是独立武装的意图：触发条件（condition）与当前任务做关键词/向量
     匹配，命中即在简报里单独亮出来。once=True 触发一次即 fired 落幕；
-    once=False 常驻，记 fire_count/last_fired_at。status: armed|fired|dismissed。
+    once=False 常驻，记 fire_count/last_fired_at。status: armed|fired|dismissed|
+    expired（第 38 轮：expires_at 到期即 expired 终态，永不触发）。
     """
 
     __tablename__ = "memory_reminder"
@@ -246,6 +247,35 @@ class MemoryReminder(UserScoped, Base):
     hold_count: Mapped[int] = mapped_column(Integer, default=0)
     last_held_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_timing: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # 第 38 轮：提醒 TTL——可选截止时间；NULL = 永不过期（旧行与旧调用点
+    # 一律 NULL，行为不变）。status 增加终态 "expired"（见下），过期行
+    # 自动退出 armed 列表与触发检查，无需改各处查询。
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
+class MemoryReminderDelivery(UserScoped, Base):
+    """提醒投递账本（第 38 轮，审计 F-13 提醒部分）。
+
+    行上计数器（fire_count/hold_count/last_timing）只答得出“最近一次”，
+    答不出每次展示/暂缓/救援是何时、何种结论。本表逐次记账：一次检查对
+    一行提醒的最终结论记一条（shown / consumed / rescued / held /
+    expired），被同动作去重掉的行不记（简报里没出现的提醒，账上不能
+    “展示过”），未命中行不记。task 截断存 500 字、仅作溯源，与
+    BriefDelivery.task 同款口径。保留：每提醒上限 200 条（见
+    reminders.REMINDER_LEDGER_CAP），写账同事务内裁剪最旧行。
+    """
+
+    __tablename__ = "memory_reminder_delivery"
+    __table_args__ = (Index("ix_reminder_delivery_reminder_created",
+                            "reminder_id", "created_at"),)
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
+    reminder_id: Mapped[str] = mapped_column(String(32), index=True)
+    event: Mapped[str] = mapped_column(String(16))  # shown|consumed|rescued|held|expired
+    task: Mapped[str] = mapped_column(Text, default="")
+    timing: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class BriefDelivery(UserScoped, Base):

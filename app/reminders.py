@@ -9,13 +9,13 @@
 import logging
 from datetime import timezone
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app import working_memory as _wm
 from app.auth import UserContext
 from app.embeddings import GeminiEmbedder, cosine
-from app.models import MemoryInsight, MemoryReminder, MemoryWorkingEntry, _now
+from app.models import MemoryInsight, MemoryReminder, MemoryReminderDelivery, MemoryWorkingEntry, _now
 from app.recall import COS_MIN_REMINDER
 from app.tokenize import tokens_of
 
@@ -29,15 +29,24 @@ SHORT_COND_TOKENS = 2  # 第二十七轮：条件 token 数 ≤ 此值时关键�
 # 正式标定需更大探针集。关键词命中（含关键词+向量双中）不受此线影响——
 # 关键词佐证本身就是确信证据。
 REMINDER_VECTOR_CONFIDENT = 0.80
+# 第 38 轮：投递账本保留上限（每提醒，论证值，未按真实提醒量标定）与
+# 账本任务串截断（与 BriefDelivery.task 同款“截断存、仅作溯源”口径）。
+REMINDER_LEDGER_CAP = 200
+LEDGER_TASK_CAP = 500
 
 
 def create_reminder(db: Session, u: UserContext, *, condition: str, action: str,
                     project: str | None = None, once: bool = True,
-                    embedder: GeminiEmbedder | None = None) -> MemoryReminder:
-    """武装一条前瞻记忆。条件文本顺手补向量（失败留空，触发时退化为关键词匹配）。"""
+                    embedder: GeminiEmbedder | None = None,
+                    expires_at=None) -> MemoryReminder:
+    """武装一条前瞻记忆。条件文本顺手补向量（失败留空，触发时退化为关键词匹配）。
+
+    第 38 轮：expires_at 可选截止时间；None = 永不过期（旧调用点一律 None，
+    行为不变）。过去时间也接受——建完即过期，下次检查时惰性落幕，不在
+    创建时拒绝（调用方时钟与服务端时钟差几秒就 422 是误伤）。"""
     row = MemoryReminder(app_id=u.app_id, user_id=u.user_id,
                          condition_text=condition.strip(), action_text=action.strip(),
-                         project=project, once=bool(once))
+                         project=project, once=bool(once), expires_at=expires_at)
     db.add(row)
     db.flush()
     if embedder is not None:
@@ -71,6 +80,84 @@ def dismiss_reminder(db: Session, u: UserContext, reminder_id: str) -> MemoryRem
     row.status = "dismissed"
     db.commit()
     return row
+
+
+def _record_delivery(db: Session, app_id: str, user_id: str, reminder_id: str, *,
+                     event: str, task: str, timing: str | None, kind: str | None,
+                     score: float | None, now) -> None:
+    """记一笔投递账（第 38 轮）：调用方负责 commit，本函数只加行 + 裁剪。
+
+    裁剪：同一提醒账本超 REMINDER_LEDGER_CAP 条时删最旧的多余行（按
+    (created_at, id) 排序；同 check 内同一提醒至多一事件，created_at 并列
+    只可能跨调用时钟回拨，id tie-break 只为裁剪确定）。"""
+    db.add(MemoryReminderDelivery(
+        app_id=app_id, user_id=user_id, reminder_id=reminder_id, event=event,
+        task=(task or "")[:LEDGER_TASK_CAP], timing=timing, kind=kind,
+        score=score, created_at=now))
+    db.flush()
+    ids = [r[0] for r in db.execute(
+        select(MemoryReminderDelivery.id).where(
+            MemoryReminderDelivery.reminder_id == reminder_id)
+        .order_by(MemoryReminderDelivery.created_at, MemoryReminderDelivery.id)).all()]
+    if len(ids) > REMINDER_LEDGER_CAP:
+        db.execute(delete(MemoryReminderDelivery).where(
+            MemoryReminderDelivery.id.in_(ids[:len(ids) - REMINDER_LEDGER_CAP])))
+
+
+def _expire_due_rows(db: Session, rows: list[MemoryReminder], task: str, now) -> list[MemoryReminder]:
+    """把已到截止时间的 armed 行标 expired（第 38 轮读时惰性过期）。
+
+    返回过期行。调用方负责 commit。过期是终态：过期行永不触发、永不救援、
+    不占同动作去重名额——调用方须在评分前排除这些行。"""
+    expired = []
+    for row in rows:
+        exp = _aware(row.expires_at)
+        if row.status == "armed" and exp is not None and exp <= now:
+            row.status = "expired"
+            row.last_timing = "expired"
+            _record_delivery(db, row.app_id, row.user_id, row.id, event="expired",
+                             task=task, timing="expired", kind=None, score=None, now=now)
+            expired.append(row)
+    return expired
+
+
+def expire_reminders(db: Session, now=None) -> dict:
+    """巡检过期步（第 38 轮）：把已到截止时间的 armed 提醒标 expired。
+
+    不依赖 ttl_days（截止是显式的，不是保留期）；显式关掉记忆的用户按
+    fix4 §5 口径跳过（switched_off_users）。返回 {"expired": n} 进
+    patrol stats。读时惰性过期（check_triggers 内）是另一执行点，两处
+    共用 _expire_due_rows 的语义，巡检步只是批量补齐。"""
+    from app.api.me import switched_off_users
+
+    now = now or _now()
+    off = switched_off_users(db)
+    rows = [r for r in db.scalars(select(MemoryReminder).where(
+        MemoryReminder.status == "armed",
+        MemoryReminder.expires_at.is_not(None))).all()
+        if (r.app_id, r.user_id) not in off]
+    expired = _expire_due_rows(db, rows, task="", now=now)
+    if expired:
+        db.commit()
+    return {"expired": len(expired)}
+
+
+def list_reminder_deliveries(db: Session, u: UserContext, reminder_id: str,
+                             limit: int = 100) -> list[MemoryReminderDelivery]:
+    """查一条提醒的投递账本（第 38 轮）：先确权提醒行归属（他人/不存在
+    → ValueError → 404，与 dismiss 同形），再按时间倒序取账本。"""
+    row = db.scalar(select(MemoryReminder).where(
+        MemoryReminder.id == reminder_id, MemoryReminder.app_id == u.app_id,
+        MemoryReminder.user_id == u.user_id))
+    if row is None:
+        raise ValueError("reminder not found")
+    limit = max(1, min(int(limit), 100))
+    return list(db.scalars(select(MemoryReminderDelivery).where(
+        MemoryReminderDelivery.app_id == u.app_id,
+        MemoryReminderDelivery.user_id == u.user_id,
+        MemoryReminderDelivery.reminder_id == reminder_id)
+        .order_by(MemoryReminderDelivery.created_at.desc(),
+                  MemoryReminderDelivery.id.desc()).limit(limit)))
 
 
 def _trigger_detail(row: MemoryReminder, task_tokens: set[str],
@@ -228,6 +315,10 @@ def check_triggers(db: Session, u: UserContext, task: str,
       在场且不相关时暂缓（不展示、不记 fire_count、不消费，hold_count+1）；
     - 无内容命中但上下文相关 → 救援展示（fire_count+1，once 型永不因此落幕）。
     session_id=None（旧调用点）→ 上下文缺席，行为与第 37 轮之前逐字一致。
+    第 38 轮账本与过期：评分前已到截止时间的 armed 行先标 expired 并记账
+    （惰性过期，巡检过期步是另一执行点）；每种最终结论落地时记一笔投递
+    账（shown / consumed / rescued / held），被去重掉的行与未命中的行不记账；
+    无事件时零写（无命中检查不 commit 的旧规则不变）。
     第九轮起返回列表的语义是“展示的提醒”，不再等同“已消耗的提醒”：
     - 关键词命中（含关键词+向量双中）→ 旧规则：once 型 fired 落幕；
     - 纯向量命中且 cos ≥ REMINDER_VECTOR_CONFIDENT（确信线）→ 旧规则；
@@ -252,6 +343,11 @@ def check_triggers(db: Session, u: UserContext, task: str,
             log.warning("trigger query embed failed: %s", e)
             qvec = None
     now = _now()
+    # 第 38 轮：读时惰性过期——评分前先把已到截止时间的行标 expired 并记账，
+    # 排除出候选池（过期行永不触发、永不救援、不占去重名额）。巡检过期步
+    # 是另一执行点，两处语义一致。
+    expired = _expire_due_rows(db, rows, task, now)
+    rows = [r for r in rows if r.status == "armed"]
     # 第 37 轮：会话上下文只算一次（无 session_id 时不查，旧行为零成本）。
     ctx_tokens = session_context_tokens(db, u, session_id, project) if session_id is not None else None
     # 第十九轮：命中按分数降序、同一动作去重（动作规范化后相同只留分数最高者）。
@@ -280,6 +376,8 @@ def check_triggers(db: Session, u: UserContext, task: str,
             row.hold_count = (row.hold_count or 0) + 1
             row.last_held_at = now
             row.last_timing = "held"
+            _record_delivery(db, row.app_id, row.user_id, row.id, event="held",
+                             task=task, timing="held", kind="vector", score=cos, now=now)
             held.append(row)
             continue
         scored.append((score, kind, cos, row, "content"))
@@ -299,7 +397,14 @@ def check_triggers(db: Session, u: UserContext, task: str,
         gray = kind == "vector" and cos is not None and cos < REMINDER_VECTOR_CONFIDENT
         if row.once and not gray and kind != "context":
             row.status = "fired"
+            event = "consumed"  # once 强命中：展示 + 落幕一次记一条，不 double-count
+        elif kind == "context":
+            event = "rescued"
+        else:
+            event = "shown"
+        _record_delivery(db, row.app_id, row.user_id, row.id, event=event,
+                         task=task, timing=timing, kind=kind, score=_score, now=now)
         fired.append(row)
-    if fired or held:
+    if fired or held or expired:
         db.commit()
     return fired
