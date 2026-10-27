@@ -7,13 +7,15 @@
 第九轮起纯向量灰区命中（低于确信线）只展示、不落幕，见 check_triggers。
 """
 import logging
+from datetime import timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import working_memory as _wm
 from app.auth import UserContext
 from app.embeddings import GeminiEmbedder, cosine
-from app.models import MemoryReminder, _now
+from app.models import MemoryInsight, MemoryReminder, MemoryWorkingEntry, _now
 from app.recall import COS_MIN_REMINDER
 from app.tokenize import tokens_of
 
@@ -134,12 +136,98 @@ def _triggered(row: MemoryReminder, task: str, task_tokens: set[str],
     return _trigger_score(row, task_tokens, qvec, embedder_model) is not None
 
 
+def _aware(dt):
+    """SQLite 读回的 datetime 是 naive，统一转 aware 再比较（与 working_memory 同口径）。"""
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def session_context_tokens(db: Session, u: UserContext, session_id, project: str | None) -> set[str] | None:
+    """第 37 轮：会话上下文 token 集（只读，不碰缓冲写）。
+
+    经 working_memory.buffer_enabled 归一化：非法 session_id、开关关闭用户
+    → None = 无上下文。取本会话条目，回表取现行行，跳过不存在/已关闭/
+    被禁/版本变化/失活（24h TTL）的行——只跳过、不删条目，清理是下次简报
+    fill_candidates 的事。项目口径与 fill_candidates 一致（条目项目为空
+    或等于本次简报项目）。返回 None 表示“上下文缺席”（调用方走旧行为）；
+    返回空集表示“会话在场但无可用行”（灰区按不相关暂缓，救援不触发）。
+    成本 O(WORKING_CAP)，与存量总行数无关。"""
+    from datetime import timedelta
+
+    sid = _wm.buffer_enabled(db, u.app_id, u.user_id, session_id)
+    if sid is None:
+        return None
+    entries = list(
+        db.scalars(
+            select(MemoryWorkingEntry).where(
+                MemoryWorkingEntry.app_id == u.app_id,
+                MemoryWorkingEntry.user_id == u.user_id,
+                MemoryWorkingEntry.session_id == sid,
+            )
+        )
+    )
+    if not entries:
+        return None
+    now = _now()
+    cutoff = now - timedelta(hours=_wm.WORKING_TTL_HOURS)
+    wanted = [
+        e
+        for e in entries
+        if (e.project is None or project is None or e.project == project)
+        and (_aware(e.last_touched) is None or _aware(e.last_touched) >= cutoff)
+    ]
+    if not wanted:
+        return None
+    rows = {
+        r.id: r
+        for r in db.scalars(
+            select(MemoryInsight).where(
+                MemoryInsight.app_id == u.app_id,
+                MemoryInsight.user_id == u.user_id,
+                MemoryInsight.id.in_([e.insight_id for e in wanted]),
+            )
+        )
+    }
+    tokens: set[str] = set()
+    valid = False
+    for e in wanted:
+        r = rows.get(e.insight_id)
+        if r is None or r.valid_to is not None or (r.muted is not None and r.muted) or (r.version or 1) != (e.version or 1):
+            continue
+        valid = True
+        tokens |= tokens_of(r.subject or "")
+        tokens |= tokens_of(r.content or "")
+    if not valid:
+        return None
+    return tokens
+
+
+def context_relevant(cond_tokens: set[str], ctx_tokens: set[str] | None) -> bool:
+    """第 37 轮：条件与会话上下文是否相关。
+
+    复用关键词路证据线：overlap ≥ TRIGGER_OVERLAP_MIN（0.5）；短条件
+    （≤ SHORT_COND_TOKENS 个 token）要求全中——与第 27 轮短条件规则逐字
+    一致。上下文缺席（None）或条件 token 为空 → 不相关。"""
+    if ctx_tokens is None or not cond_tokens:
+        return False
+    overlap = len(cond_tokens & ctx_tokens) / len(cond_tokens)
+    required = 1.0 if len(cond_tokens) <= SHORT_COND_TOKENS else TRIGGER_OVERLAP_MIN
+    return overlap >= required
+
+
 def check_triggers(db: Session, u: UserContext, task: str,
                    embedder: GeminiEmbedder | None = None, *,
-                   project: str | None = None) -> list[MemoryReminder]:
+                   project: str | None = None, session_id=None) -> list[MemoryReminder]:
     """拿新任务去撞所有武装中的前瞻记忆，返回展示的（已按规则记账并 commit）。
 
     项目相容才触发（提醒带项目且与任务项目明确不同 → 不撞）。
+    第 37 轮时机层（内容判定之后叠加，内容阈值一律不动）：
+    - 强命中（关键词/both、确信向量）→ 立即触发，上下文不拦；
+    - 灰区命中（纯向量 < 确信线）→ 上下文缺席或相关时照旧展示，上下文
+      在场且不相关时暂缓（不展示、不记 fire_count、不消费，hold_count+1）；
+    - 无内容命中但上下文相关 → 救援展示（fire_count+1，once 型永不因此落幕）。
+    session_id=None（旧调用点）→ 上下文缺席，行为与第 37 轮之前逐字一致。
     第九轮起返回列表的语义是“展示的提醒”，不再等同“已消耗的提醒”：
     - 关键词命中（含关键词+向量双中）→ 旧规则：once 型 fired 落幕；
     - 纯向量命中且 cos ≥ REMINDER_VECTOR_CONFIDENT（确信线）→ 旧规则；
@@ -164,33 +252,54 @@ def check_triggers(db: Session, u: UserContext, task: str,
             log.warning("trigger query embed failed: %s", e)
             qvec = None
     now = _now()
+    # 第 37 轮：会话上下文只算一次（无 session_id 时不查，旧行为零成本）。
+    ctx_tokens = session_context_tokens(db, u, session_id, project) if session_id is not None else None
     # 第十九轮：命中按分数降序、同一动作去重（动作规范化后相同只留分数最高者）。
     # 记账只对最终返回的做——被去重掉的那条不记 fire_count，否则简报里没出现
     # 的提醒也在账上“触发过”，误触发率就永远量不准。
-    scored: list[tuple[float, str, float | None, MemoryReminder]] = []
+    # 第 37 轮：scored 元组末位是时机结论（content/context），暂缓行先出池，
+    # 不占同动作去重名额、不记 fire_count。
+    scored: list[tuple[float, str, float | None, MemoryReminder, str]] = []
+    held: list[MemoryReminder] = []
     for row in rows:
         if row.project and project and row.project != project:
             continue
         detail = _trigger_detail(row, task_tokens, qvec, getattr(embedder, "model", None))
+        cond_tokens = tokens_of(row.condition_text)
         if detail is None:
+            # 救援：内容两路未命中，但会话上下文达到关键词路同一条证据线。
+            if ctx_tokens is not None and context_relevant(cond_tokens, ctx_tokens):
+                overlap = len(cond_tokens & ctx_tokens) / len(cond_tokens)
+                scored.append((overlap, "context", None, row, "context"))
             continue
         score, kind, cos = detail
-        scored.append((score, kind, cos, row))
+        gray = kind == "vector" and cos is not None and cos < REMINDER_VECTOR_CONFIDENT
+        if gray and ctx_tokens is not None and not context_relevant(cond_tokens, ctx_tokens):
+            # 暂缓：弱猜测不在无关时刻展示；不记 fire_count、不消费，
+            # 下次上下文变相关或缺席时照常展示。
+            row.hold_count = (row.hold_count or 0) + 1
+            row.last_held_at = now
+            row.last_timing = "held"
+            held.append(row)
+            continue
+        scored.append((score, kind, cos, row, "content"))
     scored.sort(key=lambda t: t[0], reverse=True)
     seen_actions: set[str] = set()
     fired: list[MemoryReminder] = []
-    for _score, kind, cos, row in scored:
+    for _score, kind, cos, row, timing in scored:
         action_key = " ".join((row.action_text or "").split()).lower()
         if action_key in seen_actions:
             continue
         seen_actions.add(action_key)
         row.fire_count = (row.fire_count or 0) + 1
         row.last_fired_at = now
+        row.last_timing = timing
         # 灰区：纯向量命中且低于确信线时，once 型不落幕（只展示）。
+        # 救援（kind == "context"）同样永不落幕——启发式证据不配消费一次性意图。
         gray = kind == "vector" and cos is not None and cos < REMINDER_VECTOR_CONFIDENT
-        if row.once and not gray:
+        if row.once and not gray and kind != "context":
             row.status = "fired"
         fired.append(row)
-    if fired:
+    if fired or held:
         db.commit()
     return fired

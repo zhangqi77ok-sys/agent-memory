@@ -52,10 +52,14 @@ def dismiss(reminder_id: str, req: ReminderDismissRequest,
 @router.get("/reminders/check", response_model=list[ReminderOut])
 def check(task: str = Query(..., min_length=1, max_length=2000),
           project: str | None = Query(None, max_length=128),
+          session_id: str | None = Query(None, max_length=64),
           u: UserContext = Depends(user_from_query), db: Session = Depends(get_db)):
-    """拿一段任务描述去撞武装中的前瞻记忆（简报之外单独查触发的入口）。"""
+    """拿一段任务描述去撞武装中的前瞻记忆（简报之外单独查触发的入口）。
+    第 37 轮：可选 session_id，传了才启用会话上下文时机（暂缓与救援）；
+    不传则行为与之前一致。"""
     u = bind_user(db, u)
     if not memory_enabled(db, u):
         return []
-    fired = check_triggers(db, u, task, embedder=build_embedder(), project=project)
+    fired = check_triggers(db, u, task, embedder=build_embedder(), project=project,
+                           session_id=session_id)
     return [reminder_out(r) for r in fired]

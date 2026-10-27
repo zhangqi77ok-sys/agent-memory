@@ -71,6 +71,8 @@ const STATUS_LABEL: Record<string, string> = {
       <div class="muted" style="margin-top: 4px">
         {{ r.once ? '一次性' : '常驻' }} · 已触发 {{ r.fire_count }} 次
         <span v-if="r.project"> · 项目 {{ r.project }}</span>
+        <span v-if="r.hold_count"> · 暂缓 {{ r.hold_count }} 次</span>
+        <span v-if="r.last_timing === 'context'"> · 由会话上下文触发</span>
       </div>
     </article>
   </section>

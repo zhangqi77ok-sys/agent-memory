@@ -536,6 +536,44 @@ sequenceDiagram
   附两行主题；面板暂不渲染本表，本接口即“可查”的落点。
 - **前端**：无改动（对决语义只进简报排序与新接口，无新展示语义）。
 
+## 5.16 提醒时机（第 37 轮）
+
+`check_triggers` 此前只看单次任务串：弱猜测在无关时刻也展示，
+简短跟进任务（“继续”“再跑一次”）则永远撞不上条件。本轮在内容
+判定之后叠加时机层，内容阈值（关键词路、向量路、项目门）一律不动：
+
+- **上下文 = 会话缓冲**：`session_context_tokens` 只读第 34 轮缓冲
+  里的现行经验行（主题 + 正文 token 并集，≤20 行，O(CAP)），
+  项目口径与 `fill_candidates` 一致；简报路径在检查前已由
+  `brief_for_task` 把本次递出行记进缓冲，所以上下文 = 本次简报
+  刚递出的行 + 本会话此前递出行。非法 session_id、开关关闭用户、
+  缓冲为空/全失效 → 上下文缺席，走旧行为一字不动。
+- **相关性复用关键词路证据线**：overlap ≥ 0.5，短条件（≤2 token）
+  要求全中（第 27 轮规则逐字一致）；条件 token 为空 → 不相关。
+- **三车道**：强命中（关键词/both、确信向量 ≥0.80）立即触发，
+  上下文不拦（确信提醒丢了不可逆，启发式判断不配否决）；灰区命中
+  （纯向量 <0.80）在上下文缺席或相关时照旧展示，在场且不相关时
+  暂缓——不展示、不记 fire_count、不消费，下次相关或缺席时照常
+  展示；无内容命中但上下文相关时救援展示，once 型永不因此落幕
+  （救援是启发式证据，不配消费一次性意图）。暂缓行先出候选池，
+  不占同动作去重名额。
+- **审计（迁移 0029，`memory_reminder` 加三列，无新表）**：
+  `hold_count` / `last_held_at` 记暂缓账，`last_timing`
+  （content/context/held）记最近一次检查结论；未命中、未暂缓的
+  行不写，避免每次检查给全部武装行写审计。`ReminderOut` 加两个
+  可选字段，GET /v1/reminders 本来就走 `reminder_out`，无需新接口。
+- **门禁与删除**：入口 `memory_enabled` 不动；上下文另经
+  `buffer_enabled`（开关关闭 → 无上下文）；上下文查询以
+  (app_id, user_id, session_id) 过滤，session_id 跨用户重名不串；
+  三列随提醒行走，`clear_all` 行删覆盖，deletion 清单无需改动。
+- **接线**：`check_triggers(..., session_id=None)`，默认 None = 旧行为；
+  REST `/brief` 传 `req.session_id`，MCP `memory_brief` 传已有
+  `session_id` 参数，REST `/reminders/check` 加可选 `session_id`
+  查询参数，MCP `memory_trigger_check` 无会话参数、不传。
+- **前端**：小改（`Reminder` 类型加两个可选字段，提醒行在
+  hold_count > 0 时显示“暂缓 N 次”，last_timing 为 context 时显示
+  “由会话上下文触发”；星图不渲染提醒，不动）。
+
 ## 6. 非功能
 - **隔离**：每条 SQL 带 `app_id + user_id`，Postgres RLS 兜底；C 端最怕的是用户 A 看到用户 B 的记忆，评测集里“串用户”为硬门禁。
 - **规模与成本**：C 端用户多，按用户限流（写入/召回 QPS、每日抽取次数）；抽取按会话结束或每 N 轮批量触发，控制 LLM 成本；记录每用户 token 用量。

@@ -153,6 +153,8 @@ export interface Reminder {
   once: boolean
   status: string // armed | fired | dismissed
   fire_count: number
+  hold_count?: number // 第 37 轮：灰区暂缓次数
+  last_timing?: string | null // 第 37 轮：最近一次检查结论 content/context/held
 }
 
 /** 管理端（第十七轮）：跨用户总览，只读 */

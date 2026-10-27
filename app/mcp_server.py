@@ -269,7 +269,8 @@ def memory_brief(task: str, k: int = 5, project: str = "", session_id: str = "")
         from app.reminders import check_triggers
         from app.schemas import reminder_out
 
-        fired = check_triggers(db, u, task, embedder=embedder, project=proj)
+        fired = check_triggers(db, u, task, embedder=embedder, project=proj,
+                               session_id=session_id or None)
         db.add(m.AuditLog(app_id=u.app_id, user_id=u.user_id, action="brief",
                           fact_ids=[i.insight_id for i in insights]))
         db.commit()

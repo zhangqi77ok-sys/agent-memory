@@ -291,7 +291,9 @@ class InsightOut(BaseModel):
 
 
 class ReminderOut(BaseModel):
-    """前瞻记忆（第十七轮）：触发条件 + 要做的事 + 武装状态。"""
+    """前瞻记忆（第十七轮）：触发条件 + 要做的事 + 武装状态。
+    第 37 轮加时机审计：hold_count（灰区暂缓次数）、last_timing
+    （最近一次检查结论 content/context/held），均为可选，后向兼容。"""
     reminder_id: str
     condition: str
     action: str
@@ -299,13 +301,17 @@ class ReminderOut(BaseModel):
     once: bool = True
     status: str = "armed"
     fire_count: int = 0
+    hold_count: int = 0
+    last_timing: str | None = None
 
 
 def reminder_out(row) -> ReminderOut:
     return ReminderOut(reminder_id=row.id, condition=row.condition_text,
                        action=row.action_text, project=row.project,
                        once=bool(row.once), status=row.status,
-                       fire_count=row.fire_count or 0)
+                       fire_count=row.fire_count or 0,
+                       hold_count=row.hold_count or 0,
+                       last_timing=row.last_timing)
 
 
 class ReminderCreateRequest(UserScopedRequest):

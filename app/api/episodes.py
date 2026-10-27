@@ -71,7 +71,8 @@ def brief(req: BriefRequest, db: Session = Depends(get_db), request: Request = N
     from app.reminders import check_triggers
     from app.schemas import reminder_out
 
-    fired = check_triggers(db, u, req.task, embedder=embedder, project=req.project)
+    fired = check_triggers(db, u, req.task, embedder=embedder, project=req.project,
+                           session_id=req.session_id)
     # 与事实召回对齐留审计（第八轮补：此前 brief 查了什么、给了什么完全无痕）
     db.add(m.AuditLog(app_id=u.app_id, user_id=u.user_id, action="brief",
                       fact_ids=[i.insight_id for i in insights]))

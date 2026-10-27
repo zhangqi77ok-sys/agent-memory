@@ -239,6 +239,13 @@ class MemoryReminder(UserScoped, Base):
     embedding = mapped_column(Embedding, nullable=True)
     embed_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # 第 37 轮：时机审计——暂缓只发生在灰区命中上（见 reminders.check_triggers）。
+    # hold_count/last_held_at 记暂缓账；last_timing 记最近一次检查结论：
+    # "content"（内容命中触发/展示）/ "context"（上下文救援展示）/ "held"（暂缓）。
+    # 未命中、未暂缓的行不写，避免每次检查给全部武装行写审计。
+    hold_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_held_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_timing: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 class BriefDelivery(UserScoped, Base):
