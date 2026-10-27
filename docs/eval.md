@@ -564,3 +564,72 @@ p50 不变、p95 变宽是模型给出的预期，不是事后解释。
   空白可能漏删；写路径禁写（修复第 2 轮，精确 Python 口径）仍是
   第一道，恢复后新写入仍被它挡住。brief_delivery 的 JSON 账本不改，
   与 forget 入口行为一致（审计已知残留，另轮处理）。
+
+## 第 41 轮：千万级 50ms 证明（小规模多点实测 + CAP 界定，10M 是外推）
+
+- 结论分层，先说清哪句是实测、哪句是外推：
+  - 实测（PG 生产路径，纯关键词，k=5，CAP=100，简报含记账 commit，
+    20 次迭代、热身 3 次，2 核 / 7.7G VM）：100k 规模已分析稳态下，
+    full brief p50 约 36–40ms 且随规模平坦（斜率 ≈ -0.02），50ms 线
+    在 p50 口径下成立；p95 在小规模点有抖动尖峰（见下），p95 不宣称达标。
+  - 实测（同口径，未分析新鲜库）：100k 下 full brief p50 约 419–451ms，
+    判定 FAIL；失效模式已定位（见“诊断”），不是算法随规模回退。
+  - 沿用（第 20 轮）：1M 行锚点探针 p50 39.6ms（top）/ 44.6ms（mid），
+    是探针口径，不是 full brief；full brief 在 1M 未测。
+  - 外推（不是实测）：10M。外推成立的前提：CAP=100 不变、索引结构不变、
+    统计量健康（bulk 导入后 ANALYZE，规划器走索引计划）、单用户、
+    硬件同量级。失效条件：统计量缺失或陈旧致规划器选错计划（本轮实锤）、
+    CAP 调大（CAP=200 时简报 p50 约 65ms、500 时约 103ms，见
+    app/recall.py 注释口径）、索引缺失、冷缓存 p95 拖尾。
+- 证明脚本：scripts/brief_scale_proof.py（播种直接 SQL 批量插入，token
+  行用 app.tokenize.tokens_of 取集，与 ORM 倒排口径一致；主题分布仿
+  第 20 轮 Zipf 形，主导主题约 25%，使命中桶随 N 同比放大——桶放大而
+  耗时不放大才是有效的证伪实验）。判定只对 PG：最大规模点 p50 < 50ms
+  且 log-log 斜率 < 0.5；SQLite 只报告数字，不参与判定（口径外，见下）。
+  `--analyze` 选项：播种后对两表 ANALYZE，测的是生产常驻的已分析稳态；
+  不加该选项测的是刚 bulk 灌入、规划器尚无统计量的新鲜库——两种状态
+  分开报告，绝不混写。
+- 第 1 跑（PG，数据目录误放 /tmp 512MB tmpfs）：100k 规模点（356 万倒排行）
+  写满断连，100k 点丢失；仅得 1k top 19.62ms / mid 18.6ms、10k top
+  56.52ms / mid 59.64ms。因磁盘写满 + 未 ANALYZE，这组数不采信，只记教训：
+  证明数据目录一律放磁盘（后续跑全部改到 ~/workspace/.tmp-bench）。
+- 第 2 跑（PG 两遍 + SQLite 一遍，均未 ANALYZE；磁盘目录）：
+  - PG pass 1：1k top 46.38 / mid 37.59；10k top 75.54 / mid 73.58；
+    100k top 418.84 / mid 427.07；探针 top 9.9 → 28.38 → 210.66ms、
+    mid 10.15 → 44.55 → 398.78ms；判定 FAIL（top 斜率 0.478、mid 0.528）。
+  - PG pass 2：1k top 39.44 / mid 44.73；10k top 48.61 / mid 52.71；
+    100k top 435.98 / mid 450.66；探针 top 9.98 → 12.23 → 216.34ms、
+    mid 14.8 → 16.39 → 408.05ms；判定 FAIL（斜率 0.522 / 0.502）。
+  - SQLite（口径外，只报告）：1k top 100.41 / mid 130.53；10k top
+    142.93 / mid 119.48；50k top 229.51 / mid 167.8（p50，ms）。
+- 诊断（100k 临时库，EXPLAIN ANALYZE 实锤，不是猜测）：
+  - stage-1（锚 SELECT … LIMIT 100）：索引扫描 0.17ms，没问题。
+  - LATERAL 验数：位图索引扫描 3.3–4.0ms，没问题。
+  - stage-2（id IN (100) + scope 回表）：无 ANALYZE 时规划器选用户主题
+    索引 ix_insight_app_user_subject 全扫，Execution 188.42ms
+    （读 4220 页）；ANALYZE 后改走主键位图扫描，Execution 22.57ms。
+  - 整探针随之：无 ANALYZE 时 top 约 49ms / mid 约 42ms，ANALYZE 后
+    约 7–8ms；整份简报无 ANALYZE 时约 150–193ms，ANALYZE 后约 35ms
+    （5 次迭代）。排除法：stage-1 与 LATERAL 均快，慢只能在 stage-2。
+  - autovacuum 在诊断窗口内未自动分析（pg_stat_user_tables 的
+    last_autoanalyze 为空），故 bulk 导入后不能赌 autovacuum 时机，
+    导入收尾应显式 ANALYZE；这是运维前提，已写入 README 部署注意
+    与 architecture.md §5.20。
+- 第 3 跑（PG，--analyze，已分析稳态，判定 PASS）：
+  - top：brief p50 39.65（1k）→ 39.27（10k）→ 36.53（100k），
+    探针 p50 8.72 → 8.81 → 7.67，斜率 -0.018。
+  - mid：brief p50 39.85 → 35.97 → 36.34，
+    探针 p50 6.89 → 6.59 → 7.18，斜率 -0.020。
+  - p95（诚实附带，不冒充达标）：top 49.3 / 54.0 / 41.0，
+    mid 74.2 / 41.7 / 41.2——小规模点 p95 有 VM 噪声尖峰，50ms
+    结论只覆盖 p50，与第 20 轮口径一致。
+  - 余量说明：本机 fsync 地板约 20ms，简报 p50 36–40ms 离 50ms 线
+    余量薄；生产 SSD（fsync 1–3ms）余量更大——这是论证，不是实测。
+- SQLite 口径外（诚实声明）：其探针 GROUP BY stage-1 要扫整个命中桶
+  （输出端虽有 2000 截断，聚合本身与桶大小成正比），且 SQLite 不走
+  锚点探针；1k 下简报 p50 已超 100ms。把锚点探针移植到 SQLite 是
+  后续工作，本轮不做、不偷换口径。
+- 测试：tests/test_round41_scale_proof.py 16 例（各臂上限常数、锚点
+  有界性与回落、探针 2000 截断、判定函数与摘要结构、--analyze 选项
+  存在性、关键词降级、SQLite 大桶功能正确），计时断言只属于证明脚本，
+  单测里不断言墙上时间。
