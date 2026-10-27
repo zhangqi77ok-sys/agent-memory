@@ -117,6 +117,10 @@ class EpisodeSubmitRequest(UserScopedRequest):
     outcome: str = Field(default="success", pattern="^(success|failure|partial)$")
     steps: list[EpisodeStep] = Field(default_factory=list, max_length=200)
     cost: dict = Field(default_factory=dict)
+    # 第 39 轮：自动采集专用。True 时提交前先查内容 tombstone，命中则 409
+    # {"code": "tombstoned"}、不落库；默认 False，手动提交走老路（行落库、
+    # 提炼时挡），现有语义与测试一字不动。
+    tombstone_check: bool = False
 
     @field_validator("cost")
     @classmethod

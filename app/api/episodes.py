@@ -46,6 +46,34 @@ def submit(req: EpisodeSubmitRequest, idempotency_key: str | None = Header(defau
         existing = find_episode_by_key(db, u.app_id, u.user_id, idempotency_key)
         if existing is not None:
             return EpisodeAccepted(episode_id=existing.id, duplicate=True)
+    if req.tombstone_check:
+        # 第 39 轮：自动采集提交前置禁写判定（fix2 的内容哈希禁令在入库层
+        # 落实一次）。手动提交默认不带 flag，走老路，不改现有语义。
+        # 哈希口径必须与入库形态一致：submit_episode 存的是脱敏后的
+        # title/steps。但入库形态按提交通道有两种：REST 经 model_dump()
+        # 会带 observation/error 的 None 键，MCP/capture 的 dict 则不带；
+        # clear_all 的墓碑直接对入库形态哈希，所以两种形态都要查，
+        # 只查一种会漏拦另一通道提交后被遗忘的轨迹。
+        from app.redact import redact
+        from app.tombstone import is_episode_tombstoned
+        check_steps_dropped = []
+        check_steps_full = []
+        for s in req.steps:
+            dropped = {}
+            full = {}
+            for k, v in s.model_dump().items():
+                full[k] = redact(v) if isinstance(v, str) else v
+                if v is not None:
+                    dropped[k] = full[k]
+            check_steps_dropped.append(dropped)
+            check_steps_full.append(full)
+        title = redact(req.title)
+        if is_episode_tombstoned(db, u.app_id, u.user_id,
+                                 title, check_steps_dropped) or \
+                is_episode_tombstoned(db, u.app_id, u.user_id,
+                                      title, check_steps_full):
+            raise HTTPException(status_code=409,
+                                detail={"code": "tombstoned"})
     try:
         ep = submit_episode(db, u, source=req.source, title=req.title, outcome=req.outcome,
                             steps=[s.model_dump() for s in req.steps], cost=req.cost,

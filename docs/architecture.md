@@ -619,6 +619,72 @@ sequenceDiagram
   显示“到期 <日期>”，status=expired 显示“已过期”徽标；星图不动；
   账本页不做，API 已有）。
 
+## 5.18 CLI 自动采集钩子（第 39 轮）
+
+缺口：episode 此前只能人工提交（MCP `memory_episode_submit`、
+REST `/v1/episodes`、第 12 轮 JSONL 批量导入），CLI 会话结束时
+不自动产生轨迹。本轮给 Codex、Grok Build、Gemini CLI 三个 CLI
+形态接 SessionEnd 采集；Cursor IDE 与消费级 App/Web 不在内。
+
+- **接点（均核实）**：Codex 用 `~/.codex/hooks.json` 或 config.toml
+  内联 `[hooks]` 的 `SessionEnd`（仅提示性、不可阻断，默认超时
+  1s、上限 3s；非托管 hook 须用户在 TUI `/hooks` 按哈希复核信任，
+  `codex exec` 下未受信 hook 静默跳过）；Gemini CLI 用 settings.json
+  的 `SessionEnd`，hook 输入含 `session_id`、`transcript_path`、
+  `cwd`；Grok Build 用 `~/.grok/hooks/*.json` 的 `SessionEnd`，
+  官方 hooks 文档确认事件 JSON 含 `sessionId`、`cwd`、
+  `workspaceRoot`，被动事件 stdout 被忽略、超时/崩溃 fail-open。
+- **形态：hook 只写 marker，解析与提交全离线**。hook 脚本
+  （`scripts/capture-hooks/bw_hook.py`，stdlib-only）只往 outbox
+  追加一行 `{cli, session_id, cwd, transcript_path?, ended_at}`，
+  不含任何会话内容，永远输出 `{}`、永远 exit 0；harvester
+  （`scripts/capture_cli.py harvest`）再按 marker 找 transcript、
+  建 episode、POST `/v1/episodes`。hook 内做重活一定撞上
+  Codex 3s 帽，故不做。
+- **解析两档**（`app/capture.py`，纯函数）：细粒度抽取是
+  best-effort——Codex rollout JSONL（`$CODEX_HOME/sessions/...`
+  布局是观测行为、非官方契约）只认用户文本 / function_call /
+  function_call_output，余者跳过；Gemini transcript 按
+  messages/turns + parts（text/functionCall/functionResponse）抽；
+  Grok session 文件（`~/.grok/sessions/`，含 prompts/responses/
+  tool calls）只认通用形状。解不出或为空时回落粗粒度：标题取
+  首 prompt，取不到用 `"<cli> 会话 <id>"`，步骤至少一条（服务层
+  要求 steps 非空）。caps 与服务端 pydantic 对齐：title 500、
+  steps 200、action 500、observation/error 2000、cost 20 键且
+  4096 字符。outcome 是启发式：wrapper 非 0 退出 → failure，
+  有 error 步 → partial，其余 → success；hook 路无 exit code，
+  不做 NLP 猜测。
+- **脱敏与门禁**：harvester 提交前对 title/steps/cost 全量过
+  `app.redact.redact`（与 `submit_episode` 入库脱敏同一套规则），
+  服务端入库时再脱敏一次；marker 与 ledger 不含会话内容，盘上
+  outbox 本身不含敏感文本。同意门直接复用服务端：REST 未同意 /
+  已暂停 → skipped，harvester 把 marker 移入 `.skipped/` 不再重试。
+  tombstone：`EpisodeSubmitRequest` 新增可选字段
+  `tombstone_check`（默认 False，手动提交行为不动）；capture
+  提交一律带它，命中已遗忘内容时服务端回 409
+  `{"code": "tombstoned"}`、不落库，marker 移入 `.tombstoned/`；
+  哈希口径与入库形态一致（脱敏后 title/steps），但入库形态按通道
+  有两种——REST 经 model_dump() 带 None 键、MCP/capture 的 dict
+  不带，clear_all 的墓碑直接对入库形态哈希——所以检查端双形态
+  都查，命中任一即 409，只查一种会漏拦另一通道的已遗忘轨迹。
+- **去重与项目**：主键 `bw-cap:{cli}:{session_id}`（经
+  `Idempotency-Key` header，服务端命中即返回已有）；本地
+  `ledger.json` 让重跑零往返跳过。边界：人工提交只有复用该 key
+  才去重，否则是两条 episode（内容指纹只覆盖一字不差的重复，
+  文档明说不假装全覆盖）。project 取自 cwd 的 git 顶层 basename，
+  失败回落 cwd basename，≤128 字（fix6 分桶语义不变）。
+- **失败隔离**：harvester 每 marker 独立 try/except；网络/5xx →
+  留原地、attempts+1（≥5 次进 `.failed/`）；4xx（除 409）与解析
+  失败 → `.failed/`；transcript 定位不上 → `.unresolved/`，不伪造。
+  wrapper（`capture_cli.py run --cli … -- <命令>`）不解析任何一家
+  CLI 的 JSON 流 schema（均未确立为稳定契约），只取 prompt、
+  exit code、输出尾部拼粗粒度 episode；子进程超时默认 600s，
+  CLI 未安装记 failure episode（127），wrapper 自身不崩溃。
+- **默认关闭**：`install` 本身就是 opt-in（只写用户层配置，保留
+  既有 hook、幂等；`uninstall` 只删自家条目）；`BRAINWEAVE_CAPTURE_OFF=1`
+  时 harvest 只 dry-run 不 POST。无新迁移，无新服务端环境变量，
+  前端不动（产出的是普通 episode，走已有 episode 视图）。
+
 ## 6. 非功能
 - **隔离**：每条 SQL 带 `app_id + user_id`，Postgres RLS 兜底；C 端最怕的是用户 A 看到用户 B 的记忆，评测集里“串用户”为硬门禁。
 - **规模与成本**：C 端用户多，按用户限流（写入/召回 QPS、每日抽取次数）；抽取按会话结束或每 N 轮批量触发，控制 LLM 成本；记录每用户 token 用量。
