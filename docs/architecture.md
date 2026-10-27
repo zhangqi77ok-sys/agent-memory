@@ -685,6 +685,59 @@ REST `/v1/episodes`、第 12 轮 JSONL 批量导入），CLI 会话结束时
   时 harvest 只 dry-run 不 POST。无新迁移，无新服务端环境变量，
   前端不动（产出的是普通 episode，走已有 episode 视图）。
 
+## 5.19 多模态入库（第 40 轮）
+
+缺口：记忆系统此前只吃文本轨迹；报错截图、语音复盘进不来。
+本机没有 vision API、没有语音转录服务（无 tesseract、无 PIL、
+无 whisper），本轮不装 OCR 引擎、不接模型接口、不伪造解析结果。
+
+- **形态：文本层优先**。截图与语音以调用方提供的文本层入库——
+  客户端 OCR 结果、用户手写描述、外部转录文本；origin 枚举
+  `ocr/transcript/note/external` 只做标注，不做可信度加权（服务端
+  无法验证 OCR/转录质量，加权就是编造）。服务端永远不声称“看懂了
+  图片”或“听懂了音频”。
+- **入库形态：媒体备忘 = episode + 来源 sidecar**。一条媒体备忘就是
+  一条标准 TaskEpisode（source=`screenshot`/`voice-memo`，steps 由
+  文本层切块而成），另有一行 `memory_media_ref`（新迁移 0031）挂接
+  来源元数据：kind、origin、filename、mime、byte_size（调用方申报值）、
+  sha256、external_uri。原文件字节永不入库；external_uri 只是调用方
+  提供的指针，服务端永不拉取、不解析、不校验可达性（SSRF 与隐私
+  风险在此掐断）。文本层切块：先按行切、再把超长行硬切成 ≤2000 字块，
+  步数上限 200，超了截断并在最后一步追加截断标记，不静默丢尾巴。
+- **召回：不新增召回臂**。媒体备忘经 distill 提炼成 insight 后自然进入
+  brief，reason/score 与普通经验完全一致；COS_MIN、COS_MIN_PURE、
+  类比 0.45 一字不动。直接回查走 `GET /v1/media` 与
+  `GET /v1/media/{episode_id}`（他人/不存在/开关关闭一律 404，
+  与 dismiss 同形）。面板已有 EpisodeDetailPanel，媒体备忘在现有
+  episode 视图里可见，本轮前端不动。
+- **门禁全复用**：REST 与 MCP 入口都先过 `memory_enabled`（未同意 →
+  skipped）；文本层入库前全量过 `app.redact.redact`（submit_episode
+  入库时再脱敏一次）；tombstone 检查默认就开（无 opt-out），对脱敏
+  后 title/steps 的两种入库形态（带 None 键 / 去 None 键）都查，
+  命中任一 → 409 `{"code": "tombstoned"}`、不落库（第 39 轮教训）。
+  project 由调用方传，fix6 分桶语义不变；outcome 由调用方传，
+  默认 partial（不替用户猜一次复盘是成是败）。
+- **同事务与删除**：episode 与 sidecar 同一 session 同一事务落库
+  （submit_episode 新增可选参数 `episode_id`，默认 None = 老行为；
+  调用方预生成 id、先把 sidecar 行挂进 session、由本次 commit 一并
+  提交；提交抛错时回滚连 sidecar 一起清）。sidecar 表进 fix8 的
+  CLEAR_ALL_MODELS（注册表测试钉住）。单条 forget 目前只支持
+  insight/fact，episode 没有单条 forget 入口——媒体备忘继承这一现状：
+  删单条 = clear_all，或 forget 它提炼出的 insight；服务端从未持有
+  原文件字节，删 sidecar 即删服务端全部痕迹，用户本地文件不在
+  服务端删除能力内，文档明说。
+- **失败隔离与批量**：`submit_media_batch` 逐条独立 try/except，
+  一条失败只记该条 error，不中断整批；整批接口只对认证/同意门失败
+  返回错误码，条目级失败一律进结果数组。mime 白名单（图片
+  png/jpeg/webp/gif；音频 mpeg/wav/ogg/mp4/webm）之外、空文本层、
+  申报大小超 100MB 一律按条目错误明确拒绝，不静默丢弃。
+  CLI 脚本 `scripts/media_cli.py`（stdlib-only）：`submit` 从文本层文件
+  读入（.txt 原文；.srt/.vtt 剥时间戳行与序号行），`--original` 给出
+  原文件路径时只在本地算 sha256 + 大小 + 按扩展名猜 mime 作元数据，
+  原文件字节永不上传；读不到文本层文件时非 0 退出，不提交空备忘。
+- **做不到的（残留）**：服务端像素语义理解；服务端语音转录（ASR）；
+  原文件 blob 入库与 served 回放；面板媒体角标/筛选（展示轮次的事）。
+
 ## 6. 非功能
 - **隔离**：每条 SQL 带 `app_id + user_id`，Postgres RLS 兜底；C 端最怕的是用户 A 看到用户 B 的记忆，评测集里“串用户”为硬门禁。
 - **规模与成本**：C 端用户多，按用户限流（写入/召回 QPS、每日抽取次数）；抽取按会话结束或每 N 轮批量触发，控制 LLM 成本；记录每用户 token 用量。

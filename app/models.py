@@ -253,6 +253,29 @@ class MemoryReminder(UserScoped, Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
+class MemoryMediaRef(UserScoped, Base):
+    """媒体备忘来源 sidecar（第 40 轮）：一条媒体备忘的引用元数据。
+
+    本体是 TaskEpisode（source=screenshot/voice-memo，steps 即文本层），
+    本表只挂来源信息，不存原文件字节——原文件留在用户手里，external_uri
+    只是调用方提供的指针，服务端永不拉取、不解析、不校验可达性。
+    文本层来源 origin 只做标注（ocr/transcript/note/external），不做
+    可信度加权：服务端无法验证 OCR/转录质量，加权就是编造。
+    """
+
+    __tablename__ = "memory_media_ref"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
+    episode_id: Mapped[str] = mapped_column(String(32), index=True)
+    kind: Mapped[str] = mapped_column(String(16))  # screenshot|voice
+    origin: Mapped[str] = mapped_column(String(16))  # ocr|transcript|note|external
+    filename: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    mime: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    byte_size: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 调用方申报值
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    external_uri: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class MemoryReminderDelivery(UserScoped, Base):
     """提醒投递账本（第 38 轮，审计 F-13 提醒部分）。
 

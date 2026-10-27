@@ -242,6 +242,44 @@ def memory_episode_submit(title: str, outcome: str = "success", steps: list[dict
 
 
 @mcp.tool()
+def memory_media_submit(kind: str, origin: str, title: str, text: str,
+                        outcome: str = "partial", project: str = "",
+                        idempotency_key: str = "", filename: str = "",
+                        mime: str = "", byte_size: int = 0,
+                        sha256: str = "", external_uri: str = "") -> dict:
+    """截图 / 语音复盘入库（第 40 轮）：把文本层当成一条媒体备忘存入记忆。
+
+    服务端不解析像素、不转录音频：text 必须是调用方已准备好的文本层
+    （客户端 OCR 结果、用户手写描述、外部转录文本），origin 标注它的来源。
+    kind: screenshot（报错截图）或 voice（语音复盘）；mime 必须在白名单内；
+    原文件字节永不上传入库，external_uri 只是指针字符串。
+    入库后走正常提炼管线：复盘出的经验会在以后同类任务的简报里出现。
+    返回 episode_id 表示已受理，skipped=True 表示用户未开启记忆，
+    error 表示条目被拒绝（原因见 error 字段，如 tombstoned 表示内容已被遗忘）。
+    """
+    from app.media import MediaError, submit_media_memo
+
+    with _session() as (db, u):
+        if not memory_enabled(db, u):
+            return {"episode_id": None, "skipped": True,
+                    "note": "该用户未同意开启记忆：先通过 REST /v1/me/settings 同意，"
+                            "或启动服务时设 MEMORY_AUTO_CONSENT=1"}
+        try:
+            ep, _ref = submit_media_memo(
+                db, u, kind=kind, origin=origin, title=title[:500], text=text,
+                outcome=outcome if outcome in ("success", "failure", "partial") else "partial",
+                project=(project or os.environ.get("MEMORY_PROJECT") or "").strip()[:128] or None,
+                idempotency_key=idempotency_key[:128] or None,
+                filename=filename or None, mime=mime or None,
+                byte_size=byte_size or None, sha256=sha256 or None,
+                external_uri=external_uri or None)
+        except MediaError as e:
+            return {"episode_id": None, "skipped": False, "error": e.code, "note": str(e)}
+    return {"episode_id": ep.id, "skipped": False, "duplicate": False,
+            "note": "已受理为媒体备忘，后台 Worker 会复盘提炼经验"}
+
+
+@mcp.tool()
 def memory_brief(task: str, k: int = 5, project: str = "", session_id: str = "") -> dict:
     """开始一个新任务之前调用：按任务情境从经验库捞出适用的历史教训、打法、避坑与省钱招。
 

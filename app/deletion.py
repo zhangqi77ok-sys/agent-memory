@@ -34,6 +34,7 @@ CLEAR_ALL_MODELS = (
     m.TaskEpisode,
     m.MemoryReminder,
     m.MemoryReminderDelivery,  # 第 38 轮：提醒投递账本（用户域派生账，随行走）
+    m.MemoryMediaRef,  # 第 40 轮：媒体备忘来源 sidecar（用户域派生账，随行走）
     m.BriefDelivery,
     m.BriefDeliveryEdge,
     m.ConsolidationReport,

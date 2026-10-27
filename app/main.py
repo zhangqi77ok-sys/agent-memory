@@ -7,6 +7,7 @@ from sqlalchemy import text
 from app.api.admin import router as admin_router
 from app.api.episodes import router as episodes_router
 from app.api.me import router as me_router
+from app.api.media import router as media_router
 from app.api.memories import router as memories_router
 from app.api.reminders import router as reminders_router
 from app.auth import bound_user, is_valid_service_key
@@ -89,6 +90,7 @@ def create_app(s: Settings = settings) -> FastAPI:
 
     application.include_router(memories_router)
     application.include_router(episodes_router)
+    application.include_router(media_router)
     application.include_router(me_router)
     application.include_router(reminders_router)
     application.include_router(admin_router)

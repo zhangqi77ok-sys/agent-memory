@@ -121,7 +121,8 @@ def validate_episode(title: str, outcome: str, steps: list[dict], cost: dict | N
 def submit_episode(db: Session, u: UserContext, *, source: str, title: str,
                    outcome: str, steps: list[dict], cost: dict,
                    idempotency_key: str | None = None,
-                   project: str | None = None) -> TaskEpisode:
+                   project: str | None = None,
+                   episode_id: str | None = None) -> TaskEpisode:
     """落一条 episode。带 idempotency_key 时同一键只落一次：客户端（尤其会自己重试的
     工具调用）超时重试不会产生重复轨迹、不会重复烧提炼——语义与 /v1/memories 的写入幂等一致：
     查已有 → 返回已有；并发同键靠唯一约束兜底，撞上后回滚再查。"""
@@ -130,10 +131,15 @@ def submit_episode(db: Session, u: UserContext, *, source: str, title: str,
         if existing is not None:
             return existing
     validate_episode(title, outcome, steps, cost)
+    # 第 40 轮：调用方预生成 id 时用它建行（媒体备忘的 sidecar 需先挂进
+    # 同一 session、由本次 commit 一并提交）；默认 None = 老行为。
+    ep_kwargs = {}
+    if episode_id:
+        ep_kwargs["id"] = episode_id
     ep = TaskEpisode(app_id=u.app_id, user_id=u.user_id, source=source, title=redact(title),
                      outcome=outcome, steps=_redact_steps(steps), cost=_redact_cost(cost),
                      idempotency_key=idempotency_key, project=project,
-                     salience=episode_salience(outcome, cost))
+                     salience=episode_salience(outcome, cost), **ep_kwargs)
     db.add(ep)
     try:
         db.commit()

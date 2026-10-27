@@ -25,7 +25,7 @@
 
 - **对话写入**：`POST /v1/memories`，带 `Idempotency-Key` 幂等键，同一用户 + 同一键重复提交返回同一个 `job_id`，不重复写。
 - **抽取管线**：Worker 异步处理——脱敏（手机号、邮箱、身份证号、银行卡号先换成占位符）→ LLM 抽取 → 代码裁决 ADD / UPDATE / NOOP → 旧行 `valid_to=now()` 失效、新行 `version+1`。模型连不上重试最多 3 次后进死信，坏输出整批丢弃、不入库。
-- **任务过程提交**：`POST /v1/episodes`，任务结束后提交全过程（目标、步骤、结果、成本），Worker 复盘提炼为经验条目；提炼出的每条经验必须附轨迹原文引文，核对不上的标记未验证并降权。Codex / Grok / Gemini 三个 CLI 可装 SessionEnd 钩子自动采集（`scripts/capture_cli.py install`，默认关闭；hook 只写 marker、解析与提交离线到 harvester，脱敏与同意门、墓碑禁写全穿透）。
+- **任务过程提交**：`POST /v1/episodes`，任务结束后提交全过程（目标、步骤、结果、成本），Worker 复盘提炼为经验条目；提炼出的每条经验必须附轨迹原文引文，核对不上的标记未验证并降权。Codex / Grok / Gemini 三个 CLI 可装 SessionEnd 钩子自动采集（`scripts/capture_cli.py install`，默认关闭；hook 只写 marker、解析与提交离线到 harvester，脱敏与同意门、墓碑禁写全穿透）。截图 / 语音复盘以文本层入库为媒体备忘（`POST /v1/media`，`scripts/media_cli.py submit`；服务端不解析像素、不转录音频、不存原文件字节，文本层经提炼后进简报）。
 - **语义去重**：主题措辞不同但意思相同（向量 ≥0.95）的事实与偏好不再并存；经验合并时败者的表述以附录留痕，不静默丢弃。
 
 ### 召回与简报
@@ -91,7 +91,7 @@ python -m app.lite              # 单进程全套：SQLite + 自动迁移 + 自�
 cd deploy && cp .env.example .env   # 按 docs/deploy.md 填好密钥与模型地址
 docker compose -p agent-memory up -d
 curl -s 127.0.0.1:8090/readyz        # 就绪探针
-alembic current                       # 应为 0030_reminder_ttl_ledger
+alembic current                       # 应为 0031_media_ref
 ```
 
 第 32 轮部署注意：无新迁移（仍到 0025）、无新环境变量，拉代码即生效；写时织网失败不影响写入，漏连的边由巡检补。
@@ -109,6 +109,8 @@ alembic current                       # 应为 0030_reminder_ttl_ledger
 第 38 轮部署注意：新迁移 0030（提醒表加 expires_at + 投递账本表 memory_reminder_delivery），无回填——旧提醒默认永不过期、旧展示不补账；无新环境变量；不设 expires_at 的提醒行为不变；巡检新增提醒过期步（只标已到截止时间的行）。
 
 第 39 轮部署注意：无新迁移、无新服务端环境变量——采集是客户端脚本（`scripts/capture_cli.py install` 写三家 CLI 的用户层 SessionEnd hook，`harvest` 提交），拉代码即生效；不跑 install 的机器行为不变；采集提交带 `tombstone_check` 时命中已遗忘内容回 409、不落库；可选环境变量只有 `BRAINWEAVE_CAPTURE_OUTBOX` 与 `BRAINWEAVE_CAPTURE_OFF`（只列名）。
+
+第 40 轮部署注意：新迁移 0031（媒体备忘来源 sidecar 表 memory_media_ref），无回填——旧 episode 没有 sidecar，不补；无新服务端环境变量；不跑 media 提交的机器行为不变；媒体提交默认就查 tombstone，命中已遗忘内容回 409、不落库；服务端不存原文件字节，external_uri 只是调用方提供的指针、服务端永不拉取。
 
 拓扑：`deploy/docker-compose.yml`（api + worker + pgvector + web），Postgres 不对外暴露端口；api 启动时先 `alembic upgrade head` 再起服务；worker 2 副本，用独立账号 `memsvc_worker`（BYPASSRLS、非超级用户、非 owner）；api 运行账号 `memsvc_app` 受行级安全策略约束；外层 Nginx 把 `/memory/` 转到 api、`/memory/ui/` 转到 web（模板见 `deploy/nginx/gateway-memory.conf.example`）。
 

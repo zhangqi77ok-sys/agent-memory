@@ -364,3 +364,56 @@ class BriefResponse(BaseModel):
     # edges: [{link_id, src, dst, relation, strength}]}；每条经验的
     # linked_from 路径已在 InsightOut 上，不在这里重复。
     graph: dict | None = None
+
+
+# 第 40 轮：媒体备忘（截图 / 语音复盘）。文本层由调用方提供（客户端 OCR、
+# 用户手写描述、外部转录文本）；服务端不解析像素、不转录音频，只存元数据
+# 引用，不存原文件字节。
+class MediaSubmitRequest(UserScopedRequest):
+    kind: str = Field(pattern="^(screenshot|voice)$")
+    origin: str = Field(pattern="^(ocr|transcript|note|external)$")
+    title: str = Field(min_length=1, max_length=500)
+    text: str = Field(min_length=1, max_length=24000)  # 文本层（与轨迹渲染上限同口径）
+    outcome: str = Field(default="partial", pattern="^(success|failure|partial)$")
+    project: str | None = Field(default=None, max_length=128)
+    filename: str | None = Field(default=None, max_length=256)
+    mime: str | None = Field(default=None, max_length=64)
+    byte_size: int | None = Field(default=None, ge=0)
+    sha256: str | None = Field(default=None, max_length=64)
+    external_uri: str | None = Field(default=None, max_length=512)
+
+
+class MediaBatchRequest(UserScopedRequest):
+    items: list[MediaSubmitRequest] = Field(min_length=1, max_length=50)
+
+
+class MediaBatchItemResult(BaseModel):
+    index: int
+    ok: bool
+    episode_id: str | None = None
+    error: str | None = None
+
+
+class MediaBatchResponse(BaseModel):
+    results: list[MediaBatchItemResult]
+
+
+class MediaAccepted(BaseModel):
+    episode_id: str | None
+    skipped: bool = False  # 用户未同意或已暂停记忆：不落任何数据
+    duplicate: bool = False
+
+
+class MediaOut(BaseModel):
+    episode_id: str
+    kind: str
+    origin: str
+    title: str
+    outcome: str
+    project: str | None = None
+    filename: str | None = None
+    mime: str | None = None
+    byte_size: int | None = None
+    sha256: str | None = None
+    external_uri: str | None = None
+    created_at: datetime | None = None
