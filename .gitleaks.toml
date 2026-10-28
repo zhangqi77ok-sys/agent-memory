@@ -1,0 +1,8 @@
+# Fake secrets in unit tests (redaction / auth fixtures). Real secrets must never land in tests/.
+title = "brainweave-memory"
+
+[allowlist]
+description = "Synthetic secrets used only in automated tests"
+paths = [
+  '''(^|/)tests/''',
+]
