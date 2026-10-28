@@ -102,14 +102,18 @@ pipeline {
           [ $ok = 1 ] || { echo 'CI Postgres 未就绪'; exit 1; }
           sleep 2
           . .venv/bin/activate
-          TEST_DATABASE_URL=postgresql+psycopg://memory:memory@$PGC:5432/memory_test pytest -q -rs --junitxml=report-pg.xml
+          # EMBEDDING_DIM=2：假嵌入器是 2 维；生产缺省 1536，不受影响（见 scripts/test-pg.sh）
+          EMBEDDING_DIM=2 TEST_DATABASE_URL=postgresql+psycopg://memory:memory@$PGC:5432/memory_test pytest -q -rs --junitxml=report-pg.xml
           python3 - <<'PY2'
 import xml.etree.ElementTree as ET
 r = ET.parse('report-pg.xml').getroot()
 s = r if r.tag == 'testsuite' else r.find('testsuite')
 tests, skipped = int(s.get('tests', 0)), int(s.get('skipped', 0))
-print(f'[gate] postgres tests={tests} skipped={skipped}')
-assert tests > 0 and skipped == 0, f'Postgres stage ran {tests} tests, {skipped} skipped'
+failures, errors = int(s.get('failures', 0)), int(s.get('errors', 0))
+print(f'[gate] postgres tests={tests} skipped={skipped} failures={failures} errors={errors}')
+assert tests > 0 and failures == 0 and errors == 0, (
+    f'Postgres stage ran {tests} tests, {skipped} skipped, {failures} failed, {errors} errors'
+)
 PY2
         '''
       }
