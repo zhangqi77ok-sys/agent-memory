@@ -38,6 +38,7 @@ _u = urlparse(ADMIN_URL)
 HOST = _u.hostname or "127.0.0.1"
 PORT = str(_u.port or 5432)
 USER = _u.username or "memory"
+PASS = _u.password or ""
 SRC_DB = "memory_drill_src"
 DST_DB = "memory_drill_dst"
 DRILL_USER = "drill-alice"
@@ -45,7 +46,8 @@ APP = settings.app_id
 
 
 def _db_url(dbname: str) -> str:
-    return f"postgresql+psycopg://{USER}@{HOST}:{PORT}/{dbname}"
+    auth = f"{USER}:{PASS}" if PASS else USER
+    return f"postgresql+psycopg://{auth}@{HOST}:{PORT}/{dbname}"
 
 
 def _run(cmd, env_extra, timeout=300):
