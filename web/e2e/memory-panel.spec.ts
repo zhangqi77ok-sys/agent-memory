@@ -121,7 +121,30 @@ async function mockApi(page: Page) {
         ]),
       })
     }
+    if (path.endsWith('/v1/me/identity') && method === 'GET') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ app_id: 'tiancode', user_id: 'alice', bound: false }),
+      })
+    }
+    if (path.includes('/v1/me/insights') && method === 'GET') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ items: [], total: 0, offset: 0, limit: 100 }),
+      })
+    }
     return route.fulfill({ status: 404, body: 'unmocked ' + method + ' ' + path })
+  })
+
+  // reminders live under /v1/reminders (not /v1/me/*); loadAll fetches them after consent
+  await page.route('**/memory/v1/reminders**', async (route) => {
+    const req = route.request()
+    if (req.method() === 'GET') {
+      return route.fulfill({ status: 200, contentType: 'application/json', body: '[]' })
+    }
+    return route.fulfill({ status: 404, body: 'unmocked reminders ' + req.method() })
   })
 }
 
